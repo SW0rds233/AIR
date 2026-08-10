@@ -1,0 +1,119 @@
+from __future__ import annotations
+
+"""论文大纲生成节点（STORM 式 pre-writing 阶段）
+
+参考: STORM 的两阶段架构 — 先收集引用+生成大纲，再填充正文。
+大纲先行可保证: 分类体系 MECE、结构清晰、覆盖全面，避免写作时结构混乱。
+"""
+
+import logging
+
+from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_openai import ChatOpenAI
+
+from src.config import LLM_CONFIG
+from src.graph.state import PipelineState
+from src.utils.cost_tracker import tracker, extract_usage_metadata
+from src.utils.context_budget import budget_text
+
+logger = logging.getLogger(__name__)
+
+OUTLINE_GENERATOR_SYSTEM = """你是"论文大纲规划专家"，一名擅长设计综述论文结构的学者。
+
+你的任务：根据文献综述素材和可信参考文献清单，设计一份结构清晰、分类合理（MECE）的综述论文大纲。
+
+## 大纲设计要求
+
+1. **分类体系（Taxonomy）必须 MECE**（相互独立、完全穷尽）
+2. 大纲层级为: 章节(##) → 小节(###) → 要点(每个小节 2-4 个要点)
+3. 每个小节标注计划引用的文献编号（来自可信参考文献清单）
+4. 标注哪些章节需要配图（如分类体系图、时间线图、对比图）
+5. 标注哪些章节需要配表（如方法对比表、性能对比表）
+
+## 输出格式
+
+```markdown
+# 论文大纲: [主题]
+
+## 1. 引言
+### 1.1 背景与动机
+- 要点1 [引文1]
+- 要点2 [引文3]
+- 配图: 无
+### 1.2 综述范围与贡献
+...
+
+## 2. 分类体系总览
+### 2.1 分类维度
+- ...
+- 配图: [图1: 分类体系图]
+...
+
+## N. 挑战与未来方向
+...
+```
+
+## 原则
+
+- 分类维度要在引言后立即给出总览（2.x 节）
+- 每个大类下的小节数量均衡（3-6 个）
+- 引用编号必须来自可信参考文献清单，不得自创编号
+- 大纲应能支撑 8000-15000 字的正文
+"""
+
+
+def run_outline_generation(state: PipelineState) -> dict:
+    """流水线节点：基于素材+引用清单生成论文大纲"""
+    topic = state.get("research_topic", "")
+    lit_notes = state.get("literature_review_notes", "")
+    verified_refs = state.get("verified_references", [])
+
+    if not lit_notes:
+        return {
+            "error": "文献素材为空，无法生成大纲",
+            "current_phase": "outline_generation",
+        }
+
+    llm = ChatOpenAI(
+        model=LLM_CONFIG["model"],
+        api_key=LLM_CONFIG["api_key"],
+        base_url=LLM_CONFIG["base_url"],
+        temperature=LLM_CONFIG["temperature"],
+    )
+
+    ref_block = ""
+    if verified_refs:
+        ref_lines = [
+            "### 可信参考文献清单（大纲中的引用编号必须来自这里）",
+            "",
+            "| # | 标题 | 年份 |",
+            "|---|------|------|",
+        ]
+        for e in verified_refs:
+            ref_lines.append(
+                f"| [{e.get('ref_number', '')}] | {e.get('title', '')} | {e.get('year', '')} |"
+            )
+        ref_block = "\n".join(ref_lines)
+
+    prompt = (
+        f"请为「{topic}」设计综述论文大纲。\n\n"
+        f"---文献综述素材---\n"
+        f"{budget_text(lit_notes, 20000, label='文献综述素材')}\n"
+        f"---素材结束---\n"
+        f"{ref_block}\n"
+        f"请按上述格式输出完整大纲。"
+    )
+
+    messages = [SystemMessage(content=OUTLINE_GENERATOR_SYSTEM), HumanMessage(content=prompt)]
+    result = llm.invoke(messages)
+    outline = result.content if hasattr(result, "content") else str(result)
+
+    usage = extract_usage_metadata(result)
+    if usage:
+        tracker.add_call(LLM_CONFIG["model"], usage, stage="outline_generation")
+
+    return {
+        "messages": [result],
+        "paper_outline": outline,
+        "current_phase": "outline_generation",
+    }

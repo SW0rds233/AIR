@@ -1,0 +1,49 @@
+# 环境变量
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+
+# 虚拟环境
+venv/
+.venv/
+
+# ChromaDB 向量库
+data/chroma/
+
+# 下载的 PDF
+data/pdfs/
+
+# 输出文件
+outputs/
+
+# 场馆缓存
+data/venue_cache.json
+
+# LangGraph 检查点
+data/pipeline_checkpoints.sqlite
+
+# LaTeX 编译临时文件
+*.aux
+*.log
+*.out
+*.toc
+*.bbl
+*.blg
+
+# 缓存
+.pytest_cache/
+*.sqlite3-journal
+
+# 系统文件
+.DS_Store
+Thumbs.db
