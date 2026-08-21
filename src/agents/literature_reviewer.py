@@ -1,19 +1,6 @@
 from __future__ import annotations
 
-"""文献查阅智能体：工具调用闭环 + 确定性检索桥接 + 综合生成综述素材
-
-重构要点（对比旧版）:
-1. 【架构修复】旧版只 llm_with_tools.invoke() 一次，工具结果从不回喂，
-   实测 notes 只有一句话"我将开始检索…"。新版改为 **agent 循环**：
-   调用 → 执行工具 → 工具结果（含错误）作为 tool 消息回喂 → 再次推理，
-   直至无工具调用或达到轮次上限（借鉴 HKUDS AI-Researcher 的
-   "[Tool Call Error] 以 role=tool 回灌" 失败注入式纠错）。
-2. 【数据桥接】LLM 工具调用收集的论文 + 确定性子查询检索的论文合并去重，
-   相关性过滤后，最终 **综合生成阶段** 把真实论文清单（标题/年份/来源/引用数/摘要）
-   喂给 LLM，产出有实际数据支撑的综述素材——不再依赖 LLM 空泛自述。
-3. 【模型分层】子查询生成 / 相关性打分用廉价模型（CHEAP_CONFIG），
-   综合生成用主模型（质量敏感）。
-"""
+"""文献查阅智能体：工具调用闭环 + 确定性检索桥接 + 综合生成综述素材"""
 
 import logging
 
@@ -130,11 +117,9 @@ def _format_papers_for_tool(papers: list[dict]) -> str:
 
 
 def _run_agent_loop(llm_with_tools, messages, all_papers, tool_budget=TOOL_RESULT_BUDGET) -> str:
-    """agent 循环: invoke → 执行工具 → 工具结果(含错误)回喂 → 再推理
+    """agent 循环: invoke → 执行工具 → 工具结果回喂 → 再推理
 
-    借鉴 HKUDS AI-Researcher:
-    - 工具错误以 [Tool Call Error] 文本作为 tool 消息回灌, LLM 自我修正
-    - 工具结果作为 tool 消息与对话同构，LLM 下一轮能读到
+    工具错误以 [Tool Call Error] 文本回灌，LLM 自我修正。
     """
     notes = ""
     for _round in range(MAX_TOOL_ROUNDS):
@@ -193,17 +178,18 @@ def _synthesize_notes(
     time_range: str,
     papers: list[dict],
 ) -> str:
-    """综合生成: 把真实论文清单喂给 LLM，产出有数据支撑的综述素材
-
-    修复: 旧版 notes 是 LLM 在"还没检索到任何论文"时的空泛自述。
-    新版先完成全部检索/过滤，再把论文清单注入 prompt，让 LLM 基于
-    真实论文数据撰写素材，写作节点拿到的素材才有实际内容。
-    """
+    """把真实论文清单喂给 LLM，产出有数据支撑的综述素材"""
     paper_lines = []
     for i, p in enumerate(papers[:SYNTHESIS_MAX_PAPERS], 1):
+        venue = (p.get("venue") or p.get("source") or "").strip()
+        doi = (p.get("doi") or "").strip()
+        # 标注正式出处 (有 DOI 的论文优先显示 DOI, 避免 LLM 误判为 arXiv 预印本)
+        src = venue or "来源未标注"
+        if doi:
+            src = f"{src} | DOI: {doi}"
         line = (
             f"{i}. {p.get('title', '')} | {p.get('year', '')} | "
-            f"{p.get('source', '')} | 被引 {p.get('citations', 0)}"
+            f"{src} | 被引 {p.get('citations', 0)}"
         )
         abstract = (p.get("abstract") or "").strip()
         if abstract:
@@ -224,7 +210,10 @@ def _synthesize_notes(
         f"4. 方法对比分析\n5. 研究脉络与趋势\n6. 参考文献列表（BibTeX）\n\n"
         f"纪律:\n"
         f"- 只能描述清单中的论文；清单里没有的论文、数据、结论一律不得编造\n"
-        f"- 每篇被提及的论文必须能对应到清单中的真实条目\n"
+        f"- 每篇被提及的论文必须能对应到清单中的真实条目，作者名必须来自清单\n"
+        f"- 生成 BibTeX 时，严格以清单信息为准：清单中有 DOI 的条目必须用该 DOI 和"
+        f"正式期刊/会议名；清单中有作者的必须写全作者；严禁标注 note={{arXiv preprint}}"
+        f"或 howpublished={{arXiv}}，除非清单确实只给了 arXiv 链接且无 DOI/出处\n"
         f"- 清单不足 20 篇时明确说明覆盖有限\n"
     )
     result = llm.invoke(
@@ -294,13 +283,43 @@ def run_literature_review(state: PipelineState) -> dict:
         except Exception as e:
             print(f"  [warning] 子查询检索失败 ({q}): {e}")
 
+    # ===== 阶段 2.5: 中文文献补充 (官方 API + 人工 PDF) =====
+    # 已移除 "LLM 建议中文文献" 路径: LLM 生成的作者名 (如 "李华,张鹏,王磊") 疑似
+    # 占位编造, 且 CrossRef 对中文期刊 DOI 覆盖不全 (返回 404), 无法自动补全卷期页码,
+    # 导致参考文献维度持续被审稿人扣分。中文文献改由 CNKI/万方官方 API (真实元数据)
+    # 与 data/manual_pdfs 人工导入 (人已确认) 提供。
+    try:
+        from src.tools.chinese_sources import cnki_search, wanfang_search
+
+        # CNKI/万方官方 API (配置 key 时启用, 返回真实作者/卷期页元数据)
+        for name, fn in (("CNKI", cnki_search), ("万方", wanfang_search)):
+            try:
+                results = fn(topic, 10)
+                if results:
+                    merge_papers(all_papers, results)
+                    print(f"  [中文文献] {name} API 检索到 {len(results)} 篇")
+            except Exception as e:
+                print(f"  [warning] {name} 检索失败: {e}")
+    except Exception as e:
+        print(f"  [warning] 中文文献补充跳过: {e}")
+
+    # 保存全部未过滤论文（供 PDF 下载节点使用，避免过滤后损失大量 arXiv 全文）
+    unfiltered_papers = list(all_papers)
+    print(f"  [文献检索] 子查询追加后共 {len(all_papers)} 篇（未过滤）")
+
     # ===== 阶段 3: 相关性过滤 (规则 + LLM 打分, 廉价模型) =====
     from src.rag.relevance_filter import rule_filter, llm_score_filter
 
+    rule_kept = len(all_papers)
     all_papers = rule_filter(all_papers, topic, user_kw)
+    rule_dropped = rule_kept - len(all_papers)
+    if all_papers and rule_dropped > 0:
+        print(f"  [规则过滤] 剔除 {rule_dropped} 篇, 保留 {len(all_papers)}")
     if all_papers:
         try:
+            before_llm = len(all_papers)
             all_papers = llm_score_filter(all_papers, topic, cheap_llm)
+            print(f"  [LLM过滤] 剔除 {before_llm - len(all_papers)} 篇, 保留 {len(all_papers)}")
         except Exception as e:
             print(f"  [warning] LLM 相关性打分跳过: {e}")
 
@@ -332,6 +351,19 @@ def run_literature_review(state: PipelineState) -> dict:
         all_papers = rule_filter(all_papers, topic, user_kw)
 
     print(f"  [文献过滤] 保留 {len(all_papers)} 篇相关论文")
+
+    # ===== 阶段 4.5: 出处解析 (综合生成前) =====
+    # arXiv 预印本在检索时无 DOI/正式期刊信息, 若不先解析, LLM 生成素材时会
+    # 把大量文献标为 howpublished={arXiv} + 作者缺证据, 导致审稿人误判
+    # "预印本占比过高/版本混淆"。此处先解析出处, 让素材用正式版信息。
+    try:
+        from src.tools.venue_resolver import resolve_venues_fast
+
+        resolved = resolve_venues_fast(all_papers, max_papers=80)
+        if resolved:
+            print(f"  [文献检索] 出处预解析: {resolved} 篇获得期刊信息")
+    except Exception as e:
+        print(f"  [warning] 出处预解析跳过: {e}")
 
     # ===== 阶段 5: 综合生成综述素材（真实论文数据驱动）=====
     notes = _synthesize_notes(
@@ -370,5 +402,6 @@ def run_literature_review(state: PipelineState) -> dict:
         "messages": messages,
         "literature_review_notes": notes,
         "retrieved_papers": all_papers,
+        "unfiltered_papers": unfiltered_papers,
         "current_phase": "literature_review",
     }

@@ -67,10 +67,10 @@ def generate_sub_queries(
     except Exception as e:
         logger.warning(f"子查询生成失败, 回退默认: {e}")
 
-    # 回退: 主题 + 关键词拆分
+    # 回退: 主题 + 关键词拆分 (按逗号, 复合词保持原子)
     fallback = [topic]
     if user_keywords:
-        for k in re.split(r"[,，;；\s]+", user_keywords):
+        for k in re.split(r"[,，;；]+", user_keywords):
             k = k.strip()
             if k and k not in fallback:
                 fallback.append(k)

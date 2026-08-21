@@ -19,6 +19,7 @@ from src.agents.citation_prechecker import (
     verify_reference_list,
     build_verified_reference_sheet,
 )
+from src.agents.citation_guard import check_citation_semantics
 
 
 def test_estimate_cost_deepseek():
@@ -158,6 +159,73 @@ def test_build_verified_reference_sheet():
     assert "只能引用" in sheet
 
 
+def test_check_citation_semantics_mismatch_removed():
+    refs = [
+        {"ref_number": 62, "authors": "Zehua Liu, Ning Jia, Yue Cao",
+         "title": "Video Swin Transformer"},
+        {"ref_number": 17, "authors": "Jiabao Yu, Aiqun Hu",
+         "title": "A Robust RF Fingerprinting Approach"},
+        {"ref_number": 9, "authors": "Ruiqi Kong, He Chen", "title": "DeepCRF"},
+    ]
+    draft = (
+        "Sankhe等人提出的ORACLE系统进行分类 [62]。\n"
+        "Yu等人提出多采样卷积神经网络 [17]，提升鲁棒性。\n"
+        "Chen等人提出DeepCRF [9]。\n"
+        "结合A与B [17][9]。\n"
+    )
+    r = check_citation_semantics(draft, refs)
+    # 只有 [62] 错配 (Sankhe 不在 Swin Transformer 作者中)
+    assert [m["num"] for m in r["mismatches"]] == [62]
+    assert "[62]" not in r["repaired_draft"]
+    # 正确引用与多引用句子不受影响
+    assert "[17]" in r["repaired_draft"]
+    assert "[9]" in r["repaired_draft"]
+
+
+def test_check_citation_semantics_no_false_positive():
+    refs = [
+        {"ref_number": 1, "authors": "Sankhe Kuldeep, Belgiovine Marco",
+         "title": "ORACLE: Optimized Radio classification"},
+    ]
+    draft = "Sankhe等人提出ORACLE系统 [1]。"
+    r = check_citation_semantics(draft, refs)
+    assert r["mismatches"] == []
+    assert "[1]" in r["repaired_draft"]
+
+
+def test_check_citation_semantics_bare_deng_mismatch():
+    """裸「X等」+ 归属动词: 检出作者错配 (实测案例: 正文 Zeng等[51] 而 [51] 作者为 Yu)"""
+    refs = [
+        {"ref_number": 51, "authors": "Jiabao Yu, Aiqun Hu, Guiyun Li",
+         "title": "A Robust RF Fingerprinting Approach Using Multisampling CNN"},
+    ]
+    draft = "Zeng等则较早探索了基于深度表示学习的端到端设备识别方法[51]。"
+    r = check_citation_semantics(draft, refs)
+    assert [m["num"] for m in r["mismatches"]] == [51]
+    assert "[51]" not in r["repaired_draft"]
+
+
+def test_check_citation_semantics_bare_deng_correct_author():
+    refs = [
+        {"ref_number": 51, "authors": "Jiabao Yu, Aiqun Hu", "title": "Multisampling CNN"},
+    ]
+    draft = "Yu等提出多采样率卷积神经网络方法[51]。"
+    r = check_citation_semantics(draft, refs)
+    assert r["mismatches"] == []
+    assert "[51]" in r["repaired_draft"]
+
+
+def test_check_citation_semantics_tech_term_enum_not_author():
+    """「Transformer等」「LoRa等」是技术名词枚举, 不得误判为作者引用"""
+    refs = [
+        {"ref_number": 5, "authors": "Mehdi Saeidi, Saeed Rasti", "title": "RF Fingerprinting"},
+    ]
+    draft = "Transformer等深度模型也被用于射频指纹识别[5]。LoRa等低功耗技术面临类似挑战[5]。"
+    r = check_citation_semantics(draft, refs)
+    assert r["mismatches"] == []
+    assert r["repaired_draft"].count("[5]") == 2
+
+
 if __name__ == "__main__":
     tests = [
         test_estimate_cost_deepseek,
@@ -169,6 +237,11 @@ if __name__ == "__main__":
         test_evidence_ledger_hallucinated,
         test_verify_reference_list,
         test_build_verified_reference_sheet,
+        test_check_citation_semantics_mismatch_removed,
+        test_check_citation_semantics_no_false_positive,
+        test_check_citation_semantics_bare_deng_mismatch,
+        test_check_citation_semantics_bare_deng_correct_author,
+        test_check_citation_semantics_tech_term_enum_not_author,
     ]
     passed = 0
     for t in tests:

@@ -15,8 +15,6 @@ from src.rag.format_validator import (
     check_markdown_tables,
     check_figure_numbering,
     check_citation_format,
-    generate_bibtex,
-    convert_to_gbt7714,
     format_check_report,
 )
 from src.rag.figure_generator import (
@@ -70,21 +68,6 @@ def test_citation_zero():
     assert r["ok"] is False
 
 
-def test_generate_bibtex():
-    b = generate_bibtex("Test Paper", "Zhang San", "2024", "https://x.com")
-    assert "@article" in b
-    assert "Test Paper" in b
-
-
-def test_convert_gbt7714():
-    result = convert_to_gbt7714(
-        "@article{a, title={Attention is all you need}, "
-        "author={Vaswani, Ashish and Shazeer, Noam}, year={2017}}"
-    )
-    assert "VASWANI A, SHAZEER N" in result
-    assert "Attention is all you need" in result
-
-
 def test_format_report_ok():
     draft = """
 # 测试
@@ -132,8 +115,6 @@ if __name__ == "__main__":
         test_markdown_table_col_mismatch,
         test_figure_numbering_missing,
         test_citation_zero,
-        test_generate_bibtex,
-        test_convert_gbt7714,
         test_format_report_ok,
         test_parse_taxonomy,
         test_parse_timeline,

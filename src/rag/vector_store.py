@@ -37,6 +37,8 @@ def get_embeddings() -> OpenAIEmbeddings:
         # 跳过 tiktoken 长度检查: 对中文/未知模型计算可能异常,
         # 且长度检查路径会引入非标准请求参数 (直接走标准 embedding 请求)
         check_embedding_ctx_length=False,
+        # 单次 embedding 请求超时: 避免云 API 无响应时长时间卡死 (默认 600s)
+        request_timeout=120,
     )
 
     # 首次使用时探测 embedding 可用性（DeepSeek 等服务商无 embedding API）
@@ -61,6 +63,14 @@ def get_embeddings() -> OpenAIEmbeddings:
 def embedding_available() -> bool:
     """Embedding 是否可用（用于调用方决定是否降级）"""
     global _EMBEDDING_CHECKED, _EMBEDDING_OK
+    # SKIP_EMBEDDING=1: 跳过向量化 (可选 RAG 增强), 直接返回 False
+    try:
+        from src.config import SKIP_EMBEDDING
+
+        if SKIP_EMBEDDING:
+            return False
+    except Exception:
+        pass
     if not _EMBEDDING_CHECKED:
         _EMBEDDING_CHECKED = True
         try:
@@ -142,11 +152,14 @@ def clear_collection(collection_name: str = None) -> None:
 
 
 
-def _add_documents_resilient(store, docs: list[Document]) -> tuple[int, int]:
+def _add_documents_resilient(store, docs: list[Document], depth: int = 0) -> tuple[int, int]:
     """递归降级入库: 批量失败 → 对半拆分重试; 单条失败 → 截断重试
 
     背景: 硅基流动 bge 对超 512 token 的文本返回 400 (code 20015),
     纯中文论文的块可能超限, 且一次批量提交中一个坏块会毁掉整篇论文。
+
+    稳定性: 深度上限 5 (最多 32 个叶子重试), 避免 embedding API 持续失败时
+    指数级拆分导致请求爆炸、进程看似"卡死"。
 
     Returns: (成功条数, 失败条数)
     """
@@ -156,6 +169,11 @@ def _add_documents_resilient(store, docs: list[Document]) -> tuple[int, int]:
         store.add_documents(docs)
         return len(docs), 0
     except Exception as e:
+        # 顶层记录失败原因 (429 限流 / 超时 / 块超长), 便于区分"慢"与"挂"
+        if depth == 0:
+            logger.warning(
+                f"embedding 批量入库失败 ({len(docs)} 块, {e.__class__.__name__}): {e}"
+            )
         if len(docs) == 1:
             # 单条失败: 先截断再试 (宁可丢尾部, 不可丢整篇)
             d = docs[0]
@@ -164,22 +182,26 @@ def _add_documents_resilient(store, docs: list[Document]) -> tuple[int, int]:
                 truncated = Document(page_content=text[:300], metadata=dict(d.metadata))
                 try:
                     store.add_documents([truncated])
-                    logger.warning(
+                    logger.debug(
                         f"块超长截断后入库: {d.metadata.get('title', '')[:40]} "
                         f"({len(text)}→300 字符)"
                     )
                     return 1, 0
                 except Exception as e2:
                     logger.warning(
-                        f"块入库失败(截断后仍失败): {d.metadata.get('title', '')[:40]} | {e2}"
+                        f"块入库失败(截断后仍失败): {d.metadata.get('title', '')[:40]} | {e2.__class__.__name__}"
                     )
                     return 0, 1
-            logger.warning(f"块入库失败: {d.metadata.get('title', '')[:40]} | {e}")
+            logger.warning(f"块入库失败: {d.metadata.get('title', '')[:40]} | {e.__class__.__name__}")
             return 0, 1
+        if depth >= 5:
+            # 深度上限: 不再继续拆分, 丢弃剩余块, 避免请求爆炸
+            logger.warning(f"embedding 拆分深度达上限, 丢弃剩余 {len(docs)} 块")
+            return 0, len(docs)
         # 批量失败: 对半拆, 定位坏块
         mid = len(docs) // 2
-        ok_l, fail_l = _add_documents_resilient(store, docs[:mid])
-        ok_r, fail_r = _add_documents_resilient(store, docs[mid:])
+        ok_l, fail_l = _add_documents_resilient(store, docs[:mid], depth + 1)
+        ok_r, fail_r = _add_documents_resilient(store, docs[mid:], depth + 1)
         return ok_l + ok_r, fail_l + fail_r
 
 

@@ -1,19 +1,4 @@
-"""LLM 驱动的学术图表生成器
-
-借鉴:
-- PaperBanana (2.2k⭐) `paperbanana plot` 模式: VLM 生成 matplotlib 代码,
-  无需图像生成模型, 用现有 OpenAI 兼容 API 即可
-- PaperBanana Stylist: 用风格指南约束美学
-- FigMirror (497⭐) Drawer-Reviewer 循环: 生成→审查→修正
-
-流程:
-1. LLM 根据数据+风格指南生成 matplotlib 代码
-2. 沙箱执行代码生成 PNG（注入期刊级样式样板: 字体/DPI/色板/边框）
-3. 执行失败 → LLM 修正代码 (最多 N 轮)
-4. PNG 质量检测 (空白图/尺寸异常 → 视为失败重新生成)
-5. 代码级审阅 (Drawer-Reviewer): 审阅代码的学术规范缺陷 → 有则修正一轮
-6. 通过 → 输出图片路径
-"""
+"""LLM 驱动的学术图表生成 (Drawer-Reviewer 修正循环)"""
 
 from __future__ import annotations
 
@@ -75,10 +60,12 @@ CODE_GEN_SYSTEM = f"""你是"学术图表绘制专家"。你的任务是根据�
 - 代码必须独立可运行 (包含所有 import)
 - 使用 plt.savefig 保存图片到指定路径 (路径已给出)
 - 必须 plt.close(fig) 释放内存
+- 绘图标记只能用 matplotlib 标准样式 ("o", "s", "^", "D", "v", "*" 等 ASCII 标记)；严禁使用 "•"、"★"、"●" 等 Unicode 字符作 marker (会触发 ValueError: Unrecognized marker style)
 - 中文文本自动由 matplotlib 处理 (已配置字体)
 - 优先使用 ax = fig.add_subplot() 或 plt.subplots() 方式
 - 必须设置 figsize=(宽, 高) (单栏 3.5-5 英寸宽, 分类树 8-10 英寸宽)
 - 分类树: 使用 ax.axis("off") + 文本框 bbox + 箭头 annotate 绘制层次结构
+- 分类树/层次图节点必须用 dict 表示 (如 node = dict(name="...", depth=1))，访问层级用 node["depth"]；严禁对 int/str 变量做下标访问（node["depth"] 会触发 'int' object is not subscriptable）
 - 时间线: 使用 ax.axis("off") + 水平轴线 + 上下交替的事件标签
 """
 
@@ -105,7 +92,15 @@ CODE_REVIEWER_SYSTEM = f"""你是"学术图表审阅专家"。你无法看到渲
 
 {style_guide_prompt()}"""
 
-MAX_FIX_ROUNDS = 3
+MAX_FIX_ROUNDS = 2
+# 单张图的总时间预算 (秒): 超限即放弃 LLM 路径, 由调用方回退确定性模板。
+# 此前无预算限制: 5 轮 × (主模型代码生成 + 子进程执行 + 廉价模型审阅) 可静默耗时
+# 10+ 分钟, 用户误以为流水线卡死。
+FIGURE_TIME_BUDGET = float(os.getenv("FIGURE_TIME_BUDGET", "300"))
+# 代码级审阅 (Drawer-Reviewer) 默认关闭: 实测审阅几乎总是报满 5 个吹毛求疵的问题,
+# 强制修正轮耗尽时间预算后整图回退模板, 净浪费 ~6 分钟/图。
+# 执行成功 + PNG 质量检测通过即接受; 设 FIGURE_CODE_REVIEW=1 可重新启用。
+FIGURE_CODE_REVIEW = os.getenv("FIGURE_CODE_REVIEW", "0") == "1"
 
 
 def _extract_code(llm_output: str) -> str:
@@ -120,15 +115,7 @@ def _extract_code(llm_output: str) -> str:
 
 
 def _sanitize_code(code: str, save_path: str) -> str:
-    """清洗 LLM 生成的代码中的常见路径错误（确定性修复）
-
-    已知失败模式（均导致 SyntaxError/NameError）:
-    1. 把 Windows 完整路径当"变量赋值"写出:
-       E:/outputs/figures/x.png = r"E:/.../x.png"  (反斜杠=续行符)
-    2. 把保存路径写成不带引号的裸表达式:
-       plt.savefig(outputs/figures/x.png, ...)  (NameError)
-    (借鉴 AI-Scientist 的 cleanup_map 输出后处理思路)
-    """
+    """清洗 LLM 生成的代码中的路径/赋值错误"""
     if not code:
         return code
     # 1) 删除 "盘符:\...\文件名 = r"..."" / "outputs\figures\x.png = r"..."" 赋值垃圾行
@@ -151,6 +138,26 @@ def _sanitize_code(code: str, save_path: str) -> str:
         code = re.sub(rf"r?['\"]{escaped}['\"]", "OUTPUT_PATH", code)
         # 不带引号形态 (裸 token, 前后非标识符字符)
         code = re.sub(rf"(?<![A-Za-z0-9_'\"])(?:{escaped})(?![A-Za-z0-9_])", "OUTPUT_PATH", code)
+    # 3) 关键: 强制所有 savefig 的目标路径替换为 OUTPUT_PATH。
+    # LLM 常自创文件名 (如 savefig("射频指纹分类体系图.png")), 这些不被上面的
+    # save_path 变体拦截, 导致图片散落到工作目录而非 outputs/figures/。
+    code = _force_savefig_output_path(code)
+    return code
+
+
+def _force_savefig_output_path(code: str) -> str:
+    """把代码里所有 savefig 调用统一改为保存到 OUTPUT_PATH。
+
+    匹配 savefig(...) 的第一个位置参数 (字符串/变量), 替换为 OUTPUT_PATH。
+    兼容: savefig("x.png") / savefig('x') / savefig(x) / savefig(r"x") / savefig(x, dpi=300)
+    """
+    if not code:
+        return code
+    # 匹配 savefig( 后紧跟的第一个参数 (带引号字符串 或 裸标识符), 连同其后的逗号/括号
+    pattern = re.compile(
+        r"(?P<prefix>savefig\s*\(\s*)(?:r?[\"'][^\"']*[\"']|[A-Za-z_][\w\.]*)"
+    )
+    code = pattern.sub(lambda m: m.group("prefix") + "OUTPUT_PATH", code)
     return code
 
 
@@ -318,7 +325,14 @@ def generate_figure_with_llm(
     last_error = ""
     last_code = ""
 
+    import time as _time
+
+    t0 = _time.monotonic()
     for round_idx in range(max_rounds + 1):
+        elapsed = _time.monotonic() - t0
+        if elapsed > FIGURE_TIME_BUDGET:
+            print(f"  [figure] 已耗时 {elapsed:.0f}s 超出 {FIGURE_TIME_BUDGET:.0f}s 预算, 放弃 LLM 路径 (回退确定性模板)")
+            break
         try:
             if round_idx > 0:
                 # 修正轮: 附上错误信息或审阅意见
@@ -336,6 +350,7 @@ def generate_figure_with_llm(
                     )
                 messages = messages[:2] + [HumanMessage(content=fix_prompt)]
 
+            print(f"  [figure] LLM 代码生成 (第 {round_idx + 1}/{max_rounds + 1} 轮, {Path(save_path).name})...")
             result = llm.invoke(messages)
             code = _extract_code(result.content if hasattr(result, "content") else str(result))
             last_code = code
@@ -349,13 +364,22 @@ def generate_figure_with_llm(
                 ) or LLM_CONFIG["model"]
                 tracker.add_call(model_name, usage, stage=f"figure_gen_r{round_idx}")
 
+            print(f"  [figure] 沙箱执行代码 (第 {round_idx + 1} 轮)...")
             ok, output = _execute_code(code, save_path)
             if not ok:
                 last_error = output
+                print(f"  [figure] 执行/渲染失败: {output[-150:].strip()}")
                 logger.warning(f"Figure code exec failed (round {round_idx}): {output[-300:]}")
                 continue
 
+            # 执行通过即接受的两种情形: 末轮 (避免耗尽预算后整图回退)
+            # 或代码审阅关闭 (默认: 执行+PNG 质量通过已足够, 审阅轮实测只拖慢流程)
+            if round_idx >= max_rounds or not FIGURE_CODE_REVIEW:
+                print(f"  [figure] 渲染通过, 采用: {Path(save_path).name}")
+                return True, save_path
+
             # 代码执行 + 渲染质量均通过 → 代码级审阅 (Drawer-Reviewer)
+            print(f"  [figure] 代码级审阅 (第 {round_idx + 1} 轮)...")
             try:
                 review_prompt = (
                     f"请审阅以下 matplotlib 代码的学术出版规范问题。\n\n"
@@ -382,10 +406,12 @@ def generate_figure_with_llm(
                 issues = []
 
             if not issues:
+                print(f"  [figure] 审阅通过: {Path(save_path).name}")
                 logger.info(f"Figure generated & reviewed OK: {save_path}")
                 return True, save_path
 
             last_error = "\n".join(issues)
+            print(f"  [figure] 审阅发现 {len(issues)} 个问题, 进入修正轮")
             logger.info(f"Figure review issues (round {round_idx}): {issues}")
         except Exception as e:
             last_error = str(e)

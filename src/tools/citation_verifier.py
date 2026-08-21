@@ -1,17 +1,6 @@
 from __future__ import annotations
 
-"""引文真实性核查工具
-
-参考开源项目:
-- opendraft (https://github.com/federicodeponte/opendraft): CrossRef/OpenAlex/arXiv 三源验证
-- sisyphus-academica: 引用验证与对抗性审查
-- research-paper-lifecycle-skills: citation verification agent skill
-
-数据源（全部免费，无需 API Key）:
-- CrossRef REST API: https://api.crossref.org/works
-- OpenAlex API: https://api.openalex.org/works
-- arXiv API: https://export.arxiv.org/api/query
-"""
+"""引文真实性核查工具 — CrossRef / OpenAlex / arXiv 三源交叉验证"""
 
 import os
 import re
@@ -19,7 +8,7 @@ import difflib
 import logging
 from typing import Optional
 
-import httpx
+from src.utils.http_client import get_with_retry, head_with_retry, CircuitBreakerOpenError
 
 logger = logging.getLogger(__name__)
 
@@ -108,17 +97,28 @@ def verify_crossref(record: CitationRecord) -> Optional[dict]:
     if record.authors:
         params["query.author"] = record.authors
     if record.year:
-        params["filter"] = (
-            f"from-pub-date:{int(record.year) - 1}-01-01,"
-            f"until-pub-date:{int(record.year) + 1}-12-31"
-        )
+        try:
+            _y = int(record.year)
+        except (ValueError, TypeError):
+            _y = 0
+        if _y:
+            params["filter"] = (
+                f"from-pub-date:{_y - 1}-01-01,"
+                f"until-pub-date:{_y + 1}-12-31"
+            )
+
+    # 断路器预检: 被限流时直接跳过, 避免逐条尝试刷屏日志
+    from src.utils.http_client import is_circuit_open
+
+    if is_circuit_open(CROSSREF_URL):
+        logger.debug("CrossRef 断路器开启, 跳过验证 (冷却后自动恢复)")
+        return None
 
     try:
-        resp = httpx.get(CROSSREF_URL, params=params, headers=_crossref_headers(), timeout=30)
-        resp.raise_for_status()
+        resp = get_with_retry(CROSSREF_URL, params=params, headers=_crossref_headers(), read_timeout=30)
         items = resp.json().get("message", {}).get("items", [])
     except Exception as e:
-        logger.warning(f"CrossRef request failed: {e}")
+        logger.debug(f"CrossRef request failed: {e}")
         return None
 
     if not items:
@@ -162,29 +162,24 @@ def verify_crossref(record: CitationRecord) -> Optional[dict]:
 
 def verify_openalex(record: CitationRecord) -> Optional[dict]:
     """通过 OpenAlex API 验证引用是否存在（CrossRef 失败时的备选）"""
-    import time
-
     search_term = record.title[:200]
     params = {"search": search_term, "per-page": 5, "select": "title,doi,primary_location,publication_year"}
+    if os.getenv("OPENALEX_API_KEY", ""):
+        params["api_key"] = os.getenv("OPENALEX_API_KEY", "")
 
-    resp = None
-    for attempt in range(3):
-        try:
-            resp = httpx.get(OPENALEX_URL, params=params, timeout=30)
-            if resp.status_code == 429:
-                time.sleep(2 ** attempt)
-                continue
-            resp.raise_for_status()
-            break
-        except Exception as e:
-            if attempt < 2:
-                time.sleep(2 ** attempt)
-                continue
-            logger.warning(f"OpenAlex request failed: {e}")
-            return None
-    if resp is None:
+    # 断路器预检: OpenAlex 被限流时直接跳过, 避免逐条尝试刷屏日志
+    from src.utils.http_client import is_circuit_open
+
+    if is_circuit_open(OPENALEX_URL):
+        logger.debug("OpenAlex 断路器开启, 跳过验证 (冷却后自动恢复)")
         return None
-    items = resp.json().get("results", [])
+
+    try:
+        resp = get_with_retry(OPENALEX_URL, params=params, read_timeout=30)
+        items = resp.json().get("results", [])
+    except Exception as e:
+        logger.debug(f"OpenAlex request failed: {e}")
+        return None
 
     if not items:
         return {"status": "NOT_FOUND", "similarity": 0.0}
@@ -218,8 +213,6 @@ def verify_openalex(record: CitationRecord) -> Optional[dict]:
 
 def verify_arxiv(record: CitationRecord) -> Optional[dict]:
     """通过 arXiv API 验证（针对 arXiv 预印本）"""
-    # 清洗查询: 去 markdown 标记 + 截断 (草稿参考文献行可能含 ** 等格式)
-    # 下划线替换为空格而非删除, 避免词拼接导致 0 命中
     title_clean = re.sub(r"[*#`>\[\]]", "", record.title)
     title_clean = title_clean.replace("_", " ")
     title_clean = re.sub(r"\s+", " ", title_clean).strip()[:100]
@@ -229,8 +222,7 @@ def verify_arxiv(record: CitationRecord) -> Optional[dict]:
         "max_results": 5,
     }
     try:
-        resp = httpx.get(ARXIV_API_URL, params=params, timeout=30)
-        resp.raise_for_status()
+        resp = get_with_retry(ARXIV_API_URL, params=params, read_timeout=30)
         text = resp.text
     except Exception as e:
         logger.warning(f"arXiv request failed: {e}")
@@ -355,10 +347,12 @@ def _doi_exists_via_crossref(doi: str) -> Optional[bool]:
     from urllib.parse import quote
 
     try:
-        resp = httpx.get(
+        resp = get_with_retry(
             f"https://api.crossref.org/works/{quote(doi, safe='')}",
             headers=_crossref_headers(),
-            timeout=15,
+            read_timeout=15,
+            max_retries=2,
+            raise_on_status=False,
         )
         if resp.status_code == 200:
             return True
@@ -372,9 +366,11 @@ def _doi_exists_via_crossref(doi: str) -> Optional[bool]:
 def _is_pseudo_ref_content(content: str) -> bool:
     """伪参考文献条目过滤: 修订说明/自检清单/统计信息混入的条目
 
-    (含 markdown 加粗标记 ** 或 超长文本 或 以指令性文字开头)
+    只按"确定性特征"判断: markdown 加粗 / 指令性文字开头 / 清单勾选标记。
+    注意: 不能用长度判断——GB/T 7714 完整条目 (含作者+题名+刊名+卷期页码+DOI)
+    常超过 200 字符, 用长度会误删真实文献, 导致覆盖率检查失败 (审稿扣分)。
     """
-    if "**" in content or len(content) > 200:
+    if "**" in content:
         return True
     if content.startswith(("请", "建议", "注意", "修订", "删除", "增加", "改为", "标题", "修改")):
         return True
@@ -384,13 +380,16 @@ def _is_pseudo_ref_content(content: str) -> bool:
 
 
 def _looks_like_citation(content: str) -> bool:
-    """引用条目判定: 必须含 4 位年份 (19xx/20xx) 或 DOI
+    """引用条目判定: 必须含 4 位年份 (19xx/20xx) 或 DOI 或人工导入标记
 
     修复: 修订说明的编号条目（"4. 摘要精简至约280字…"）不含年份/DOI，
     不能当作参考文献；这是区分"引用条目"与"正文编号"的确定性判据。
+    人工导入文献 (人已确认, 可能缺年份/DOI 元数据) 含"人工导入"标记, 也视为真实引用。
     注意不能用 \\b 词边界: BibTeX key "vaswani2017" 中 2017 前是字母,
     词边界不成立。
     """
+    if "人工导入" in content:
+        return True
     if re.search(r"(?<!\d)(19|20)\d{2}(?!\d)", content):
         return True
     if re.search(r"\b10\.\d{4,9}/", content, re.IGNORECASE):
@@ -521,9 +520,9 @@ CJK_AUTHORS_RE = re.compile(r"^[\u4e00-\u9fff\u00b7 ,、]+$")
 
 def check_inline_citation_coverage(draft: str, ref_count: int) -> dict:
     """检查文中引用标记 [n] 与参考文献条目的对应关系"""
-    inline_nums = set()
-    for m in re.finditer(r"\[(\d+)\]", draft):
-        inline_nums.add(int(m.group(1)))
+    from src.rag.reference_formatter import find_citation_numbers
+
+    inline_nums = set(find_citation_numbers(draft))
 
     if not inline_nums:
         return {
@@ -593,28 +592,30 @@ def verify_draft_citations(draft: str, verified_refs: list[dict] = None) -> dict
 
     results = []
     for rec in records:
-        vr = verify_single_citation(rec)
+        vr = None
 
-        # 与可信清单匹配: 命中即 VERIFIED（清单论文已预验证, 无需外部 API）
-        if verified_refs and vr.status != "VERIFIED":
-            # 1) 编号直连: 参考文献章节由系统按清单编号生成, 编号即证据
+        # 先与可信清单匹配: 命中即 VERIFIED（零 API 调用）
+        if verified_refs:
             entry = ref_by_number.get(rec.ref_number)
-            if entry is None:
-                # 2) 归一化标题精确匹配
-                norm = re.sub(r"[^a-z0-9]", "", (rec.title or "").lower())
+            norm = re.sub(r"[^a-z0-9]", "", (rec.title or "").lower())
+            if entry is None and norm:
                 entry = ref_index.get(norm)
-            if entry is None:
-                # 3) 模糊匹配: 归一化标题互相包含
+            if entry is None and norm:
                 for key, cand in ref_index.items():
-                    if norm and key and (key in norm or norm in key) and min(len(key), len(norm)) >= 15:
+                    if key and (key in norm or norm in key) and min(len(key), len(norm)) >= 15:
                         entry = cand
                         break
             if entry is not None:
+                vr = VerificationResult(rec)
                 vr.status = "VERIFIED"
                 vr.matched_title = entry.get("title", "")
                 vr.doi = entry.get("doi", "")
                 vr.similarity = 1.0
                 vr.detail = "Matched verified reference list"
+
+        # 清单未命中才走外部 API 验证
+        if vr is None:
+            vr = verify_single_citation(rec)
 
         results.append(vr)
 

@@ -17,7 +17,11 @@ from src.rag.reference_formatter import (
     format_gbt7714_entry,
     build_references_section,
     strip_references_section,
+    strip_evidence_markers,
     attach_references_section,
+    renumber_citations,
+    find_citation_numbers,
+    is_published_ref,
 )
 from src.rag.figure_llm import check_png_quality, _extract_review_issues
 from src.tools.citation_verifier import (
@@ -28,7 +32,6 @@ from src.tools.citation_verifier import (
 from src.tools.venue_resolver import (
     looks_like_real_venue,
     resolve_venue,
-    resolve_venue_batch,
 )
 
 
@@ -43,7 +46,7 @@ def test_looks_like_real_venue():
     assert not looks_like_real_venue("https://example.com")
 
 
-@patch("src.tools.venue_resolver.httpx.get")
+@patch("src.tools.venue_resolver.get_with_retry")
 def test_resolve_venue_via_crossref(mock_get):
     """DOI → CrossRef container-title + 卷期页码"""
     mock_resp = MagicMock()
@@ -63,7 +66,7 @@ def test_resolve_venue_via_crossref(mock_get):
     assert info["pages"] == "100-110"
 
 
-@patch("src.tools.venue_resolver.httpx.get")
+@patch("src.tools.venue_resolver.get_with_retry")
 def test_resolve_venue_skips_existing(mock_get):
     """已有真实出处 → 零 API 调用"""
     info = resolve_venue({"title": "T", "source": "NeurIPS", "venue": "NeurIPS", "doi": "10.1/x"})
@@ -71,7 +74,7 @@ def test_resolve_venue_skips_existing(mock_get):
     mock_get.assert_not_called()
 
 
-@patch("src.tools.venue_resolver.httpx.get")
+@patch("src.tools.venue_resolver.get_with_retry")
 def test_resolve_venue_arxiv_journal_ref(mock_get):
     """arXiv journal_ref 元素 → 期刊名"""
     xml = """<?xml version="1.0"?>
@@ -196,8 +199,94 @@ def test_format_many_authors_et_al():
         "source": "ACM Computing Surveys",
     }
     out = format_gbt7714_entry(ref)
-    assert ", 等." in out              # 超过 3 作者 → 等
+    assert ", et al." in out           # 超过 3 作者英文 → et al. (GB/T 7714 外文文献)
     assert "SMITH J, BROWN K, LEE C" in out
+
+
+def test_format_early_access_journal_has_access_date():
+    """无卷期的在线优先出版期刊必须带引用日期。
+
+    审稿人曾反复以"在线优先出版缺引用日期/格式不规范"为由把参考文献维度
+    判为 Critical, 而参考文献章节由系统生成、Writer 无法修改 → 在源头补齐。
+    """
+    import re
+
+    ref = {
+        "ref_number": 23,
+        "title": "Federated Learning for RF Fingerprinting",
+        "authors": "J Smith",
+        "year": "2026",
+        "venue": "IEEE Internet of Things Journal",
+        "doi": "10.1109/jiot.2026.3710099",
+    }
+    out = format_gbt7714_entry(ref)
+    assert "[J]" in out
+    assert re.search(r"在线优先出版\[\d{4}-\d{2}-\d{2}\]", out)
+
+
+def test_format_strips_embedded_venue_year():
+    """venue 内嵌年份导致年份重复: 'Journal 2021, 2020, 8(10)' → 'Journal, 2020, 8(10)'
+    (实测 [42] 被审稿人判格式异常, 参考文献维度无法上 4 分)"""
+    ref = {"ref_number": 42, "title": "IoT Security Using RF-DNA Fingerprints",
+           "authors": "D Reising, J Cancellieri",
+           "venue": "IEEE Internet of Things Journal 2021", "year": "2020",
+           "volume": "8", "issue": "10", "pages": "8356-8371", "doi": "10.1109/x"}
+    out = format_gbt7714_entry(ref)
+    assert "Journal 2021" not in out
+    assert ", 2020, 8(10): 8356-8371" in out
+
+
+def test_format_strips_conference_location():
+    """GB/T 7714 会议条目不含地点: '…(ETFA), Stuttgart, Germany' → '…(ETFA)'
+    (实测 [58] 被审稿人判'会议地点位置违规')"""
+    ref = {"ref_number": 58, "title": "Towards Adaptive RF Fingerprint-based Authentication",
+           "authors": "E Lomba, R Severino",
+           "venue": "IEEE 27th International Conference on Emerging Technologies and Factory Automation (ETFA), Stuttgart, Germany, 2023",
+           "year": "2023", "doi": "10.1109/y"}
+    out = format_gbt7714_entry(ref)
+    assert "Stuttgart" not in out and "Germany" not in out
+    assert "(ETFA), 2023" in out
+
+
+def test_sort_and_merge_citation_groups():
+    """同一处多引用必须升序: 相邻独立括号合并, 组内排序去重 (GB/T 7714 顺序编码制)"""
+    from src.rag.reference_formatter import sort_and_merge_citation_groups
+
+    # 实测案例: 重编号后 [13][11][1] 未按升序排列
+    assert sort_and_merge_citation_groups("贡献[13][11][1]。") == "贡献[1,11,13]。"
+    assert sort_and_merge_citation_groups("见[5,3]与[2, 7]") == "见[3,5]与[2,7]"
+    assert sort_and_merge_citation_groups("单个[4]不变") == "单个[4]不变"
+    assert sort_and_merge_citation_groups("[3][3]去重") == "[3]去重"
+    # 图表占位符与脚注不受影响
+    assert sort_and_merge_citation_groups("[图1: 分类]与[^1]脚注") == "[图1: 分类]与[^1]脚注"
+    # 被文字隔开的引用不合并
+    assert sort_and_merge_citation_groups("如[3]和[1]所述") == "如[3]和[1]所述"
+
+
+def test_renumber_citations_sorts_multi_citation_groups():
+    from src.rag.reference_formatter import renumber_citations
+
+    draft = (
+        "# 标题\n\n本文贡献[13][11][1]。\n\n后文再次引用[13]。\n\n"
+        "## 参考文献\n\n[1] A.\n[11] B.\n[13] C.\n"
+    )
+    out = renumber_citations(draft)
+    # 首次出现按升序阅读顺序: 1→1, 11→2, 13→3; 多引用组升序输出
+    assert "本文贡献[1,2,3]。" in out
+    assert "后文再次引用[3]。" in out
+
+
+def test_renumber_draft_and_refs_sorts_after_remapping():
+    """重映射可能产生新乱序 (旧[3,5]→新[2,1]), 必须在映射后再次排序"""
+    from src.rag.reference_formatter import renumber_draft_and_refs
+
+    draft = "# 标题\n\n先引用[5]，再同时引用[3][5]。\n\n## 参考文献\n\n[3] B.\n[5] A.\n"
+    refs = [{"ref_number": 3, "title": "B"}, {"ref_number": 5, "title": "A"}]
+    new_draft, new_refs = renumber_draft_and_refs(draft, refs)
+    # 首次出现: 5→1, 3→2 → 组 [3,5] 映射为 [2,1] → 排序后 [1,2]
+    assert "再同时引用[1,2]。" in new_draft
+    by_num = {r["ref_number"]: r["title"] for r in new_refs}
+    assert by_num[1] == "A" and by_num[2] == "B"
 
 
 def test_build_and_attach_references_section():
@@ -223,6 +312,47 @@ def test_strip_references_section():
     cleaned = strip_references_section(draft)
     assert "## 参考文献" not in cleaned
     assert "正文" in cleaned
+
+
+def test_strip_evidence_markers():
+    draft = "方法难以统一建模[6][缺证据]。实现高效利用[缺证据：需补充ISAC文献]。正常[3]。"
+    cleaned = strip_evidence_markers(draft)
+    assert "[缺证据]" not in cleaned
+    assert "缺证据" not in cleaned
+    assert "难以统一建模[6]" in cleaned
+    assert "正常[3]" in cleaned
+
+
+def test_find_citation_numbers_multinumber():
+    assert find_citation_numbers("文本[2,7]和[1]与[1,4,8]。") == [2, 7, 1, 1, 4, 8]
+
+
+def test_is_published_ref_rejects_preprint_doi():
+    assert is_published_ref({"doi": "10.36227/techrxiv.21569253.v1"}) is False  # TechRxiv
+    assert is_published_ref({"doi": "10.2139/ssrn.1234"}) is False  # SSRN
+    assert is_published_ref({"doi": "10.48550/arXiv.2211.10379"}) is False  # arXiv
+    assert is_published_ref({"url": "https://arxiv.org/abs/2211.10379"}) is False
+    assert is_published_ref({"doi": "10.1109/tifs.2024.3515796"}) is True  # 正式期刊
+    assert is_published_ref({"api_source": "人工导入"}) is True
+
+
+def test_renumber_citations_multinumber():
+    """多编号引用 [2,7] 必须先于 [1] 出现时, 重编号应遵循首次出现顺序"""
+    draft = (
+        "面临挑战[2,7]。需求突出[1]。再次[2]。\n\n"
+        "## 参考文献\n\n"
+        "[1] Paper A\n[2] Paper B\n[7] Paper G\n"
+    )
+    r = renumber_citations(draft)
+    body = r.split("## 参考文献")[0]
+    # 首次出现顺序: 2→1, 7→2, 1→3 → 正文应为 [1,2] [3] [1]
+    assert "[1,2]" in body
+    assert "[3]" in body
+    assert "面临挑战[1,2]。需求突出[3]。再次[1]。" in body.replace("\n", "") or "面临挑战[1,2]。需求突出[3]。再次[1]。" in body
+    # 参考文献按新编号重排: 2→1 (Paper B), 7→2 (Paper G), 1→3 (Paper A)
+    assert "[1] Paper B" in r
+    assert "[2] Paper G" in r
+    assert "[3] Paper A" in r
 
 
 # ---------- GB/T 7714 引文提取 ----------
@@ -347,8 +477,18 @@ if __name__ == "__main__":
         test_format_arxiv_entry,
         test_format_journal_entry_with_doi,
         test_format_many_authors_et_al,
+        test_format_early_access_journal_has_access_date,
+        test_format_strips_embedded_venue_year,
+        test_format_strips_conference_location,
+        test_sort_and_merge_citation_groups,
+        test_renumber_citations_sorts_multi_citation_groups,
+        test_renumber_draft_and_refs_sorts_after_remapping,
         test_build_and_attach_references_section,
         test_strip_references_section,
+        test_strip_evidence_markers,
+        test_find_citation_numbers_multinumber,
+        test_is_published_ref_rejects_preprint_doi,
+        test_renumber_citations_multinumber,
         test_parse_gbt7714_line,
         test_parse_gbt7714_chinese,
         test_extract_from_deterministic_refs,

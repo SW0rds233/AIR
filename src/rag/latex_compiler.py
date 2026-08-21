@@ -10,28 +10,40 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 # 编译轮次上限
 MAX_COMPILE_ROUNDS = 3
+# 单遍编译的失败重试次数 (针对 dvipdfmx "Unable to open" 这类瞬时错误)。
+# Windows 实测: 杀毒软件/索引服务对新写出 PDF 的锁定可持续 10 秒以上,
+# 重试间隔必须足够长 (2/4/6s), 否则整轮编译被误判失败。
+PASS_RETRY_ATTEMPTS = 4
 
 
 def compile_latex(tex_path: str, workdir: str | None = None, engine: str = "xelatex") -> tuple[bool, str]:
-    """编译 LaTeX → PDF（xelatex 双遍, thebibliography 不需 bibtex）
+    """编译 LaTeX → PDF（xelatex 多遍, thebibliography 不需 bibtex）
 
-    thebibliography 的 \cite→\bibitem 解析需要两遍 xelatex (标准 LaTeX 行为)。
+    thebibliography 的 \\cite->\\bibitem 解析需要多遍编译:
+    第 1 遍生成 .aux (此时 PDF 中引用显示为 [?]), 第 2 遍起解析引用。
+    若第 2 遍后仍有 undefined 引用警告则再编译一遍。
+
+    Windows 实测问题: 第 1 遍刚写出 PDF 后, 杀毒软件/索引服务会瞬时锁定文件,
+    导致第 2 遍 dvipdfmx 报 "Unable to open" → 旧版直接判失败,
+    留下只编译一遍、引用全是 [?] 的 PDF。此处对每遍编译做重试。
     """
     path = Path(tex_path).resolve()
     cwd = str(path.parent) if workdir is None else str(workdir)
+    pdf_path = path.with_suffix(".pdf")
 
-    def _run():
+    def _run_once():
         try:
             result = subprocess.run(
                 [engine, "-interaction=nonstopmode", "-halt-on-error",
                  "-output-directory", cwd, str(path)],
-                capture_output=True, text=True, timeout=60,
+                capture_output=True, text=True, timeout=180,
                 cwd=cwd, encoding="utf-8", errors="replace",
             )
             log = result.stdout + result.stderr
@@ -40,18 +52,52 @@ def compile_latex(tex_path: str, workdir: str | None = None, engine: str = "xela
                 return False, "\n".join(err[:10]) if err else log[-2000:]
             return True, log
         except subprocess.TimeoutExpired:
-            return False, "LaTeX 编译超时 (60s)"
+            return False, "LaTeX 编译超时 (180s)"
         except FileNotFoundError:
             return False, f"{engine} 未安装"
         except Exception as e:
             return False, str(e)
 
-    ok, log = _run()
+    def _run_with_retry() -> tuple[bool, str]:
+        """单遍编译 + 瞬时失败重试 (Unable to open / 文件被占用)"""
+        ok, log = False, ""
+        for attempt in range(PASS_RETRY_ATTEMPTS):
+            ok, log = _run_once()
+            if ok and "Unable to open" not in log:
+                return True, log
+            if attempt < PASS_RETRY_ATTEMPTS - 1:
+                wait = 2.0 * (attempt + 1)
+                logger.warning(f"LaTeX pass 失败, {wait:.0f}s 后重试: {log[-160:].strip()}")
+                time.sleep(wait)
+        return ok and "Unable to open" not in log, log
+
+    # 第 1 遍
+    ok, log = _run_with_retry()
     if not ok:
         return False, log
-    # 第二遍: 解析 \cite 引用 (thebibliography 需要)
-    ok2, _ = _run()
-    return True if ok2 else False, "Pass 2 failed"
+
+    # 第 2 遍起: 解析 \cite; 若仍有 undefined 引用警告则继续 (至多 MAX_COMPILE_ROUNDS 遍)
+    last_log = log
+    for _ in range(MAX_COMPILE_ROUNDS - 1):
+        ok2, last_log = _run_with_retry()
+        if not ok2:
+            break
+        if not re.search(r"Citation\s+`[^']+'\s+.*undefined", last_log):
+            break
+
+    # 成功标准: PDF 实际生成且非空 (即使某遍报瞬时错误, 只要最终 PDF 在就算成功)。
+    # stat 也可能因文件瞬时被锁而失败, 做多次尝试。
+    for wait in (0.0, 2.0, 4.0):
+        if wait:
+            time.sleep(wait)
+        try:
+            if pdf_path.exists() and pdf_path.stat().st_size >= 10 * 1024:
+                if re.search(r"Citation\s+`[^']+'\s+.*undefined", last_log):
+                    logger.warning("PDF 已生成但仍存在未解析引用, 请检查参考文献编号一致性")
+                return True, last_log
+        except OSError:
+            continue
+    return False, last_log[-2000:]
 
 
 def extract_latex_errors(log: str) -> list[str]:

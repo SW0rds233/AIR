@@ -9,9 +9,8 @@ from __future__ import annotations
 import logging
 
 from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_openai import ChatOpenAI
 
-from src.config import LLM_CONFIG
+from src.config import LLM_CONFIG, build_llm
 from src.graph.state import PipelineState
 from src.utils.cost_tracker import tracker, extract_usage_metadata
 from src.utils.context_budget import budget_text
@@ -25,10 +24,19 @@ OUTLINE_GENERATOR_SYSTEM = """你是"论文大纲规划专家"，一名擅长设
 ## 大纲设计要求
 
 1. **分类体系（Taxonomy）必须 MECE**（相互独立、完全穷尽）
-2. 大纲层级为: 章节(##) → 小节(###) → 要点(每个小节 2-4 个要点)
+2. 大纲层级与正文一致: `##` 章(带编号 "1", "2"...)、`###` 节(带编号 "1.1", "2.1"...)、每节 2-4 个要点
 3. 每个小节标注计划引用的文献编号（来自可信参考文献清单）
-4. 标注哪些章节需要配图（如分类体系图、时间线图、对比图）
-5. 标注哪些章节需要配表（如方法对比表、性能对比表）
+4. 标注哪些章节需要配图（分类体系图、时间线图、对比图）
+5. 标注哪些章节需要配表（方法对比表、性能对比表）
+
+## 标准章节结构（与正文撰写保持一致，不要自行增删）
+
+1. 引言（背景/问题/贡献/检索策略/结构安排）
+2. 相关工作（前置知识/与已有综述差异）
+3. 核心方法分类详述（分类体系总览 + 各类方法）
+4. 比较与分析（跨类别对比表 + 演进趋势）
+5. 挑战与未来方向
+6. 结论
 
 ## 输出格式
 
@@ -40,22 +48,18 @@ OUTLINE_GENERATOR_SYSTEM = """你是"论文大纲规划专家"，一名擅长设
 - 要点1 [引文1]
 - 要点2 [引文3]
 - 配图: 无
-### 1.2 综述范围与贡献
-...
 
-## 2. 分类体系总览
-### 2.1 分类维度
-- ...
+## 3. 核心方法分类详述
+### 3.1 分类体系总览
+- 分类维度 [引文N]
 - 配图: [图1: 分类体系图]
-...
-
-## N. 挑战与未来方向
+- 配表: [表1: 方法分类对比表]
 ...
 ```
 
 ## 原则
 
-- 分类维度要在引言后立即给出总览（2.x 节）
+- 分类体系总览放在「核心方法分类详述」章的开头
 - 每个大类下的小节数量均衡（3-6 个）
 - 引用编号必须来自可信参考文献清单，不得自创编号
 - 大纲应能支撑 8000-15000 字的正文
@@ -74,12 +78,7 @@ def run_outline_generation(state: PipelineState) -> dict:
             "current_phase": "outline_generation",
         }
 
-    llm = ChatOpenAI(
-        model=LLM_CONFIG["model"],
-        api_key=LLM_CONFIG["api_key"],
-        base_url=LLM_CONFIG["base_url"],
-        temperature=LLM_CONFIG["temperature"],
-    )
+    llm = build_llm("main")
 
     ref_block = ""
     if verified_refs:

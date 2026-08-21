@@ -43,6 +43,7 @@ class PipelineState(TypedDict, total=False):
     search_queries: List[str]
     search_results: List[PaperSummary]
     retrieved_papers: Annotated[List[PaperSummary], add]
+    unfiltered_papers: List[PaperSummary]
     detailed_papers: List[PaperDetail]
 
     literature_review_notes: str
@@ -58,6 +59,7 @@ class PipelineState(TypedDict, total=False):
     # PDF 全文摄入
     ingested_papers: List[dict]
     ingestion_report: str
+    manual_papers: List[dict]  # 人工导入的中文文献 (data/manual_pdfs/)
 
     paper_draft: str
     paper_outline: str
@@ -95,6 +97,13 @@ class PipelineState(TypedDict, total=False):
 
     review_report: str
     review_score: int
+    review_dimensions: dict  # 固定 10 维逐项评分，作为下一轮复审锚点
+    review_issue_ledger: List[dict]  # 跨轮稳定问题 ID / 状态 / 验收证据
+    review_open_issue_count: int
+    review_critical_count: int
+    review_writer_critical_count: int  # 仅统计 Writer 职责内的 Critical (排除参考文献元数据等系统职责问题)
+    review_blocked_suggestions: List[dict]  # 审稿推荐但系统验证失败的论文 (不得引用, 需改写/删除)
+    review_quality_key: List[int]  # 硬门禁、评分、问题数构成的可比较质量向量
     review_recommendation: str
     review_report_path: str
 
@@ -102,7 +111,21 @@ class PipelineState(TypedDict, total=False):
 
     # 修订指令（increment_revision 写入，paper_writer 读取）
     revision_prompt: str
+    revision_contract: List[dict]  # 本轮修订契约条目，paper_writer 写完后逐条核验
+    revision_new_ref_numbers: List[int]  # 本轮因审稿建议新增的可信引用编号（核验"补充文献"类条目用）
     max_revisions: int
+    revision_history: str  # 跨轮累积的审稿要点摘要，供后续修订参考
+    previous_paper_draft: str  # 本轮修订前的稿件，供审稿人做确定性差异对比
+
+    # 收敛检测: 跟踪历史最优稿与评分, 连续多轮无提升则提前终止
+    best_score: int
+    best_draft: str
+    best_verified_refs: List[dict]  # 与 best_draft 编号配套的参考文献快照 (回退时同步恢复)
+    best_quality_key: List[int]
+    stagnation_count: int  # 连续评分无提升的轮数
 
     current_phase: str
     error: Optional[str]
+
+    # 跳过检索阶段 (复用 data/pipeline_cache 的检索产物, 从 paper_writing 直接开始)
+    skip_retrieval: bool

@@ -165,26 +165,26 @@ def test_precheck_excludes_retracted():
 
 # ---------- DOI 存在性判定（三值语义） ----------
 
-@patch("src.tools.citation_verifier.httpx.get")
+@patch("src.tools.citation_verifier.get_with_retry")
 def test_doi_exists_true(mock_get):
     mock_get.return_value.status_code = 200
     assert _doi_exists_via_crossref("10.1000/xyz") is True
 
 
-@patch("src.tools.citation_verifier.httpx.get")
+@patch("src.tools.citation_verifier.get_with_retry")
 def test_doi_exists_false(mock_get):
     mock_get.return_value.status_code = 404
     assert _doi_exists_via_crossref("10.1000/fake") is False
 
 
-@patch("src.tools.citation_verifier.httpx.get")
+@patch("src.tools.citation_verifier.get_with_retry")
 def test_doi_exists_unknown_on_error(mock_get):
     mock_get.side_effect = Exception("timeout")
     # None ≠ False: 网络失败不得把论文误判为伪造
     assert _doi_exists_via_crossref("10.1000/xyz") is None
 
 
-@patch("src.tools.citation_verifier.httpx.get")
+@patch("src.tools.citation_verifier.get_with_retry")
 def test_doi_exists_none_on_empty(mock_get):
     assert _doi_exists_via_crossref("") is None
     mock_get.assert_not_called()

@@ -131,6 +131,94 @@ def auto_fix_citations(draft: str, verified_refs: list[dict], invalid_nums: list
     return {"repaired_draft": repaired, "replacements": replacements, "removals": removals}
 
 
+_SENT_RE = re.compile(r"[^。！？!?；;\n]+")
+_AUTHOR_CITE_RE = re.compile(r"([A-Z][a-z]{1,20})(?:\s*等人|\s+et al\.?)")
+# 裸「X等」(不带"人"): 仅当其后紧跟归属动词时才认定为作者引用,
+# 避免把「Transformer等」「LoRa等」这类技术名词枚举误判为作者。
+# 触发案例: 正文「Zeng等则较早探索了...[51]」而 [51] 作者实为 Yu 等 → 引用错配。
+_AUTHOR_BARE_DENG_RE = re.compile(r"([A-Z][A-Za-z]{1,20})\s*等")
+_ATTRIB_TAIL_RE = re.compile(
+    r"人?\s*(?:\[\d+(?:\s*,\s*\d+)*\])?\s*"
+    r"(?:则|也|都|又|首次|较早|随后|进一步|分别|先后|最近|近年|后来|较|曾|已|率先)*\s*"
+    r"(?:提出|探索|设计|采用|研究|证明|发现|验证|分析|指出|表明|报道|开发|引入|利用|将|基于|通过|针对|构建|给出|揭示|开展)"
+)
+# 常见技术名词: 这些词 + 「等」是事物枚举而非作者引用
+_TECH_TERM_BLOCKLIST = {
+    "transformer", "lora", "wifi", "bluetooth", "zigbee", "gan", "gans", "cnn", "rnn",
+    "lstm", "gru", "svm", "rf", "rfid", "nfc", "iot", "ai", "ml", "dl", "dnn", "gnn",
+    "bert", "resnet", "vgg", "gpu", "cpu", "fpga", "asic", "adc", "dac", "mimo",
+    "ofdm", "csi", "rssi", "sei", "dctf", "uav", "gnss", "sdn", "mec", "noma",
+    "autoencoder", "vae", "rl", "drl", "ppo", "awgn", "snr", "svm", "knn", "pso",
+}
+
+
+def _find_author_surnames(sentence: str) -> set[str]:
+    """提取句中的作者姓氏引用: 「X等人」「X et al.」无条件识别;
+    裸「X等」需后接归属动词 (提出/探索/设计...) 才识别, 防技术名词误判。"""
+    surnames = set(_AUTHOR_CITE_RE.findall(sentence))
+    for m in _AUTHOR_BARE_DENG_RE.finditer(sentence):
+        name = m.group(1)
+        if name.lower() in _TECH_TERM_BLOCKLIST:
+            continue
+        tail = sentence[m.end(): m.end() + 24]
+        if _ATTRIB_TAIL_RE.match(tail):
+            surnames.add(name)
+    return surnames
+
+
+def check_citation_semantics(draft: str, verified_refs: list[dict]) -> dict:
+    """检测并移除正文「引用-语义错配」的引用标记 (确定性, 不依赖 LLM)。
+
+    保守策略: 仅处理**单个引用**的句子 (多引用句子跳过, 避免误删)。
+    若句中出现 "Xxx等人 / Xxx et al." 的作者名模式, 且该作者名不在 ref[n]
+    的作者列表中, 说明 [n] 指向了错误的文献 (如正文称 "Sankhe ORACLE" 却引用
+    CVPR 视频论文), 删除该 [n] 标记 (只删标记, 不改写正文, 宁可少删不可错删)。
+
+    Returns: {"repaired_draft": str, "mismatches": [{"num", "surname", "context"}]}
+    """
+    ref_authors: dict[int, str] = {}
+    for e in verified_refs:
+        n = e.get("ref_number")
+        if n is not None:
+            ref_authors[int(n)] = (e.get("authors", "") or "").lower()
+
+    mismatches = []
+    removals: list[tuple[int, int]] = []
+
+    for sm in _SENT_RE.finditer(draft):
+        sentence = sm.group(0)
+        nums = {int(x) for x in re.findall(r"\[(\d+)\]", sentence)}
+        if len(nums) != 1:
+            continue
+        n = next(iter(nums))
+        if n not in ref_authors:
+            continue
+        surnames = _find_author_surnames(sentence)
+        if not surnames:
+            continue
+        for surname in surnames:
+            if surname.lower() in ref_authors[n]:
+                continue
+            mismatches.append({
+                "num": n,
+                "surname": surname,
+                "context": re.sub(r"\s+", " ", sentence).strip()[:120],
+            })
+            # 删除本句中的所有 [n] 标记
+            for cm in re.finditer(rf"\[{n}\]", sentence):
+                removals.append((sm.start() + cm.start(), sm.start() + cm.end()))
+            break
+
+    if not removals:
+        return {"repaired_draft": draft, "mismatches": mismatches}
+
+    repaired = draft
+    for start, end in sorted(set(removals), reverse=True):
+        repaired = repaired[:start] + repaired[end:]
+    repaired = re.sub(r" {2,}", " ", repaired)
+    return {"repaired_draft": repaired, "mismatches": mismatches}
+
+
 def validate_draft_citations(draft: str, verified_refs: list[dict]) -> dict:
     """校验初稿引用与可信清单的对应关系
 
@@ -142,7 +230,9 @@ def validate_draft_citations(draft: str, verified_refs: list[dict]) -> dict:
             "report_md": "...",
         }
     """
-    inline_nums = [int(n) for n in re.findall(r"\[(\d+)\]", draft)]
+    from src.rag.reference_formatter import find_citation_numbers
+
+    inline_nums = find_citation_numbers(draft)
     valid_nums = set()
     ref_map = {}
     for e in verified_refs:
@@ -198,7 +288,7 @@ def validate_draft_citations(draft: str, verified_refs: list[dict]) -> dict:
 
 
 def run_citation_guard(state: PipelineState) -> dict:
-    """流水线节点: 写作后校验引用，并自动修复越界编号"""
+    """流水线节点: 写作后校验引用，并自动修复越界编号 + 语义错配引用"""
     draft = state.get("paper_draft", "")
     verified_refs = state.get("verified_references", [])
 
@@ -207,19 +297,36 @@ def run_citation_guard(state: PipelineState) -> dict:
 
     result = validate_draft_citations(draft, verified_refs)
 
+    # 语义一致性校验: 检测 "Xxx等人" 作者名与 ref[n] 不匹配的引用并删除标记。
+    # 在越界自动修复的基础上运行 (base_draft 已替换/删除越界编号)。
+    fix = result.get("fix", {})
+    base_draft = fix.get("repaired_draft") or draft
+    sem = check_citation_semantics(base_draft, verified_refs)
+    if sem["mismatches"]:
+        result["semantic_mismatches"] = sem["mismatches"]
+        result["report_md"] += (
+            "\n\n## ⚠️ 引用语义错配（已删除错误引用标记）\n\n"
+            + "\n".join(
+                f"- [{m['num']}] 正文提到作者「{m['surname']}」但该编号文献作者不含此名"
+                f" → 已删除标记: {m['context']}"
+                for m in sem["mismatches"]
+            )
+        )
+        logger.info(f"引用语义错配已删除 {len(sem['mismatches'])} 处")
+
     updates: dict = {
         "current_phase": "citation_guard",
         "guard_report": result,
-        "guard_invalid_count": len(result["invalid_citations"]),
+        "guard_invalid_count": len(result["invalid_citations"]) + len(sem["mismatches"]),
     }
 
-    # 若发生自动修复，用修复后的稿子继续后续阶段（citation_check / paper_review）
-    fix = result.get("fix", {})
-    if fix and fix["repaired_draft"] and fix["repaired_draft"] != draft:
-        updates["paper_draft"] = fix["repaired_draft"]
+    # sem["repaired_draft"] 已同时包含越界修复与语义错配删除的结果
+    if sem["repaired_draft"] != draft:
+        updates["paper_draft"] = sem["repaired_draft"]
         logger.info(
-            f"引用守门自动修复: {len(fix['replacements'])} 处替换, "
-            f"{len(set(fix['removals']))} 处删除"
+            f"引用守门自动修复: {len(fix.get('replacements', []))} 处替换, "
+            f"{len(set(fix.get('removals', [])))} 处删除, "
+            f"{len(sem['mismatches'])} 处语义错配删除"
         )
 
     return updates

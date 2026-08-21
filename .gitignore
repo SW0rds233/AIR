@@ -23,11 +23,16 @@ data/chroma/
 # 下载的 PDF
 data/pdfs/
 
+# 手动添加的 PDF 及缓存
+data/manual_pdfs/
+data/pipeline_cache/
+
 # 输出文件
 outputs/
 
 # 场馆缓存
 data/venue_cache.json
+data/oa_cache.json
 
 # LangGraph 检查点
 data/pipeline_checkpoints.sqlite
@@ -43,6 +48,15 @@ data/pipeline_checkpoints.sqlite
 # 缓存
 .pytest_cache/
 *.sqlite3-journal
+
+# 开发文档
+TESTING_RESOURCES.md
+WRITING_AND_FIGURES.md
+
+# 测试产物
+test_output.png
+测试.md
+rf_fingerprint_taxonomy.png
 
 # 系统文件
 .DS_Store

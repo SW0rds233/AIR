@@ -6,15 +6,9 @@ from __future__ import annotations
 1. Markdown 表格规范检查 (表头/分隔行/列数一致性)
 2. 引用格式检查 (文中 [n] 与参考文献对应)
 3. 图表编号检查 (图1/表1 编号连续)
-4. BibTeX 补全 (为缺失 bibtex 的文献生成)
-5. 中文参考文献格式转换 (GB/T 7714 风格)
 """
 
-import logging
 import re
-from pathlib import Path
-
-logger = logging.getLogger(__name__)
 
 
 def check_markdown_tables(draft: str) -> dict:
@@ -86,8 +80,15 @@ def check_figure_numbering(draft: str) -> dict:
     """检查图表编号是否连续 (图1, 图2, ... / 表1, 表2, ...)"""
     issues = []
 
+    # 编号正则: "图/表" + 1-3 位数字 + 非数字边界。
+    # 关键: 不能误匹配 "代表2018年"(表+年份) / "试图2020"(图+年份) 等
+    # 中文短语, 否则年份被当成编号, max 变成 2018 导致报"6~2017 全部缺失"。
+    # \d{1,3} + (?![0-9]) 保证 4 位年份 (2018) 不会命中。
+    _FIG_RE = re.compile(r"图\s*(\d{1,3})(?!\d)")
+    _TBL_RE = re.compile(r"表\s*(\d{1,3})(?!\d)")
+
     # 检查图编号
-    fig_nums = [int(n) for n in re.findall(r"图\s*(\d+)", draft)]
+    fig_nums = [int(n) for n in _FIG_RE.findall(draft)]
     if fig_nums:
         expected = list(range(1, max(fig_nums) + 1))
         missing = [n for n in expected if n not in fig_nums]
@@ -95,7 +96,7 @@ def check_figure_numbering(draft: str) -> dict:
             issues.append(f"图编号缺失: {missing}")
 
     # 检查表编号
-    tbl_nums = [int(n) for n in re.findall(r"表\s*(\d+)", draft)]
+    tbl_nums = [int(n) for n in _TBL_RE.findall(draft)]
     if tbl_nums:
         expected = list(range(1, max(tbl_nums) + 1))
         missing = [n for n in expected if n not in tbl_nums]
@@ -112,8 +113,10 @@ def check_figure_numbering(draft: str) -> dict:
 
 def check_citation_format(draft: str) -> dict:
     """检查引用格式 (文中 [n] 编号连续, 无 [0], 无空引用 [])"""
+    from src.rag.reference_formatter import find_citation_numbers
+
     issues = []
-    all_nums = [int(n) for n in re.findall(r"\[(\d+)\]", draft)]
+    all_nums = find_citation_numbers(draft)
 
     if 0 in all_nums:
         issues.append("存在引用编号 [0]，应为从 1 开始")
@@ -134,68 +137,6 @@ def check_citation_format(draft: str) -> dict:
         "issues": issues,
         "ok": len(issues) == 0,
     }
-
-
-def generate_bibtex(title: str, authors: str = "", year: str = "", url: str = "") -> str:
-    """为缺失 BibTeX 的文献生成条目"""
-    key_parts = []
-    if authors:
-        first_author = authors.split(",")[0].strip().split()[-1]
-        key_parts.append(first_author)
-    else:
-        key_parts.append("unknown")
-    if year:
-        key_parts.append(year)
-    key = "_".join(key_parts).lower()
-
-    entry = f"@article{{{key},\n"
-    entry += f"  title = {{{title}}},\n"
-    if authors:
-        entry += f"  author = {{{authors}}},\n"
-    if year:
-        entry += f"  year = {{{year}}},\n"
-    if url:
-        entry += f"  url = {{{url}}},\n"
-    entry += "}"
-    return entry
-
-
-def convert_to_gbt7714(bibtex_entry: str) -> str:
-    """将 BibTeX 条目转换为 GB/T 7714 中文参考文献格式
-
-    示例: "VASWANI A, SHAZEER N, PARMAR N, et al. Attention is all you need[C].
-           Advances in Neural Information Processing Systems. 2017: 5998-6008."
-    """
-    title = re.search(r"title\s*=\s*[{]([^}]+)[}]", bibtex_entry, re.I)
-    author = re.search(r"author\s*=\s*[{]([^}]+)[}]", bibtex_entry, re.I)
-    year = re.search(r"year\s*=\s*[{]?(\d{4})", bibtex_entry, re.I)
-
-    # 作者名: "Vaswani, Ashish and Shazeer, Noam" → "VASWANI A, SHAZEER N"
-    author_str = ""
-    if author:
-        parts = author.group(1).split(" and ")
-        formatted = []
-        for p in parts:
-            p = p.strip()
-            if "," in p:
-                surname, given = p.split(",", 1)
-                initials = "".join(w[0] for w in given.strip().split() if w)
-                formatted.append(f"{surname.strip().upper()} {initials}")
-            else:
-                words = p.split()
-                if len(words) >= 2:
-                    formatted.append(f"{words[-1].upper()} {''.join(w[0] for w in words[:-1])}")
-                else:
-                    formatted.append(words[0].upper())
-        author_str = ", ".join(formatted[:3])
-        if len(parts) > 3:
-            author_str += ", et al"
-
-    title_str = title.group(1) if title else ""
-    year_str = year.group(1) if year else ""
-
-    result = f"{author_str}. {title_str}. {year_str}."
-    return result.strip()
 
 
 def format_check_report(draft: str) -> dict:

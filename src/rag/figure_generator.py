@@ -348,6 +348,7 @@ def generate_figures_from_notes(
     taxonomy = parse_taxonomy_from_text(lit_notes)
     if taxonomy:
         tax_text = "\n".join(f"- {cat}: {', '.join(subs[:8])}" for cat, subs in taxonomy.items())
+        print("  [figure] 生成分类体系图 (LLM 优先, 超时/失败回退模板)...")
         try:
             from src.rag.figure_llm import generate_taxonomy_figure
             llm_path = generate_taxonomy_figure(topic, tax_text, index=0)
@@ -363,6 +364,7 @@ def generate_figures_from_notes(
     milestones = parse_timeline_from_text(lit_notes)
     if len(milestones) >= 3:
         tl_text = "\n".join(f"{m['year']}: {m['event']}" for m in milestones[:12])
+        print("  [figure] 生成研究时间线图 (LLM 优先, 超时/失败回退模板)...")
         try:
             from src.rag.figure_llm import generate_timeline_figure
             llm_path = generate_timeline_figure(topic, tl_text, index=len(paths))
@@ -375,11 +377,13 @@ def generate_figures_from_notes(
             paths.append(generate_timeline(f"{topic} 研究发展脉络", milestones[:12], filename=f"timeline_{len(paths)}.png"))
 
     # ===== 3. 出版趋势图 (确定性: 从 verified_refs 统计) =====
+    print("  [figure] 生成出版趋势图 (确定性统计)...")
     trend_path = _generate_trend_from_refs(topic, refs, len(paths))
     if trend_path:
         paths.append(trend_path)
 
     # ===== 4. 方法对比图 (LLM 提取结构化数据) =====
+    print("  [figure] 生成方法对比图 (LLM 提取数据)...")
     cmp_path = _generate_comparison_from_notes(topic, lit_notes, len(paths))
     if cmp_path:
         paths.append(cmp_path)

@@ -97,7 +97,7 @@ def test_check_coverage_ok():
     assert cov["coverage_ok"] is True
 
 
-@patch("src.tools.citation_verifier.httpx.get")
+@patch("src.tools.citation_verifier.get_with_retry")
 def test_verify_single_citation_verified(mock_get):
     mock_resp = MagicMock()
     mock_resp.json.return_value = {
@@ -120,7 +120,7 @@ def test_verify_single_citation_verified(mock_get):
     assert result.doi == "10.5555/123"
 
 
-@patch("src.tools.citation_verifier.httpx.get")
+@patch("src.tools.citation_verifier.get_with_retry")
 def test_verify_single_citation_not_found(mock_get):
     mock_resp = MagicMock()
     mock_resp.json.return_value = {"message": {"items": []}}
@@ -142,7 +142,7 @@ def test_verify_draft_citations_offline_with_mock():
 [1] Attention Is All You Need (2017)
 [2] Some Fake Paper That Does Not Exist (2020)
 """
-    with patch("src.tools.citation_verifier.httpx.get") as mock_get:
+    with patch("src.tools.citation_verifier.get_with_retry") as mock_get:
         # CrossRef: 第一调用返回论文1命中，第二调用返回空
         mock_resp1 = MagicMock()
         mock_resp1.json.return_value = {

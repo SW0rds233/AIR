@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 CITE_RANGE_RE = _re.compile(r"\[(\d+)-(\d+)\]")
 CITE_LIST_RE = _re.compile(r"\[([\d,\s]+)\]")
 FIG_PLACEHOLDER_RE = _re.compile(r"\[图\s*(\d+)\s*[:：]\s*(.+?)\]")
+TABLE_PLACEHOLDER_RE = _re.compile(r"\[表\s*\d+\s*[:：]\s*.*\]")
 
 LATEX_PREAMBLE = r"""\documentclass[UTF8,a4paper,12pt]{ctexart}
 \usepackage[hmargin=1.2in,vmargin=1in]{geometry}
@@ -45,6 +46,30 @@ LATEX_POSTAMBLE = r"""
 """
 
 
+def _escape_latex(text: str) -> str:
+    """转义 LaTeX 特殊字符（保持数学公式 $...$ 与 LaTeX 命令不变）
+
+    只转义普通文本中危险且常见的字符: _ & % #。
+    - 下划线 _ 未转义会触发 "Missing $ inserted" (如 "Raw_I_Q")
+    - 反斜杠 \\ 和花括号 {} 是命令结构, 不能转义, 否则破坏 \\textbf{} 等
+    - 数学公式 $...$ 内部不转义 (如 $x_i$)
+    """
+    # 先保护数学公式 $...$
+    math_blocks = []
+    def _protect(m):
+        math_blocks.append(m.group(0))
+        return f"\x00MATH{len(math_blocks) - 1}\x00"
+    text = _re.sub(r"\$[^$]*\$", _protect, text)
+
+    for ch in ("_", "&", "%", "#"):
+        text = text.replace(ch, "\\" + ch)
+
+    # 恢复数学公式
+    for i, blk in enumerate(math_blocks):
+        text = text.replace(f"\x00MATH{i}\x00", blk)
+    return text
+
+
 def _md_to_latex_inline(md_text: str) -> str:
     """Markdown 行内格式 → LaTeX"""
     # **bold** → \textbf{bold}
@@ -53,7 +78,8 @@ def _md_to_latex_inline(md_text: str) -> str:
     text = _re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\\textit{\1}", text)
     # `code` → \texttt{code}
     text = _re.sub(r"`([^`]+)`", r"\\texttt{\1}", text)
-    # 数学公式 $...$ 保留
+    # 数学公式 $...$ 保留，其余 LaTeX 特殊字符转义
+    text = _escape_latex(text)
     return text
 
 
@@ -81,9 +107,15 @@ def _md_to_latex_body(md_text: str, fig_paths: list[str] | None = None) -> str:
                 fig_file = fig_paths[n - 1]
             else:
                 fig_file = f"figures/fig_{n}.png"
-            rel = fig_file.replace("\\", "/").replace("outputs/", "")
             from pathlib import Path as _Path
-            full = _Path("outputs") / rel
+
+            # fig_paths 可能是绝对路径或相对路径; 统一解析为绝对路径后,
+            # 再换算成相对 outputs/ 的路径 (figures/xxx.png), 供 \includegraphics 使用
+            full = _Path(fig_file).resolve()
+            try:
+                rel = full.relative_to(_Path("outputs").resolve()).as_posix()
+            except ValueError:
+                rel = full.name
             if full.exists():
                 output.append(r"\begin{figure}[htbp]")
                 output.append(r"\centering")
@@ -94,6 +126,10 @@ def _md_to_latex_body(md_text: str, fig_paths: list[str] | None = None) -> str:
             else:
                 # 图片缺失: 文字占位（full pipeline 中 finalize 先于 latex_render 执行, 图片已就位）
                 output.append(f"\\textbf{{[图{n}: {cap}]}}")
+            continue
+
+        # --- 表格标题占位: [表N: caption] → 跳过 (表格内容紧随其后) ---
+        if TABLE_PLACEHOLDER_RE.match(stripped):
             continue
 
         # --- 表格: | ... | 开头 → 收集后用 pandoc 转换 ---
@@ -113,7 +149,6 @@ def _md_to_latex_body(md_text: str, fig_paths: list[str] | None = None) -> str:
             in_table = False
 
         # --- 引用: [n] / [n,m] / [n-m] → \cite{ref{n}} ---
-        line2 = _re.sub(r"-(\d+)\]", lambda m: "," + ",".join(str(i) for i in range(0, 0)), line)
         # 分段处理: 先 [n-m] 范围
         def _expand_range(m):
             a, b = int(m.group(1)), int(m.group(2))
@@ -122,13 +157,26 @@ def _md_to_latex_body(md_text: str, fig_paths: list[str] | None = None) -> str:
         # 再 [n,m,...]
         line2 = CITE_LIST_RE.sub(lambda m: "\\cite{" + _re.sub(r"\s+", "", "ref" + m.group(1).replace(",", ",ref")) + "}", line2)
 
-        # --- 标题: # → \section{} ---
-        if _re.match(r"^#\s", line2):
-            line2 = _re.sub(r"^#\s+", r"\\section{", line2) + "}"
-        elif _re.match(r"^##\s", line2):
-            line2 = _re.sub(r"^##\s+", r"\\subsection{", line2) + "}"
+        # --- 标题层级: 论文标题 (#) 已在 render_latex 提取为 \title 并从正文移除,
+        #     故正文 ## → \section, ### → \subsection, #### → \subsubsection。
+        #     writer 的标题里带手动编号 ("1 引言"/"1.1 背景"), 而 LaTeX 会自动编号,
+        #     必须剥离手动编号, 否则出现 "2 1 引言" 重复编号 ---
+        if _re.match(r"^####\s", line2):
+            line2 = _re.sub(r"^####\s+", "", line2)
+            line2 = _re.sub(r"^\d+(\.\d+)*\s+", "", line2)
+            line2 = r"\subsubsection{" + line2 + "}"
         elif _re.match(r"^###\s", line2):
-            line2 = _re.sub(r"^###\s+", r"\\subsubsection{", line2) + "}"
+            line2 = _re.sub(r"^###\s+", "", line2)
+            line2 = _re.sub(r"^\d+(\.\d+)*\s+", "", line2)
+            line2 = r"\subsection{" + line2 + "}"
+        elif _re.match(r"^##\s", line2):
+            line2 = _re.sub(r"^##\s+", "", line2)
+            line2 = _re.sub(r"^\d+(\.\d+)*\s+", "", line2)
+            line2 = r"\section{" + line2 + "}"
+        elif _re.match(r"^#\s", line2):
+            line2 = _re.sub(r"^#\s+", "", line2)
+            line2 = _re.sub(r"^\d+(\.\d+)*\s+", "", line2)
+            line2 = r"\section{" + line2 + "}"
 
         # 行内格式
         line2 = _md_to_latex_inline(line2)
@@ -161,7 +209,13 @@ def _convert_table_pandoc(md_table: str) -> str:
     for i, row in enumerate(rows):
         cells = [_clean(c) for c in row.split("|")[1:-1]]
         sep = " & "
-        lines.append("    " + sep.join(cells) + r" \\")
+        row_tex = sep.join(cells)
+        # 行首为 [n] (引用列) 时, LaTeX 会把 \\ 或 \toprule/\midrule 后的 [..]
+        # 解析为竖向间距/线宽可选参数 → "Illegal unit of measure" 编译中断,
+        # 引用无法完成第二遍解析 → PDF 中全部显示 [?]。用 \relax 阻断。
+        if row_tex.lstrip().startswith("["):
+            row_tex = r"\relax " + row_tex
+        lines.append("    " + row_tex + r" \\")
         if i == 0:
             lines.append(r"\midrule")
     lines.append(r"\bottomrule")
@@ -177,21 +231,68 @@ def render_latex(draft_md: str, topic: str, verified_refs: list[dict],
     参考文献以 \begin{thebibliography} 确定性嵌入 .tex 本身——
     不依赖 bibtex 和 .bib 外部文件（消除 bibtex 文件名/样式兼容性）。
     """
-    from src.rag.reference_formatter import strip_references_section
+    from src.rag.reference_formatter import (
+        strip_references_section,
+        strip_evidence_markers,
+        _strip_writer_statistics,
+    )
     from datetime import datetime
 
+    # 参考文献必须从草稿自身的参考文献章节构建: 该章节与正文引用编号
+    # 严格一致 (renumber_citations 保证)。若改用 state 的 verified_refs,
+    # 在 format_check 回退历史最优稿后编号会与正文错位 → \cite 找不到
+    # \bibitem → PDF 中引用显示为 [?] (实测故障)。
+    biblio = _build_thebibliography_from_draft(draft_md)
+
     body_md = strip_references_section(draft_md)
+    body_md = strip_evidence_markers(body_md)
+    body_md = _strip_writer_statistics(body_md)
+
+    # 提取论文标题 (正文第一个 # 标题行) 用于 \title, 并从正文中移除该行
+    title = topic
+    tm = _re.search(r"^#\s+(.+)$", body_md, _re.MULTILINE)
+    if tm:
+        title = tm.group(1).strip()
+        body_md = body_md[: tm.start()] + body_md[tm.end():]
+
     body_tex = _md_to_latex_body(body_md, fig_paths)
 
     preamble = (LATEX_PREAMBLE
-                .replace("__TITLE__", topic)
+                .replace("__TITLE__", _escape_latex(title))
                 .replace("__DATE__", datetime.now().strftime("%Y-%m-%d")))
-    biblio = _build_thebibliography(verified_refs)
+    if not biblio:
+        # 草稿无参考文献章节时的兜底 (如初稿被剥离)
+        biblio = _build_thebibliography(verified_refs)
     return preamble + "\n" + body_tex + "\n" + biblio + "\n" + LATEX_POSTAMBLE
 
 
+def _build_thebibliography_from_draft(draft_md: str) -> str:
+    r"""从草稿内嵌的参考文献章节生成 thebibliography。
+
+    草稿正文引用 [n] 与该章节条目 [n] 由 renumber_citations 保证一一对应,
+    据此构建 \bibitem{refn} 可确保 \cite 与 \bibitem 永远匹配。
+    """
+    m = _re.search(r"^#{1,3}\s*(?:参考文献|References)\s*$", draft_md or "", _re.M | _re.I)
+    if not m:
+        return ""
+    entries: list[tuple[int, str]] = []
+    for line in draft_md[m.end():].splitlines():
+        mm = _re.match(r"^\[(\d+)\]\s*(.+)$", line.strip())
+        if mm:
+            entries.append((int(mm.group(1)), mm.group(2).strip()))
+    if not entries:
+        return ""
+    max_n = max(n for n, _ in entries)
+    lines = [f"\\begin{{thebibliography}}{{{max_n}}}"]
+    for n, body in sorted(entries):
+        # 条目里可能含下划线 (如 Raw_I_Q), 未转义会触发 "Missing $ inserted"
+        lines.append(f"\\bibitem{{ref{n}}} {_escape_latex(body)}")
+    lines.append(r"\end{thebibliography}")
+    return "\n".join(lines)
+
+
 def _build_thebibliography(verified_refs: list[dict]) -> str:
-    """从可信清单生成 \begin{thebibliography}...\end{thebibliography}
+    r"""从可信清单生成 \begin{thebibliography}...\end{thebibliography}
 
     每条 [n] 的 \cite{refN} 等价于 \bibitem{refN} 的标签。[1], [2], ...
     格式: GB/T 7714-2015 风格 —— 作者. 题名[J/C/EB/OL]. 出处, 年. DOI.
@@ -209,6 +310,8 @@ def _build_thebibliography(verified_refs: list[dict]) -> str:
         # 输出: [1] AUTHOR. Title[J]. Venue, Year. DOI.
         # 映射到: \bibitem{ref1} AUTHOR. Title[J]. Venue, Year. DOI.
         body = entry_text.split("]", 1)[-1].strip() if "]" in entry_text else entry_text
+        # 标题/作者里可能含下划线 (如 Raw_I_Q), 未转义会触发 "Missing $ inserted"
+        body = _escape_latex(body)
         lines.append(f"\\bibitem{{ref{n}}} {body}")
     lines.append(r"\end{thebibliography}")
     return "\n".join(lines)

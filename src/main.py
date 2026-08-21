@@ -41,6 +41,8 @@ def main():
                         help=f"最大修改轮次 (默认: {MAX_REVISIONS})")
     parser.add_argument("--resume", action="store_true",
                         help="断点续跑: 恢复同一主题上次中断的会话")
+    parser.add_argument("--skip-retrieval", action="store_true",
+                        help="跳过文献检索/摄入/预验证, 复用 data/pipeline_cache 的检索产物; 大纲/草稿/审稿循环仍重新生成")
 
     args = parser.parse_args()
 
@@ -56,10 +58,15 @@ def main():
     print(f"  最大修改: {args.max_revisions} 轮")
     if args.resume:
         print(f"  模式:     断点续跑")
+    if args.skip_retrieval:
+        print(f"  模式:     跳过检索 (复用 data/pipeline_cache)")
     print("=" * 60)
     print()
 
-    print("启动流水线: 文献查阅 -> 初稿撰写 -> 论文审阅 -> [修改循环]")
+    if args.skip_retrieval:
+        print("启动流水线: 初稿撰写 -> 论文审阅 -> [修改循环] (跳过检索阶段)")
+    else:
+        print("启动流水线: 文献查阅 -> 初稿撰写 -> 论文审阅 -> [修改循环]")
     print("-" * 60)
 
     try:
@@ -70,6 +77,7 @@ def main():
             time_range=args.time_range,
             max_revisions=args.max_revisions,
             resume=args.resume,
+            skip_retrieval=args.skip_retrieval,
         )
     except KeyboardInterrupt:
         print("\n\n流水线已中断。")
