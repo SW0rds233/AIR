@@ -83,6 +83,27 @@ def _normalize_keyword(kw: str) -> str:
     return re.sub(r"[\s_\-]+", "", kw.lower())
 
 
+def _split_keyword_tokens(kw: str) -> list[str]:
+    """把中英混写关键词拆成可匹配的 token (英文短语/缩写 + 中文短语分开)。
+
+    实测教训: Planner 提取的关键词常为中英混写 "射频指纹（RF fingerprinting / RFFI）",
+    若整体归一化后仍含中文与括号, 英文论文标题/摘要永远命中不了 → 200 篇被误删到 1 篇。
+    拆成 token 后 "rffingerprinting"/"rffi"/"射频指纹" 各自独立匹配:
+    - 英文 token: 连续字母数字, 长度 ≥4 (丢弃 rf/fi/sei 等过短缩写, 它们信息量低易误匹配)
+    - 中文 token: 连续汉字, 长度 ≥2
+    """
+    tokens: list[str] = []
+    for m in re.finditer(r"[a-z0-9]+", (kw or "").lower()):
+        t = m.group(0)
+        if len(t) >= 4 and t not in tokens:
+            tokens.append(t)
+    for m in re.finditer(r"[\u4e00-\u9fff]+", kw or ""):
+        t = m.group(0)
+        if len(t) >= 2 and t not in tokens:
+            tokens.append(t)
+    return tokens
+
+
 def extract_keywords(topic: str, user_keywords: str = "") -> list[str]:
     """提取检索关键词（按逗号/分号切分, **空格不拆散复合词**）
 
@@ -142,6 +163,14 @@ def rule_filter(papers: list[dict], topic: str, user_keywords: str = "") -> list
         return papers
     norm_kws = [_normalize_keyword(kw) for kw in kws]
     norm_kws = list(dict.fromkeys(norm_kws))
+    # 命中依据 = 完整关键词 + 拆解后的中英文 token。
+    # 中英混写关键词 (如 "射频指纹（RF fingerprint）") 拆成 "射频指纹"/"fingerprint",
+    # 否则英文论文标题无法命中带中文/括号的关键词 → 大量误删 (实测 200→1)。
+    match_terms = list(norm_kws)
+    for kw in kws:
+        match_terms.extend(_split_keyword_tokens(kw))
+    match_terms = [t for t in match_terms if t]
+    match_terms = list(dict.fromkeys(match_terms))
 
     # 同词异域检查: 主题或关键词含左侧触发词时, 标题含右侧术语 → 剔除
     topic_lower = (topic or "").lower()
@@ -202,7 +231,7 @@ def rule_filter(papers: list[dict], topic: str, user_keywords: str = "") -> list
             logger.debug(f"规则过滤剔除 (非技术来源): {p.get('title', '')[:60]} ({venue[:40]})")
             continue
 
-        hits = sum(1 for kw in norm_kws if kw in text)
+        hits = sum(1 for t in match_terms if t in text)
         if hits > 0:
             kept.append(p)
         else:

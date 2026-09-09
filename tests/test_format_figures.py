@@ -108,6 +108,87 @@ def test_generate_taxonomy_tree():
     assert path.endswith(".png")
 
 
+def test_classify_ref_category():
+    from src.rag.figure_generator import _classify_ref_category
+
+    assert _classify_ref_category("Security of IoT via adversarial machine learning") == "安全与对抗"
+    assert _classify_ref_category("Channel-robust RF fingerprinting") == "信道鲁棒与泛化"
+    assert _classify_ref_category("Differential constellation trace figure") == "特征工程与信号处理"
+    assert _classify_ref_category("A Novel Dataset for RF Fingerprinting") == "数据集与实测"
+    assert _classify_ref_category("ResNet based deep learning for SEI") == "模型架构与深度学习"
+
+
+def test_generate_rf_pipeline():
+    from src.rag.figure_generator import generate_rf_pipeline
+
+    path = generate_rf_pipeline("测试识别流程", filename="test_pipeline.png")
+    assert Path(path).exists()
+    assert path.endswith(".png")
+
+
+def test_generate_framework_overview():
+    from src.rag.figure_generator import generate_framework_overview
+
+    path = generate_framework_overview("测试研究框架", filename="test_framework.png")
+    assert Path(path).exists()
+    assert path.endswith(".png")
+
+
+def test_generate_topic_year_heatmap():
+    from src.rag.figure_generator import _generate_topic_year_heatmap
+
+    refs = [
+        {"title": "Robust RF Fingerprinting with CNN", "year": "2019"},
+        {"title": "Adversarial attacks on RF authentication", "year": "2021"},
+        {"title": "Fractal feature for emitter identification", "year": "2018"},
+    ]
+    path = _generate_topic_year_heatmap("测试", refs, 0)
+    assert path and Path(path).exists()
+    assert "heatmap" in path
+
+
+def test_validate_comparison_data_ok():
+    from src.rag.figure_generator import _validate_comparison_data
+
+    ok, _ = _validate_comparison_data(
+        ["A", "B", "C"], {"精度": [0.9, 0.8, 0.7], "鲁棒性": [0.5, 0.6, 0.4], "开销": [0.3, 0.5, 0.8]}
+    )
+    assert ok is True
+
+
+def test_validate_comparison_data_reject_few_methods():
+    from src.rag.figure_generator import _validate_comparison_data
+
+    ok, reason = _validate_comparison_data(["A"], {"精度": [0.9], "鲁棒性": [0.5]})
+    assert ok is False and "方法数" in reason
+
+
+def test_validate_comparison_data_reject_few_metrics():
+    from src.rag.figure_generator import _validate_comparison_data
+
+    ok, reason = _validate_comparison_data(["A", "B"], {"精度": [0.9, 0.8]})
+    assert ok is False and "指标数" in reason
+
+
+def test_validate_comparison_data_reject_out_of_range():
+    """数值超出 [0,1] 视为编造/异常数据, 拒绝渲染"""
+    from src.rag.figure_generator import _validate_comparison_data
+
+    ok, reason = _validate_comparison_data(
+        ["A", "B"], {"精度": [0.9, 1.5], "鲁棒性": [0.5, 0.6], "开销": [0.1, 0.2]}
+    )
+    assert ok is False and "超出" in reason
+
+
+def test_validate_comparison_data_reject_len_mismatch():
+    from src.rag.figure_generator import _validate_comparison_data
+
+    ok, reason = _validate_comparison_data(
+        ["A", "B"], {"精度": [0.9, 0.8], "鲁棒性": [0.5], "开销": [0.1, 0.2]}
+    )
+    assert ok is False and "不一致" in reason
+
+
 if __name__ == "__main__":
     tests = [
         test_markdown_table_ok,
@@ -119,6 +200,15 @@ if __name__ == "__main__":
         test_parse_taxonomy,
         test_parse_timeline,
         test_generate_taxonomy_tree,
+        test_classify_ref_category,
+        test_generate_rf_pipeline,
+        test_generate_framework_overview,
+        test_generate_topic_year_heatmap,
+        test_validate_comparison_data_ok,
+        test_validate_comparison_data_reject_few_methods,
+        test_validate_comparison_data_reject_few_metrics,
+        test_validate_comparison_data_reject_out_of_range,
+        test_validate_comparison_data_reject_len_mismatch,
     ]
     passed = 0
     for t in tests:

@@ -26,6 +26,7 @@ STYLE_BOILERPLATE = f'''import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from cycler import cycler
 from matplotlib import font_manager
 
 # ---- 学术样式样板 (系统注入, LLM 代码在其后执行, 可覆盖) ----
@@ -45,6 +46,14 @@ plt.rcParams["axes.labelsize"] = 10
 plt.rcParams["xtick.labelsize"] = 9
 plt.rcParams["ytick.labelsize"] = 9
 plt.rcParams["legend.fontsize"] = 8
+plt.rcParams["axes.prop_cycle"] = cycler(color={PALETTE!r})
+plt.rcParams["xtick.direction"] = "in"
+plt.rcParams["ytick.direction"] = "in"
+plt.rcParams["legend.frameon"] = False
+plt.rcParams["axes.linewidth"] = 0.5
+plt.rcParams["grid.linewidth"] = 0.5
+plt.rcParams["savefig.bbox"] = "tight"
+plt.rcParams["savefig.pad_inches"] = 0.05
 for _name in {CN_FONT_CANDIDATES!r}:
     if any(_name.lower() in f.name.lower() for f in font_manager.fontManager.ttflist):
         plt.rcParams["font.family"] = [_name, {EN_FONT!r}]
@@ -67,6 +76,35 @@ CODE_GEN_SYSTEM = f"""你是"学术图表绘制专家"。你的任务是根据�
 - 分类树: 使用 ax.axis("off") + 文本框 bbox + 箭头 annotate 绘制层次结构
 - 分类树/层次图节点必须用 dict 表示 (如 node = dict(name="...", depth=1))，访问层级用 node["depth"]；严禁对 int/str 变量做下标访问（node["depth"] 会触发 'int' object is not subscriptable）
 - 时间线: 使用 ax.axis("off") + 水平轴线 + 上下交替的事件标签
+
+## 参考样例 (分组柱状图, 结构可模仿)
+
+```python
+import matplotlib.pyplot as plt
+import numpy as np
+
+methods = ["方法A", "方法B", "方法C"]
+metrics = {{"精度": [0.9, 0.8, 0.7], "鲁棒性": [0.7, 0.8, 0.9]}}
+x = np.arange(len(methods))
+n_metrics = len(metrics)
+width = 0.8 / n_metrics
+fig, ax = plt.subplots(figsize=(8, 5))
+for i, (name, vals) in enumerate(metrics.items()):
+    offset = (i - n_metrics / 2 + 0.5) * width
+    ax.bar(x + offset, vals, width * 0.9, label=name)
+ax.set_xticks(x)
+ax.set_xticklabels(methods)
+ax.set_xlabel("方法")
+ax.set_ylabel("得分")
+ax.set_title("方法对比")
+ax.legend()
+fig.tight_layout()
+fig.savefig(OUTPUT_PATH, dpi=300, bbox_inches="tight")
+plt.close(fig)
+```
+
+要点: 用 `fig, ax = plt.subplots()`; 数据用列表/字典显式给出; 轴标签含含义;
+`fig.savefig(OUTPUT_PATH, dpi=300, bbox_inches="tight")` 后 `plt.close(fig)`。
 """
 
 # 代码级审阅专家: 无多模态 API 时, 审阅代码而非图像 (FigMirror 模式)
@@ -101,16 +139,81 @@ FIGURE_TIME_BUDGET = float(os.getenv("FIGURE_TIME_BUDGET", "300"))
 # 强制修正轮耗尽时间预算后整图回退模板, 净浪费 ~6 分钟/图。
 # 执行成功 + PNG 质量检测通过即接受; 设 FIGURE_CODE_REVIEW=1 可重新启用。
 FIGURE_CODE_REVIEW = os.getenv("FIGURE_CODE_REVIEW", "0") == "1"
+# 视觉审阅 (多模态闭环): 把渲染出的 PNG 直接交给支持图像输入的模型审图,
+# 解决"代码审阅看不到图"的盲区。默认关闭 (需 reviewer 模型支持视觉),
+# 设 FIGURE_VISION_REVIEW=1 启用; 模型不支持图像时自动降级为"直接接受"。
+FIGURE_VISION_REVIEW = os.getenv("FIGURE_VISION_REVIEW", "0") == "1"
+# best-of-N 候选生成: 首轮并行生成 N 个候选, 按内容密度+颜色多样性选最优。
+# 用多次生成成本换"单次生成方差下降", 降低回退模板概率; 默认 1 (关闭)。
+# 关键图 (分类体系/对比图) 建议设 2-3; 与 FIGURE_TIME_BUDGET 联动, 超时即取已完成候选。
+FIGURE_BEST_OF_N = int(os.getenv("FIGURE_BEST_OF_N", "1"))
+# 视觉审阅修正轮数上限: 视觉审阅最多修正 N 轮, 达到后采用当前已渲染图。
+# 实测视觉审阅 (kimi) 每轮报满问题 → 修正循环永不收敛、耗光时间预算;
+# 限制轮数 (默认 1) 保留"抓硬伤"价值, 同时避免空转。
+VISION_MAX_FIXES = int(os.getenv("VISION_MAX_FIXES", "1"))
+
+
+# 视觉审阅专家: 直接看渲染后的图片 (与 CODE_REVIEWER_SYSTEM 的"看不到图"互补)
+VISION_REVIEWER_SYSTEM = """你是"学术图表视觉审阅专家"。你能直接看到渲染后的图片。
+
+你的任务是**只报告会导致图不可用或严重误导读者的 Critical 缺陷**，例如:
+- 整张图空白/纯色/几乎无内容
+- 文字被截断、超出图框、看不见
+- 图例完全遮挡了数据点
+- 文字大量重叠、无法辨认
+- 分类树/时间线的层级或连接关系错误
+- 坐标轴完全缺失标签
+
+**重要**: 只报告上述 Critical 级缺陷。可改进但不严重的瑕疵
+(配色不够美观、字号略小、间距可再优化、图例位置可微调等)
+一律视为合格，不要报告。**宁可输出「无」，也不要报吹毛求疵的小问题。**
+
+输出格式（严格）:
+```
+问题列表:
+- 问题1: 位置/原因
+- 问题2: ...
+（若全部合规则输出: 问题列表:
+- 无）
+```"""
+
+
+# 视觉审阅 Critical 关键词: 只认含这些词的"硬伤"问题, 过滤"字号略小/配色可优化"
+# 等吹毛求疵 —— 实测 kimi 每轮报满 5 个此类问题, 导致修正循环空转耗光预算。
+_CRITICAL_VISION_HINTS = (
+    "空白", "纯色", "空图", "截断", "裁切", "被裁", "超出", "溢出",
+    "遮挡", "重叠", "覆盖", "缺失", "丢失", "无标签", "无标题", "无图例",
+    "缺标签", "缺图例", "缺标题", "错误", "错乱", "颠倒", "乱序",
+    "不可读", "看不清", "无法辨认", "模糊", "看不见", "看不到", "消失",
+)
+
+
+def _extract_vision_issues(review_text: str) -> list[str]:
+    """从视觉审阅意见中提取**仅 Critical 级**问题。
+
+    过滤掉不含 _CRITICAL_VISION_HINTS 关键词的吹毛求疵问题,
+    避免"每轮报满 5 个问题"导致修正循环永不收敛 (实测痛点)。
+    """
+    all_issues = _extract_review_issues(review_text)
+    return [i for i in all_issues if any(h in i for h in _CRITICAL_VISION_HINTS)]
 
 
 def _extract_code(llm_output: str) -> str:
-    """从 LLM 输出提取 python 代码块"""
-    m = re.search(r"```python\n(.*?)```", llm_output, re.DOTALL)
+    """从 LLM 输出提取 python 代码块 (健壮版)
+
+    实测失败模式: LLM 输出围栏 ```python 后带尾随空格 / CRLF 换行 / 其他语言标记,
+    旧正则 ```python\\n 匹配不到 → 返回整段含围栏的文本 → exec 遇 ```python
+    报 SyntaxError (File "<string>", line 41)。此处容错:
+    语言标记可选/可带空白、换行兼容 \\r、闭合围栏可缺失。
+    """
+    if not llm_output:
+        return ""
+    fence = r"```[ \t]*(?:python|py)?[ \t]*\r?\n"
+    m = re.search(fence + r"(.*?)(?:```|\Z)", llm_output, re.DOTALL | re.IGNORECASE)
     if m:
-        return m.group(1).strip()
-    m = re.search(r"```\n(.*?)```", llm_output, re.DOTALL)
-    if m:
-        return m.group(1).strip()
+        code = m.group(1).strip()
+        if code:
+            return code
     return llm_output.strip()
 
 
@@ -169,6 +272,10 @@ def _execute_code(code: str, save_path: str, timeout: int = 60) -> tuple[bool, s
     Returns: (成功?, 错误信息或stdout)
     """
     code = _sanitize_code(code, save_path)
+    # 第二道防线: 剥离残留的代码围栏标记 (```python / ```), 防止 _extract_code
+    # 漏提取时围栏进入 exec 触发 SyntaxError
+    code = re.sub(r"^\s*```[^\n]*\r?\n", "", code, flags=re.MULTILINE)
+    code = re.sub(r"^\s*```\s*$", "", code, flags=re.MULTILINE)
     # 引号包裹的 OUTPUT_PATH (LLM 可能写 r"OUTPUT_PATH") → 裸标识符
     code = code.replace('r"OUTPUT_PATH"', "OUTPUT_PATH").replace("'OUTPUT_PATH'", "OUTPUT_PATH")
     if "savefig" not in code:
@@ -221,14 +328,18 @@ def _execute_code(code: str, save_path: str, timeout: int = 60) -> tuple[bool, s
 
 
 def check_png_quality(path: str) -> tuple[bool, str]:
-    """PNG 质量检测: 存在性 / 尺寸 / 空白检测
+    """PNG 质量检测: 存在性 / 尺寸 / 空白 / 内容密度 / 颜色多样性
 
+    除 stddev 外增加两类确定性信号 (纯 numpy/PIL, 无 LLM 成本):
+    - 内容占比过低 → 空白图 (仅渲染了标题/空坐标轴)
+    - 唯一颜色数过少 → 纯色/近纯色塌缩图
     Returns: (通过?, 失败原因)
     """
     try:
         from PIL import Image, ImageStat
+        import numpy as _np
     except ImportError:
-        return True, ""  # 无 PIL 时跳过检测
+        return True, ""  # 无 PIL/numpy 时跳过检测
 
     try:
         p = Path(path)
@@ -246,9 +357,101 @@ def check_png_quality(path: str) -> tuple[bool, str]:
             stddev = stat.stddev[0]
             if stddev < 10:
                 return False, f"图片几乎纯色 (stddev={stddev:.1f}), 疑似空白"
+            # 内容密度: 非白像素 (灰度 < 245) 占比过低 → 大面积空白
+            arr = _np.asarray(gray)
+            fill_ratio = float((arr < 245).mean())
+            if fill_ratio < 0.02:
+                return False, f"图片内容占比过低 ({fill_ratio:.1%}), 疑似大面积空白"
+            # 颜色多样性: 采样 + 量化 (每通道 8 级) 后统计唯一颜色数。
+            # 采样而非 resize: resize 的插值会制造渐变过渡色, 污染统计。
+            # 阈值保守 (<4 种): 只拦截"纯色/近纯色塌缩"图, 不误伤灰度线图。
+            rgb = _np.asarray(img.convert("RGB"))
+            step = max(1, min(rgb.shape[0], rgb.shape[1]) // 96)
+            sampled = rgb[::step, ::step].reshape(-1, 3) // 32
+            n_colors = len(set(map(tuple, sampled)))
+            if n_colors < 4:
+                return False, f"颜色数量过少 ({n_colors} 种), 疑似纯色/近纯色图"
         return True, ""
     except Exception as e:
         return False, f"PNG 检测异常: {e}"
+
+
+_ERROR_HINTS = (
+    ("Unrecognized marker style", "绘图标记用了非 ASCII 字符（如 • ★ ●），请改用 'o'/'s'/'^'/'D' 等标准标记"),
+    ("Missing $ inserted", "下划线/特殊字符未转义（Raw_I_Q 应写 Raw\\_I\\_Q），或数学公式 $...$ 未闭合"),
+    ("not subscriptable", "对 int/str 变量做了下标访问；层次图节点请用 dict 并用 node['key'] 访问"),
+    ("is not defined", "使用了未定义变量或未 import 的库，请补全 import / 定义"),
+    ("No such file", "引用了不存在的文件路径，请使用系统已定义好的 OUTPUT_PATH"),
+    ("Unable to open", "输出文件被占用/锁定，重试即可"),
+    ("MemoryError", "数据量过大导致内存不足，请减少数据点或简化绘图"),
+)
+
+
+def _classify_exec_error(output: str) -> str:
+    """把沙箱 traceback 分类为可操作的修复提示 (低信噪比 → 高信噪比)"""
+    if not output:
+        return ""
+    if "超时" in output or "TimeoutExpired" in output or "timed out" in output:
+        return "代码执行超时，请简化绘图逻辑、减少循环与数据点"
+    for key, hint in _ERROR_HINTS:
+        if key in output:
+            return hint
+    return ""
+
+
+def _png_density_score(path: str) -> float:
+    """best-of-N 候选评分 (0-1): 内容密度 + 颜色多样性, 越高越好。
+
+    用于在多个"都通过 check_png_quality"的候选中选最优者。
+    """
+    try:
+        from PIL import Image
+        import numpy as _np
+
+        with Image.open(path) as img:
+            rgb = _np.asarray(img.convert("RGB"))
+            gray = _np.asarray(img.convert("L"))
+        fill = float((gray < 245).mean())
+        # 内容占比 5%~85% 视为理想区间, 越偏离越低分
+        if 0.05 <= fill <= 0.85:
+            fill_score = 1.0
+        else:
+            fill_score = max(0.0, 1.0 - abs(fill - 0.45) * 3.0)
+        step = max(1, min(rgb.shape[0], rgb.shape[1]) // 96)
+        n_colors = len(set(map(tuple, rgb[::step, ::step].reshape(-1, 3) // 32)))
+        color_score = min(n_colors, 64) / 64.0
+        return 0.4 * fill_score + 0.6 * color_score
+    except Exception:
+        return 0.0
+
+
+def _review_image_with_vision(save_path: str, description: str, llm) -> list[str]:
+    """把渲染好的 PNG 交给视觉模型审图, 返回必须修复的问题列表。
+
+    模型不支持图像输入时抛异常 → 调用方 catch 后视为"无问题"直接接受。
+    """
+    import base64
+
+    b64 = base64.b64encode(Path(save_path).read_bytes()).decode()
+    prompt = (
+        f"请审阅这张学术图表。图表应当表达的内容:\n{description[:1500]}\n"
+        f"只报告必须修复的明显缺陷；若图已合格，输出：问题列表:\\n- 无"
+    )
+    msg = HumanMessage(content=[
+        {"type": "text", "text": prompt},
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+    ])
+    result = llm.invoke([SystemMessage(content=VISION_REVIEWER_SYSTEM), msg])
+    usage = extract_usage_metadata(result)
+    if usage:
+        model_name = (
+            result.response_metadata.get("model_name")
+            if isinstance(result.response_metadata, dict)
+            else None
+        ) or LLM_CONFIG["model"]
+        tracker.add_call(model_name, usage, stage="figure_vision_review")
+    text = result.content if hasattr(result, "content") else str(result)
+    return _extract_vision_issues(text)
 
 
 def _extract_review_issues(review_text: str) -> list[str]:
@@ -276,6 +479,7 @@ def generate_figure_with_llm(
     save_path: str,
     context: str = "",
     max_rounds: int = MAX_FIX_ROUNDS,
+    n_candidates: int | None = None,
 ) -> tuple[bool, str]:
     """LLM 生成图表: 生成代码 → 执行+质量检测 → 代码审阅 → 修正循环
 
@@ -288,11 +492,15 @@ def generate_figure_with_llm(
         save_path: 输出 PNG 路径
         context: 额外的上下文 (如文献素材片段)
         max_rounds: 最大修正轮数 (执行修正 + 审阅修正共用)
+        n_candidates: 首轮候选数 (best-of-N), 默认取 FIGURE_BEST_OF_N
 
     Returns: (成功?, 图片路径或错误信息)
     """
     llm = build_llm("main")
     reviewer_llm = build_llm("cheap")
+    if n_candidates is None:
+        n_candidates = FIGURE_BEST_OF_N
+    n_candidates = max(1, int(n_candidates))
 
     palette_str = ", ".join(PALETTE)
     accent_str = ACCENT
@@ -323,11 +531,29 @@ def generate_figure_with_llm(
 
     messages = [SystemMessage(content=CODE_GEN_SYSTEM), HumanMessage(content=prompt)]
     last_error = ""
+    last_hint = ""
     last_code = ""
+    vision_fix_count = 0
 
     import time as _time
 
     t0 = _time.monotonic()
+
+    def _attempt(msgs, round_idx: int):
+        """单次生成 + 执行 + 用量追踪; 返回 (成功?, 代码, 输出)"""
+        result = llm.invoke(msgs)
+        usage = extract_usage_metadata(result)
+        if usage:
+            model_name = (
+                result.response_metadata.get("model_name")
+                if isinstance(result.response_metadata, dict)
+                else None
+            ) or LLM_CONFIG["model"]
+            tracker.add_call(model_name, usage, stage=f"figure_gen_r{round_idx}")
+        code = _extract_code(result.content if hasattr(result, "content") else str(result))
+        ok, output = _execute_code(code, save_path)
+        return ok, code, output
+
     for round_idx in range(max_rounds + 1):
         elapsed = _time.monotonic() - t0
         if elapsed > FIGURE_TIME_BUDGET:
@@ -338,9 +564,10 @@ def generate_figure_with_llm(
                 # 修正轮: 附上错误信息或审阅意见
                 if last_error.startswith("PNG 质量检测失败") or "EXEC_ERROR" in last_error \
                         or "执行失败" in last_error or "超时" in last_error:
+                    hint_line = f"\n【修复提示】{last_hint}\n" if last_hint else ""
                     fix_prompt = (
                         f"上轮生成的代码执行/渲染失败，信息如下:\n```\n{last_error}\n```\n"
-                        f"请修正代码重新输出完整可运行版本。"
+                        f"{hint_line}请修正代码重新输出完整可运行版本。"
                     )
                 else:
                     fix_prompt = (
@@ -350,65 +577,107 @@ def generate_figure_with_llm(
                     )
                 messages = messages[:2] + [HumanMessage(content=fix_prompt)]
 
-            print(f"  [figure] LLM 代码生成 (第 {round_idx + 1}/{max_rounds + 1} 轮, {Path(save_path).name})...")
-            result = llm.invoke(messages)
-            code = _extract_code(result.content if hasattr(result, "content") else str(result))
-            last_code = code
+            if round_idx == 0 and n_candidates > 1:
+                # best-of-N: 首轮并行生成多个候选, 按内容密度+颜色多样性选最优
+                best_code, best_score = None, -1.0
+                for ci in range(n_candidates):
+                    if _time.monotonic() - t0 > FIGURE_TIME_BUDGET:
+                        print(f"  [figure] 候选生成超预算, 停止生成第 {ci + 1} 个候选")
+                        break
+                    print(f"  [figure] LLM 代码生成 (候选 {ci + 1}/{n_candidates}, {Path(save_path).name})...")
+                    try:
+                        ok, code, output = _attempt(messages, round_idx)
+                    except Exception as e:
+                        last_error = str(e)
+                        logger.warning(f"Figure candidate {ci} failed: {e}")
+                        continue
+                    if ok:
+                        s = _png_density_score(save_path)
+                        if s > best_score:
+                            best_score, best_code = s, code
+                    else:
+                        last_error = output
+                        last_hint = _classify_exec_error(output)
+                if best_code is None:
+                    print(f"  [figure] 全部 {n_candidates} 个候选执行/渲染失败, 进入修正轮")
+                    continue
+                code = best_code
+                last_code = code
+                print(f"  [figure] best-of-N 选中候选 (density={best_score:.2f})")
+            else:
+                print(f"  [figure] LLM 代码生成 (第 {round_idx + 1}/{max_rounds + 1} 轮, {Path(save_path).name})...")
+                try:
+                    ok, code, output = _attempt(messages, round_idx)
+                except Exception as e:
+                    last_error = str(e)
+                    logger.warning(f"Figure LLM call failed (round {round_idx}): {e}")
+                    continue
+                last_code = code
+                if not ok:
+                    last_error = output
+                    last_hint = _classify_exec_error(output)
+                    print(f"  [figure] 执行/渲染失败: {output[-150:].strip()}")
+                    logger.warning(f"Figure code exec failed (round {round_idx}): {output[-300:]}")
+                    continue
 
-            usage = extract_usage_metadata(result)
-            if usage:
-                model_name = (
-                    result.response_metadata.get("model_name")
-                    if isinstance(result.response_metadata, dict)
-                    else None
-                ) or LLM_CONFIG["model"]
-                tracker.add_call(model_name, usage, stage=f"figure_gen_r{round_idx}")
-
-            print(f"  [figure] 沙箱执行代码 (第 {round_idx + 1} 轮)...")
-            ok, output = _execute_code(code, save_path)
-            if not ok:
-                last_error = output
-                print(f"  [figure] 执行/渲染失败: {output[-150:].strip()}")
-                logger.warning(f"Figure code exec failed (round {round_idx}): {output[-300:]}")
-                continue
-
-            # 执行通过即接受的两种情形: 末轮 (避免耗尽预算后整图回退)
-            # 或代码审阅关闭 (默认: 执行+PNG 质量通过已足够, 审阅轮实测只拖慢流程)
-            if round_idx >= max_rounds or not FIGURE_CODE_REVIEW:
+            # 末轮: 执行通过即接受 (避免耗尽预算后整图回退)
+            if round_idx >= max_rounds:
                 print(f"  [figure] 渲染通过, 采用: {Path(save_path).name}")
                 return True, save_path
 
-            # 代码执行 + 渲染质量均通过 → 代码级审阅 (Drawer-Reviewer)
-            print(f"  [figure] 代码级审阅 (第 {round_idx + 1} 轮)...")
-            try:
-                review_prompt = (
-                    f"请审阅以下 matplotlib 代码的学术出版规范问题。\n\n"
-                    f"---图表描述---\n{description[:2000]}\n---描述结束---\n\n"
-                    f"---代码---\n```python\n{code[:6000]}\n```\n---代码结束---\n"
-                )
-                review_result = reviewer_llm.invoke(
-                    [SystemMessage(content=CODE_REVIEWER_SYSTEM), HumanMessage(content=review_prompt)]
-                )
-                review_usage = extract_usage_metadata(review_result)
-                if review_usage:
-                    from src.config import CHEAP_CONFIG
+            # 审阅阶段: 视觉审阅 > 代码审阅 > 直接接受 (按启用配置择一)
+            issues: list[str] = []
+            if FIGURE_VISION_REVIEW:
+                print(f"  [figure] 视觉审阅 (第 {round_idx + 1} 轮)...")
+                try:
+                    vision_llm = build_llm("reviewer")
+                    issues = _review_image_with_vision(save_path, description, vision_llm)
+                except Exception as e:
+                    logger.warning(f"Figure vision review failed (round {round_idx}): {e}")
+                    issues = []
+            elif FIGURE_CODE_REVIEW:
+                print(f"  [figure] 代码级审阅 (第 {round_idx + 1} 轮)...")
+                try:
+                    review_prompt = (
+                        f"请审阅以下 matplotlib 代码的学术出版规范问题。\n\n"
+                        f"---图表描述---\n{description[:2000]}\n---描述结束---\n\n"
+                        f"---代码---\n```python\n{code[:6000]}\n```\n---代码结束---\n"
+                    )
+                    review_result = reviewer_llm.invoke(
+                        [SystemMessage(content=CODE_REVIEWER_SYSTEM), HumanMessage(content=review_prompt)]
+                    )
+                    review_usage = extract_usage_metadata(review_result)
+                    if review_usage:
+                        from src.config import CHEAP_CONFIG
 
-                    review_model = (
-                        review_result.response_metadata.get("model_name")
-                        if isinstance(review_result.response_metadata, dict)
-                        else None
-                    ) or CHEAP_CONFIG["model"]
-                    tracker.add_call(review_model, review_usage, stage=f"figure_review_r{round_idx}")
-                review_text = review_result.content if hasattr(review_result, "content") else str(review_result)
-                issues = _extract_review_issues(review_text)
-            except Exception as e:
-                logger.warning(f"Figure review failed (round {round_idx}): {e}")
-                issues = []
+                        review_model = (
+                            review_result.response_metadata.get("model_name")
+                            if isinstance(review_result.response_metadata, dict)
+                            else None
+                        ) or CHEAP_CONFIG["model"]
+                        tracker.add_call(review_model, review_usage, stage=f"figure_review_r{round_idx}")
+                    review_text = review_result.content if hasattr(review_result, "content") else str(review_result)
+                    issues = _extract_review_issues(review_text)
+                except Exception as e:
+                    logger.warning(f"Figure review failed (round {round_idx}): {e}")
+                    issues = []
+            else:
+                # 审阅全部关闭: 执行 + PNG 质量通过即接受
+                print(f"  [figure] 渲染通过, 采用: {Path(save_path).name}")
+                return True, save_path
 
             if not issues:
                 print(f"  [figure] 审阅通过: {Path(save_path).name}")
                 logger.info(f"Figure generated & reviewed OK: {save_path}")
                 return True, save_path
+
+            # 视觉审阅修正轮数上限: 达到上限后不再修正, 采用当前已渲染图。
+            # 实测视觉审阅每轮报满问题 → 修正循环永不收敛、耗光预算 (321s/361s)。
+            if FIGURE_VISION_REVIEW and vision_fix_count >= VISION_MAX_FIXES:
+                print(f"  [figure] 视觉审阅已修正 {vision_fix_count} 轮(达上限 {VISION_MAX_FIXES}), 采用当前图: {Path(save_path).name}")
+                return True, save_path
+            if FIGURE_VISION_REVIEW:
+                vision_fix_count += 1
 
             last_error = "\n".join(issues)
             print(f"  [figure] 审阅发现 {len(issues)} 个问题, 进入修正轮")
@@ -416,6 +685,19 @@ def generate_figure_with_llm(
         except Exception as e:
             last_error = str(e)
             logger.warning(f"Figure LLM call failed (round {round_idx}): {e}")
+
+    # 兜底: LLM 若曾成功渲染出合格图 (save_path 通过质量检测), 即使审阅/修正
+    # 循环未收敛也应采用之。回退模板只应在"从未成功渲染"时发生 —— 否则会丢弃
+    # 已渲染成功的好图、用质量更差的模板图替代 (实测: taxonomy_llm_0.png 好图
+    # 被 taxonomy_0.png 模板图替换; 根因是视觉审阅吹毛求疵 + 修正轮失败导致
+    # last_code 非空却返回 False)。
+    try:
+        ok_q, _reason = check_png_quality(save_path)
+        if ok_q:
+            print(f"  [figure] 审阅/修正未收敛, 但采用已成功渲染的图: {Path(save_path).name}")
+            return True, save_path
+    except Exception:
+        pass
 
     if not last_code:
         return False, f"图表生成失败（{max_rounds} 轮修正后仍失败）: {last_error[:300]}"
@@ -433,6 +715,20 @@ def generate_taxonomy_figure(topic: str, taxonomy_text: str, index: int = 0) -> 
         f"使用圆角矩形框 + 箭头连接，颜色区分层级。"
     )
     ok, result = generate_figure_with_llm(desc, path, context=taxonomy_text)
+    return result if ok else ""
+
+
+def generate_framework_figure(topic: str, index: int = 0) -> str:
+    """用 LLM 生成研究框架总览图 (综述论文"图1"式总览)"""
+    FIGURE_DIR.mkdir(parents=True, exist_ok=True)
+    path = str(FIGURE_DIR / f"framework_llm_{index}.png")
+    desc = (
+        f"绘制「{topic}」领域的研究框架总览图（分层框图）。\n"
+        f"要求: 用一个自上而下或自左向右的分层结构，概括该领域的整体研究框架，"
+        f"通常包含信号表征、模型架构、训练范式、安全鲁棒、系统应用等维度。"
+        f"使用圆角矩形框 + 箭头连接，颜色区分不同层次。"
+    )
+    ok, result = generate_figure_with_llm(desc, path, context=topic)
     return result if ok else ""
 
 

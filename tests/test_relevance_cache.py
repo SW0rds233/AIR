@@ -48,6 +48,27 @@ def test_rule_filter_excludes_off_domain_papers():
     assert any("射频指纹" in t for t in titles)
 
 
+def test_rule_filter_matches_mixed_language_keywords():
+    """中英混写关键词 (如 "射频指纹（RF fingerprinting / RFFI）") 应能命中英文论文,
+    而不是因关键词含中文/括号而把英文论文全部误删 (实测 200→1)"""
+    papers = [
+        {"title": "Deep learning based RF fingerprinting for device identification and wireless security",
+         "abstract": "", "year": "2018"},
+        {"title": "Wireless security through RF fingerprinting",
+         "abstract": "", "year": "2007"},
+        {"title": "岩石力学与工程学报某篇无关论文",
+         "abstract": "岩石 应力 应变", "year": "2020"},
+        {"title": "Website fingerprinting in Tor traffic analysis",
+         "abstract": "", "year": "2019"},
+    ]
+    kws = "射频指纹（RF fingerprint）, 射频指纹识别（RF fingerprinting / RFFI / radio frequency fingerprint identification）"
+    kept = rule_filter(papers, "射频指纹识别技术", kws)
+    titles = [p["title"] for p in kept]
+    assert any("RF fingerprinting" in t for t in titles), f"英文射频指纹论文应保留, 实际 {titles}"
+    assert not any("岩石" in t for t in titles), "岩石学论文应剔除"
+    assert not any("Website fingerprinting" in t for t in titles), "Tor 网站指纹论文应剔除"
+
+
 def test_load_cache_filters_off_domain_refs():
     """历史缓存中的跨域论文在加载时兜底剔除 (避免重跑 --skip-retrieval 时复发)"""
     import src.utils.pipeline_cache as pc
@@ -120,6 +141,7 @@ if __name__ == "__main__":
     tests = [
         test_off_domain_detection,
         test_rule_filter_excludes_off_domain_papers,
+        test_rule_filter_matches_mixed_language_keywords,
         test_load_cache_filters_off_domain_refs,
         test_review_anchor_warns_about_renumbered_citations,
         test_reviewer_prompt_has_renumber_rule,

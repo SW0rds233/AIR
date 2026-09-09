@@ -30,8 +30,11 @@ LATEX_PREAMBLE = r"""\documentclass[UTF8,a4paper,12pt]{ctexart}
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{array}
+\usepackage{tabularx}
 \usepackage{hyperref}
 \hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+% 可自动换行的 X 列 (左对齐), 用于宽表格撑满 \textwidth 而不越界
+\newcolumntype{L}{>{\raggedright\arraybackslash}X}
 
 \title{__TITLE__}
 \author{AI Survey Pipeline}
@@ -193,8 +196,23 @@ def _md_to_latex_body(md_text: str, fig_paths: list[str] | None = None) -> str:
     return "\n".join(output)
 
 
+def _cell_width(text: str) -> int:
+    """单元格显示宽度估算: CJK 字符计 2, 其余计 1 (用于判断表格是否超宽)"""
+    return sum(2 if "一" <= ch <= "鿿" else 1 for ch in text)
+
+
+# a4 + 1.2in 边距下 \textwidth ≈ 422pt ≈ 35 个 12pt CJK 字 ≈ 70 宽度单位;
+# 再扣除列间距 (每列约 2 单位) 后的经验阈值
+_TABLE_WIDTH_LIMIT = 70
+
+
 def _convert_table_pandoc(md_table: str) -> str:
-    """将 Markdown 表格转 LaTeX tabular (simple, 不用 pandoc 的 minipage/cell 格式)"""
+    """将 Markdown 表格转 LaTeX。
+
+    窄表用普通 tabular (l 列); 宽表 (列数多或内容长, 实测表1/表5/表6
+    直接溢出右边界被裁切) 改用 tabularx + 可换行 L 列撑满 \\textwidth,
+    保证左右边界与正文对齐。
+    """
     rows = [r.strip() for r in md_table.split("\n") if r.strip() and not _re.match(r"^\|[\s\-:|]+\|?$", r)]
     if len(rows) < 2:
         return ""
@@ -203,23 +221,51 @@ def _convert_table_pandoc(md_table: str) -> str:
         return ""
 
     def _clean(cell: str) -> str:
-        return cell.strip().replace("_", r"\_").replace("&", r"\&").replace("%", r"\%")
+        c = cell.strip().replace("_", r"\_").replace("&", r"\&").replace("%", r"\%")
+        # 引用列表 [n,n,...] 在逗号后加空格允许断行: 长串 "[15,18,...,49]"
+        # 在窄列中不可断行会溢出列宽 (实测 overfull hbox 9.6pt)
+        c = _re.sub(
+            r"\[(\d+(?:\s*,\s*\d+)+)\]",
+            lambda m: "[" + ", ".join(_re.split(r"\s*,\s*", m.group(1))) + "]",
+            c,
+        )
+        return c
 
-    lines = [r"\begin{table}[htbp]", r"\centering", f"\\begin{{tabular}}{{{'l' * ncols}}}", r"\toprule"]
-    for i, row in enumerate(rows):
-        cells = [_clean(c) for c in row.split("|")[1:-1]]
-        sep = " & "
-        row_tex = sep.join(cells)
+    parsed_rows = [[_clean(c) for c in row.split("|")[1:-1]] for row in rows]
+    # 补齐列数不足的脏行 (writer 偶发漏写分隔符)
+    parsed_rows = [r + [""] * (ncols - len(r)) if len(r) < ncols else r[:ncols] for r in parsed_rows]
+
+    col_widths = [
+        max(_cell_width(r[i]) for r in parsed_rows) for i in range(ncols)
+    ]
+    total_width = sum(min(w, 60) for w in col_widths) + 2 * ncols
+    wide = ncols >= 5 or total_width > _TABLE_WIDTH_LIMIT
+
+    if wide:
+        # 宽表: tabularx 全宽 + 可换行列, 永不越界
+        lines = [
+            r"\begin{table}[htbp]",
+            r"\small",
+            r"\begin{tabularx}{\textwidth}{@{}" + "L" * ncols + r"@{}}",
+            r"\toprule",
+        ]
+        end_env = r"\end{tabularx}"
+    else:
+        lines = [r"\begin{table}[htbp]", r"\centering", f"\\begin{{tabular}}{{{'l' * ncols}}}", r"\toprule"]
+        end_env = r"\end{tabular}"
+
+    for i, cells in enumerate(parsed_rows):
+        row_tex = " & ".join(cells)
         # 行首为 [n] (引用列) 时, LaTeX 会把 \\ 或 \toprule/\midrule 后的 [..]
-        # 解析为竖向间距/线宽可选参数 → "Illegal unit of measure" 编译中断,
-        # 引用无法完成第二遍解析 → PDF 中全部显示 [?]。用 \relax 阻断。
+        # 解析为竖向间距/线宽可选参数 → "Illegal unit of measure" 编译中断。
+        # 用 \relax 阻断。
         if row_tex.lstrip().startswith("["):
             row_tex = r"\relax " + row_tex
         lines.append("    " + row_tex + r" \\")
         if i == 0:
             lines.append(r"\midrule")
     lines.append(r"\bottomrule")
-    lines.append(r"\end{tabular}")
+    lines.append(end_env)
     lines.append(r"\end{table}")
     return "\n".join(lines)
 

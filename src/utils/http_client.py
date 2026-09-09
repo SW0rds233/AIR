@@ -39,6 +39,8 @@ class CircuitBreaker:
         self.cooldown = cooldown
         self._failures: dict[str, int] = {}
         self._open_until: dict[str, float] = {}
+        # 每个主机的失败原因分布 (用于断路器开启时区分 429/超时/连接失败)
+        self._failure_reasons: dict[str, dict[str, int]] = {}
 
     def allow(self, host: str) -> bool:
         now = time.monotonic()
@@ -47,18 +49,24 @@ class CircuitBreaker:
 
     def success(self, host: str):
         self._failures[host] = 0
+        self._failure_reasons.pop(host, None)
         self._open_until.pop(host, None)
 
-    def failure(self, host: str):
+    def failure(self, host: str, reason: str = ""):
         count = self._failures.get(host, 0) + 1
         self._failures[host] = count
+        if reason:
+            reasons = self._failure_reasons.setdefault(host, {})
+            reasons[reason] = reasons.get(reason, 0) + 1
         now = time.monotonic()
         was_open = self._open_until.get(host, 0) > now
         if count >= self.threshold:
             self._open_until[host] = now + self.cooldown
             if not was_open:
+                dist = self._failure_reasons.get(host, {})
+                dist_str = ", ".join(f"{k}:{v}" for k, v in sorted(dist.items(), key=lambda x: -x[1])) if dist else reason or "未知"
                 logger.warning(
-                    f"断路器开启: {host} (连续失败 {count} 次, 冷却 {self.cooldown}s)"
+                    f"断路器开启: {host} (连续失败 {count} 次, 原因: {dist_str}, 冷却 {self.cooldown}s)"
                 )
 
     def is_open(self, host: str) -> bool:
@@ -117,6 +125,21 @@ def _extract_host(url: str) -> str:
     return p.hostname or url
 
 
+def _classify_network_error(e: Exception) -> str:
+    """把网络异常归类为可读的原因标签 (用于断路器开启时的诊断)。"""
+    if isinstance(e, httpx.TimeoutException):
+        return "超时"
+    if isinstance(e, httpx.ConnectError):
+        return "连接失败"
+    if isinstance(e, httpx.ReadError):
+        return "读取中断"
+    if isinstance(e, httpx.RemoteProtocolError):
+        return "协议错误"
+    if isinstance(e, (ConnectionError, OSError)):
+        return "连接失败"
+    return "网络错误"
+
+
 def get_with_retry(
     url: str,
     *,
@@ -164,7 +187,7 @@ def get_with_retry(
                 wait = HTTP_429_BACKOFF_BASE * (2 ** attempt)
                 logger.debug(f"{host} 429, 第{attempt+1}/{retries}次退避 {wait:.0f}s")
                 time.sleep(wait)
-                _breaker.failure(host)
+                _breaker.failure(host, "429限流")
                 continue
             if raise_on_status:
                 resp.raise_for_status()
@@ -176,14 +199,14 @@ def get_with_retry(
             if status == 429 and attempt < retries - 1:
                 wait = HTTP_429_BACKOFF_BASE * (2 ** attempt)
                 time.sleep(wait)
-                _breaker.failure(host)
+                _breaker.failure(host, "429限流")
                 continue
             # 4xx 客户端错误 (404=DOI 不存在等): 是确定性响应, 并非主机故障,
             # 不重试也不计入断路器 — 否则几个未收录的 DOI 就会误触发断路器
             if 400 <= status < 500:
                 raise
             # 5xx 服务端错误: 计入断路器并重试
-            _breaker.failure(host)
+            _breaker.failure(host, f"5xx({status})")
             if attempt < retries - 1:
                 wait = HTTP_BACKOFF_BASE * (2 ** attempt)
                 time.sleep(wait)
@@ -191,7 +214,7 @@ def get_with_retry(
             raise
         except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException,
                 httpx.RemoteProtocolError, ConnectionError, OSError) as e:
-            _breaker.failure(host)
+            _breaker.failure(host, _classify_network_error(e))
             if attempt < retries - 1:
                 wait = HTTP_BACKOFF_BASE * (2 ** attempt)
                 logger.debug(f"{host} 网络错误第{attempt+1}/{retries}次: {e}, {wait:.0f}s后重试")
@@ -201,7 +224,7 @@ def get_with_retry(
         except CircuitBreakerOpenError:
             raise
         except Exception as e:
-            _breaker.failure(host)
+            _breaker.failure(host, "其他错误")
             if attempt < retries - 1:
                 wait = HTTP_BACKOFF_BASE * (2 ** attempt)
                 time.sleep(wait)

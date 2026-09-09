@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.tools.pdf_fetcher import extract_arxiv_id, download_arxiv_pdf
+from src.tools.pdf_fetcher import extract_arxiv_id, download_arxiv_pdf, _is_downloadable_oa_url
 from src.rag.chunker import chunk_text, chunk_paper_fulltext
 
 
@@ -33,6 +33,27 @@ def test_extract_arxiv_id_invalid():
 
 def test_extract_arxiv_id_cs_prefix():
     assert extract_arxiv_id("https://arxiv.org/abs/cs.CL/0011004") == "cs.CL/0011004"
+
+
+def test_oa_url_downloadable_judgement():
+    """OA 链接可下载判断: 忽略 ?query 参数, 接受 .pdf 与 /pdf 两种结尾;
+    付费墙黑名单主机 (IEEE/Elsevier 等) 仍拒绝"""
+    # 带 query 参数的 .pdf 直链 (MDPI 等) → 可下载
+    assert _is_downloadable_oa_url(
+        "https://www.mdpi.com/1424-8220/21/24/8398/pdf?version=1639962946"
+    )
+    # 无扩展名的 /pdf 路径段 (MDPI) → 可下载
+    assert _is_downloadable_oa_url("https://www.mdpi.com/1424-8220/21/24/8398/pdf")
+    # 普通 .pdf 直链 → 可下载
+    assert _is_downloadable_oa_url("https://downloads.hindawi.com/journals/wcmc/2021/12345.pdf")
+    # 黑名单主机 → 拒绝
+    assert not _is_downloadable_oa_url("https://ieeexplore.ieee.org/ielx7/123/456/789.pdf")
+    assert not _is_downloadable_oa_url("https://www.sciencedirect.com/science/article/pii/123.pdf")
+    # HTML 落地页 → 拒绝
+    assert not _is_downloadable_oa_url("https://www.mdpi.com/1424-8220/21/24/8398/htm")
+    assert not _is_downloadable_oa_url("https://www.nature.com/articles/s41598-020-12345")
+    assert not _is_downloadable_oa_url("")
+
 
 
 def test_chunk_text_short():
@@ -61,16 +82,48 @@ def test_chunk_paper_fulltext():
     assert chunks[1]["chunk_index"] == 1
 
 
+def test_download_throttles_progress_output():
+    """高重复下载提示降噪: 每 5 篇一次进度 + 结束跳过汇总, 而非逐篇打印"""
+    import io
+    import contextlib
+    import time
+
+    import src.tools.pdf_fetcher as pf
+
+    papers = [{"title": f"Paper {i}", "url": f"https://arxiv.org/abs/{2000 + i}.0000{i}"} for i in range(1, 13)]
+    orig_arxiv = pf.download_arxiv_pdf
+    orig_doi = pf._resolve_pdf_from_doi
+    orig_sleep = time.sleep
+    pf.download_arxiv_pdf = lambda url, save_dir=None, nice_name=None: None
+    pf._resolve_pdf_from_doi = lambda doi, save_dir, nice_name=None: None
+    time.sleep = lambda *a, **k: None
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            pf.download_pdfs_for_papers(papers, limit=20)
+        out = buf.getvalue()
+        assert "进度 5/" in out
+        assert "进度 10/" in out
+        assert "跳过 12 篇" in out
+        assert "跳过 (" not in out  # 无逐篇跳过
+    finally:
+        pf.download_arxiv_pdf = orig_arxiv
+        pf._resolve_pdf_from_doi = orig_doi
+        time.sleep = orig_sleep
+
+
 if __name__ == "__main__":
     tests = [
         test_extract_arxiv_id_abs,
         test_extract_arxiv_id_pdf,
         test_extract_arxiv_id_invalid,
         test_extract_arxiv_id_cs_prefix,
+        test_oa_url_downloadable_judgement,
         test_chunk_text_short,
         test_chunk_text_long,
         test_chunk_text_empty,
         test_chunk_paper_fulltext,
+        test_download_throttles_progress_output,
     ]
     passed = 0
     for t in tests:

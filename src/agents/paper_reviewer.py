@@ -692,6 +692,8 @@ def run_paper_review(state: PipelineState) -> dict:
 
     dimensions = _extract_dimension_scores(report)
     score = _extract_score(report)
+    # 统一报告「总分」与程序求和分数, 避免报告分数与界面分数不一致
+    report = _normalize_report_total(report, score)
     issue_ledger = _extract_issue_ledger(report, state.get("review_issue_ledger", []))
     if not issue_ledger:
         # Reviewer 未输出可解析台账 → 兜底合成, 保证问题度量跨轮连续
@@ -765,6 +767,36 @@ def _extract_score(report: str) -> int:
     # 审稿报告未给出可解析的总分: 视为 0 分 (触发重写), 而非默认 35 宽松放行
     print("  [warning] 审稿报告未解析出总分, 按 0 分处理")
     return 0
+
+
+def _normalize_report_total(report: str, score: int) -> str:
+    """把审稿报告中的「总分」字段统一改写为程序计算的逐项求和总分。
+
+    审稿人报告的「总分」常与其「逐项评分」表之和不符 (实测: 报告写 38/50,
+    逐项求和 37/50), 而前端中断提示与最终摘要显示的是程序求和分数
+    (`review_score`)。二者不一致会让用户困惑: 读到的报告分数与界面分数不同。
+    此处以逐项求和为准, 统一报告中的总分展示, 使报告与界面一致。
+    """
+    import re as _re
+
+    if not report or not (1 <= score <= 50):
+        return report
+    total = str(score)
+
+    # 1) 总体评价/总分行: "**总分**: 38/50" / "总分: **38**/50" / "总分：38/50"
+    #    (前导的 "**" 保留不动, 值统一改写为 "**{total}/50**")
+    report = _re.sub(
+        r"(总分\*{0,2}\s*[:：]\s*)\*{0,2}\d+\*{0,2}\s*/\s*50\*{0,2}",
+        lambda m: f"{m.group(1)}**{total}/50**",
+        report,
+    )
+    # 2) 逐项评分表末行: "| **总分** | **38/50** |"
+    report = _re.sub(
+        r"(\|\s*\*{0,2}总分\*{0,2}\s*\|\s*)\*{0,2}\d+\s*/\s*50\*{0,2}(\s*\|)",
+        lambda m: f"{m.group(1)}**{total}/50**{m.group(2)}",
+        report,
+    )
+    return report
 
 
 def _score_to_recommendation(score: int) -> str:

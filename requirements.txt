@@ -1,4 +1,5 @@
 langgraph>=0.2.0
+langgraph-checkpoint-sqlite>=2.0.0
 langchain>=0.3.0
 langchain-openai>=0.2.0
 langchain-community>=0.3.0
@@ -12,8 +13,12 @@ bibtexparser>=1.4.0
 tiktoken>=0.7.0
 matplotlib>=3.8.0
 
+# Web 界面 (对话式协作)
+fastapi>=0.110.0
+uvicorn>=0.29.0
+
 # 可选: GROBID 结构化 PDF 解析 (需要 GROBID 服务 + GROBID_BASE_URL)
 # scipdf-parser>=2.0.0
 
-# 可选: Langfuse 追踪 (设置 LANGFUSE_* 环境变量后生效)
-# langfuse>=2.0.0
+# Langfuse 追踪 (设置 LANGFUSE_* 环境变量后生效; 4.x 中 LangChain 集成仍在核心包)
+langfuse>=4.0.0

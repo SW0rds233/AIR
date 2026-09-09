@@ -27,6 +27,10 @@ data/pdfs/
 data/manual_pdfs/
 data/pipeline_cache/
 
+# 会话记录与记忆 (运行时数据)
+data/conversations/
+data/session_memory.json
+
 # 输出文件
 outputs/
 
@@ -36,6 +40,9 @@ data/oa_cache.json
 
 # LangGraph 检查点
 data/pipeline_checkpoints.sqlite
+data/checkpoints/
+data/pipeline_checkpoints.sqlite-shm
+data/pipeline_checkpoints.sqlite-wal
 
 # LaTeX 编译临时文件
 *.aux
@@ -53,10 +60,15 @@ data/pipeline_checkpoints.sqlite
 TESTING_RESOURCES.md
 WRITING_AND_FIGURES.md
 
+# 第三方参考项目源码 (调研用, 不纳入版本库)
+references/
+
 # 测试产物
 test_output.png
 测试.md
 rf_fingerprint_taxonomy.png
+timeline.png
+/.png
 
 # 系统文件
 .DS_Store

@@ -173,7 +173,9 @@ def run_pdf_ingestion(state: PipelineState) -> dict:
 
     ordered = sorted(candidates, key=_priority_key)
 
-    limit = min(30, len(ordered))
+    from src.config import PDF_DOWNLOAD_LIMIT
+
+    limit = min(PDF_DOWNLOAD_LIMIT, len(ordered))
     print(f"  [pdf_ingestion] 开始下载 {limit} 篇 PDF (每篇间隔 3s 限流)...")
     with_pdf = download_pdfs_for_papers(ordered, limit=limit)
     published_in = len([p for p in with_pdf if (p.get("published") or (p.get("venue") or "").strip())])

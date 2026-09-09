@@ -183,6 +183,36 @@ def _build_fulltext_topic_context(topic: str) -> str:
 # 导致契约核验找不到目标小节 (实测 R-FED-01 / R-OPEN-01 假阴性)
 _CONTRACT_SECTION_RE = _re.compile(r"(\d+(?:\.\d+){0,2})\s*节")
 _CONTRACT_CHAPTER_RE = _re.compile(r"第\s*(\d+)\s*章")
+# 契约条目里出现的表格引用 ("表3" / "表 6")
+_TABLE_REF_RE = _re.compile(r"表\s*(\d+)")
+
+
+def _extract_tables(draft: str) -> dict[str, str]:
+    """提取正文中每个「表N」占位符对应的 Markdown 表格文本 (不含参考文献)。
+
+    表格以「[表N: 表题]」占位行开头, 后接连续的 | 行。返回 {表号: 表格文本}。
+    """
+    from src.rag.reference_formatter import strip_references_section
+
+    body = strip_references_section(draft or "")
+    lines = body.splitlines()
+    tables: dict[str, str] = {}
+    i = 0
+    while i < len(lines):
+        m = _re.match(r"\[表\s*(\d+)[:：]", lines[i].strip())
+        if m:
+            num = m.group(1)
+            j = i + 1
+            tbl_lines: list[str] = []
+            while j < len(lines) and lines[j].strip().startswith("|"):
+                tbl_lines.append(lines[j].strip())
+                j += 1
+            if tbl_lines:
+                tables[num] = "\n".join(tbl_lines)
+            i = j
+        else:
+            i += 1
+    return tables
 
 
 def _draft_sections(draft: str) -> list[tuple[str, str]]:
@@ -253,6 +283,8 @@ def check_contract_compliance(
 
     prior_secs = _draft_sections(prior_draft)
     new_secs = _draft_sections(new_draft)
+    prior_tables = _extract_tables(prior_draft)
+    new_tables = _extract_tables(new_draft)
 
     def _sec_texts(num: str) -> tuple[str, str]:
         """收集编号为 num 的章节**及其全部子节**的文本。
@@ -294,6 +326,22 @@ def check_contract_compliance(
                     "reason": f"目标章节（{'、'.join(targets)}）与上一版相比无实质改动",
                 })
                 continue
+        # 表格类条目: 问题文本提到「表N」时, 核验该表是否真的被修改。
+        # Writer 常见失败模式是只改正文、不动表格 (实测 R-REF-01 正文加了降级
+        # 说明但表3/表6 仍列该文献), 而旧核验只看目标章节是否改动 → 漏判,
+        # 导致 Reviewer 判「部分解决」、重点问题跨轮空转。
+        unfixed_tables = [
+            tn for tn in _TABLE_REF_RE.findall(problem)
+            if prior_tables.get(tn) is not None
+            and new_tables.get(tn) is not None
+            and prior_tables.get(tn) == new_tables.get(tn)
+        ]
+        if unfixed_tables:
+            unaddressed.append({
+                "item": dict(item),
+                "reason": f"涉及表格（表{'、表'.join(unfixed_tables)}）未修改",
+            })
+            continue
         # "补充/引用文献"类条目: 新增引用编号必须进入正文
         if new_ref_numbers and any(k in problem for k in ("补充", "遗漏", "纳入", "引用")):
             if not any(int(n) in new_cited for n in new_ref_numbers):

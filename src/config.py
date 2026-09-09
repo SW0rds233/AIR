@@ -104,6 +104,11 @@ def build_llm(config_key: str = "main"):
 
     cfg = {"main": LLM_CONFIG, "reviewer": REVIEWER_CONFIG, "cheap": CHEAP_CONFIG}[config_key]
     extra = _model_extra_body(cfg["model"])
+    # Moonshot (Kimi) 官方 API 要求请求头 Kimi-Api-Version,
+    # 视觉/多模态请求缺失时会报 400 "missing required header Kimi-Api-Version"
+    headers = None
+    if _is_kimi_reasoning_model(cfg["model"]):
+        headers = {"Kimi-Api-Version": os.getenv("KIMI_API_VERSION", "moonshot-v1-auto")}
     return ChatOpenAI(
         model=cfg["model"],
         api_key=cfg["api_key"],
@@ -111,6 +116,7 @@ def build_llm(config_key: str = "main"):
         temperature=cfg["temperature"],
         timeout=LLM_TIMEOUT,
         max_retries=LLM_MAX_RETRIES,
+        default_headers=headers,
         **({"extra_body": extra} if extra else {}),
     )
 
@@ -153,6 +159,11 @@ SKIP_EMBEDDING = os.getenv("SKIP_EMBEDDING", "0") == "1"
 
 # 单篇论文全文摄入的最大字符数 (越小块越少、embedding 越快)
 PDF_FULLTEXT_MAX_CHARS = int(os.getenv("PDF_FULLTEXT_MAX_CHARS", "20000"))
+
+# PDF 下载上限 (pdf_ingestion 阶段最多下载多少篇全文)。
+# 下载每篇间隔 3s 限流 + 解析/embedding 是流程最耗时环节之一,
+# 调试全流程时调低此值 (如 5~10) 可显著缩短时间; 正式运行可调回 30。
+PDF_DOWNLOAD_LIMIT = int(os.getenv("PDF_DOWNLOAD_LIMIT", "30"))
 
 ARXIV_MAX_RESULTS = int(os.getenv("ARXIV_SEARCH_MAX_RESULTS", "50"))
 SEMANTIC_SCHOLAR_MAX_RESULTS = int(os.getenv("SEMANTIC_SCHOLAR_MAX_RESULTS", "50"))

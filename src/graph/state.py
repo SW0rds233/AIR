@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from typing import TypedDict, Annotated, List, Optional
-from operator import add
 
 from langgraph.graph.message import add_messages
 
@@ -40,9 +39,12 @@ class PipelineState(TypedDict, total=False):
     sub_topics: List[str]
     time_range: Optional[str]
 
+    # 本次运行的产物子目录 (outputs/{run_id}/), 使不同对话产物隔离、便于查看
+    run_id: str
+
     search_queries: List[str]
     search_results: List[PaperSummary]
-    retrieved_papers: Annotated[List[PaperSummary], add]
+    retrieved_papers: List[PaperSummary]
     unfiltered_papers: List[PaperSummary]
     detailed_papers: List[PaperDetail]
 
@@ -124,8 +126,32 @@ class PipelineState(TypedDict, total=False):
     best_quality_key: List[int]
     stagnation_count: int  # 连续评分无提升的轮数
 
+    # LaTeX 渲染产物
+    paper_tex_path: str
+    tex_compiled: bool
+
     current_phase: str
     error: Optional[str]
 
     # 跳过检索阶段 (复用 data/pipeline_cache 的检索产物, 从 paper_writing 直接开始)
     skip_retrieval: bool
+
+    # 对话式协作 (Human-in-the-loop): 在关键阶段暂停, 等待人工确认/指令
+    interactive: bool  # True 时在大纲/初稿/审稿阶段调用 interrupt() 暂停
+    human_feedback: str  # 用户在各暂停点输入的自然语言反馈 (供解析执行)
+    human_feedback_phase: str  # 反馈来源暂停点: "outline" / "draft" / "review"
+    human_revision_contract: List[dict]  # 人工意见转为的修订契约条目 (increment_revision 合并执行)
+    human_review_decision: str  # 审稿暂停点的用户决策: "" / "revise" / "finalize"
+    human_outline_route: str  # 大纲暂停点后去向: "outline_generation" / "literature_review" / "paper_writing"
+    outline_iteration: int  # 大纲重生成次数 (防止反馈循环死锁)
+
+    # 自然语言研究意图 → 结构化指令 (Planner 节点)
+    research_request: str  # 用户原始自然语言描述 (不清空, 供重提取)
+    plan_correction: str  # 计划确认阶段的累计修正意见 (确认后清空)
+    plan_iteration: int  # 计划重提取次数 (防止死循环)
+
+    # 主控 Supervisor (编排式多智能体)
+    stages: List[str]  # 待执行阶段, 如 ["research","write"] 或 ["research"] (局部任务)
+    stage_index: int  # 已派发的阶段数 (进度指针)
+    plan_confirmed: bool  # 计划是否已被用户确认
+    supervisor_next: str  # supervisor 决定的下一节点

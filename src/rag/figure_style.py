@@ -51,8 +51,18 @@ def apply_style(ax=None, fig=None, style: str = "journal"):
     """应用统一风格到 matplotlib 对象
 
     style: "journal" (期刊默认) 或 "presentation" (报告演示)
+
+    借鉴 SciencePlots (garrettj403/SciencePlots) 的期刊级规范:
+    - 色环: 学术高区分度色
+    - 刻度方向向内 (xtick/ytick.direction=in)
+    - 图例无边框 (legend.frameon=False)
+    - 细轴/细网格线 (axes/grid linewidth=0.5)
+    - 紧凑保存 (savefig.bbox=tight, pad_inches=0.05)
+    注意: 不用 SciencePlots 的 serif/usetex —— 中文图保持 sans 字体,
+    且沙箱环境无 LaTeX。
     """
     import matplotlib.pyplot as plt
+    from cycler import cycler
 
     # 全局 rcParams
     plt.rcParams["axes.unicode_minus"] = False
@@ -64,6 +74,17 @@ def apply_style(ax=None, fig=None, style: str = "journal"):
     plt.rcParams["legend.fontsize"] = FONT_SIZE["legend"]
     plt.rcParams["figure.dpi"] = OUTPUT_DPI
     plt.rcParams["savefig.dpi"] = OUTPUT_DPI
+
+    # 学术配色环 (高区分度)
+    plt.rcParams["axes.prop_cycle"] = cycler(color=PALETTE)
+    # 刻度方向向内、图例无框、细轴 (SciencePlots 惯例)
+    plt.rcParams["xtick.direction"] = "in"
+    plt.rcParams["ytick.direction"] = "in"
+    plt.rcParams["legend.frameon"] = False
+    plt.rcParams["axes.linewidth"] = 0.5
+    plt.rcParams["grid.linewidth"] = 0.5
+    plt.rcParams["savefig.bbox"] = "tight"
+    plt.rcParams["savefig.pad_inches"] = 0.05
 
     if style == "journal":
         plt.rcParams["axes.grid"] = True

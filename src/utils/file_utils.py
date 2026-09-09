@@ -11,9 +11,11 @@ def ensure_output_dir() -> Path:
     return OUTPUT_DIR
 
 
-def save_file(content: str, filename: str) -> str:
+def save_file(content: str, filename: str, subdir: str | None = None) -> str:
     ensure_output_dir()
-    filepath = OUTPUT_DIR / filename
+    d = OUTPUT_DIR / subdir if subdir else OUTPUT_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    filepath = d / filename
     filepath.write_text(content, encoding="utf-8")
     return str(filepath)
 

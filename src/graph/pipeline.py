@@ -6,6 +6,7 @@ from pathlib import Path
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import interrupt
 
 from src.graph.state import PipelineState
 from src.agents.literature_reviewer import run_literature_review
@@ -97,16 +98,520 @@ PRIOR_DRAFT_BUDGET = 60000
 
 def start_node(state: PipelineState) -> dict:
     topic = state.get("research_topic", "")
-    if not topic:
-        return {"error": "research_topic is required", "current_phase": "start"}
+    request = state.get("research_request", "")
+    if not topic and not request:
+        return {"error": "research_topic 或 research_request 至少需要一个", "current_phase": "start"}
     return {"current_phase": "start"}
 
 
-def route_after_start(state: PipelineState) -> Literal["outline_generation", "literature_review"]:
-    """skip-retrieval 模式: 跳过文献检索/摄入/预验证, 从大纲生成开始 (大纲/草稿/审阅循环全部重跑)"""
-    if state.get("skip_retrieval"):
-        return "outline_generation"
-    return "literature_review"
+# 计划确认阶段重提取的最大次数 (防止"改了又改"死循环)
+MAX_PLAN_ITERATIONS = 2
+
+
+def _format_plan_summary(topic: str, keywords: list[str], sub_topics: list[str], stages: list[str] | None = None) -> str:
+    lines = [f"## 研究计划\n\n- **主题**: {topic}"]
+    if keywords:
+        lines.append("- **关键词**: " + ", ".join(keywords))
+    if sub_topics:
+        lines.append("- **子主题**: " + ", ".join(sub_topics))
+    if stages:
+        scope = _format_stages(stages)
+        lines.append("- **任务范围**: " + scope)
+    lines.append("\n（确认无误后回车开始；如需调整，请说明）")
+    return "\n".join(lines)
+
+
+def _format_stages(stages: list[str]) -> str:
+    labels = {
+        "research": "检索文献 + 生成综述总结",
+        "write": "撰写完整综述论文",
+        "figures": "重新生成图表",
+    }
+    return " → ".join(labels.get(s, s) for s in stages)
+
+
+def _guess_stages(text: str) -> list[str]:
+    """规则兜底: 从描述中判断要执行哪些阶段/动作 (局部任务 vs 完整综述)。"""
+    import re
+    text = text or ""
+    # 重新生成图表/图片 → figures 动作 (后处理, 复用已有上下文)
+    if re.search(r"(重新)?(生成|绘制|制作|重画).{0,4}(图片|图表|插图|图件|示意图|配图|图)", text):
+        return ["figures"]
+    # 明确否定撰写 (不需要/不要/不用/无需/免去 写/撰写/成文/论文/综述) → 只检索+总结
+    if re.search(r"(不|无需|不必|不用|不要|免去|免于).{0,6}(写|撰写|成文|成稿|论文|综述)", text):
+        return ["research"]
+    # "写/撰写/成文/成稿" + "论文/综述/文章" = 撰写 (注意: "报告/总结/大纲" 不算撰写)
+    wants_write = re.search(r"(写|撰写|成文|成稿|输出)", text) and re.search(r"(论文|综述|文章)", text)
+    has_data = _detect_use_cache(text)
+    # 明确要求撰写 → 完整综述; 已有数据/报告则跳过检索直接写
+    if wants_write:
+        return ["write"] if has_data else ["research", "write"]
+    # 明确"只要/仅/只想"检索或总结 → 局部任务
+    if re.search(r"(只要|只需|仅|只想|就)(检索|查找|总结|调研|梳理)", text):
+        return ["research"]
+    # 只提到检索/总结/调研/生成报告, 未提撰写 → 局部任务 (检索+总结)
+    if re.search(r"(检索|查找|调研|总结|综述笔记|文献综述|报告|汇报)", text) and not re.search(r"(写|撰写|论文)", text):
+        return ["research"]
+    return ["research", "write"]
+
+
+def _detect_use_cache(text: str) -> bool:
+    """规则判定: 用户是否表示"检索已完成/已有数据/用缓存" (从而跳过检索)。"""
+    import re
+    text = text or ""
+    if re.search(r"检索.{0,8}(已|已经)?(完成|做完|结束|好了|过了)", text):
+        return True
+    if re.search(r"(查看|复用|使用|利用|用|读取|直接).{0,6}(缓存|cache)", text, re.IGNORECASE):
+        return True
+    if re.search(r"(已有|现成|有).{0,4}(缓存|cache)", text, re.IGNORECASE):
+        return True
+    # 已有数据/报告/材料 (如「结合已有的数据和报告」)
+    if re.search(r"(已有|现有|现成|之前|前面|上面).{0,12}(数据|报告|材料|笔记|文献|资料|结果|总结)", text):
+        return True
+    if re.search(r"(结合|基于|利用|使用|沿用).{0,6}(已有|现有|之前|前面)", text):
+        return True
+    # 已收集/已搜集/已检索/已整理/已汇总 (到的信息/数据/文献)
+    if re.search(r"(已|已经)(收集|搜集|检索|查找|整理|汇总|获取).{0,10}(信息|数据|文献|资料|笔记|结果|材料)", text):
+        return True
+    return False
+
+
+def _split_cn_en(text: str) -> tuple[str, str]:
+    """把「中文（英文）」/「中文 (English)」拆成 (中文, 英文)。
+
+    用于子主题扁平化: 中文名保留在子主题, 英文检索词并入关键词。
+    """
+    import re
+    text = (text or "").strip()
+    m = re.match(r"^\s*(.+?)\s*[（(]\s*([A-Za-z][^（）()]*)\s*[)）]\s*$", text)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return text, ""
+
+
+def _normalize_subtopics(sub_topics: list[str], keywords: list[str]) -> tuple[list[str], list[str]]:
+    """子主题扁平化: 拆出括号里的英文并入关键词, 子主题只保留中文名。
+
+    - 子主题「射频指纹提取方法 (RF fingerprint extraction methods)」
+      → 子主题「射频指纹提取方法」, 关键词追加「RF fingerprint extraction methods」
+    - 无括号的子主题原样保留
+    """
+    cn_list: list[str] = []
+    kw = list(keywords or [])
+    seen = {k.lower() for k in kw}
+    for s in sub_topics or []:
+        cn, en = _split_cn_en(s)
+        if cn:
+            cn_list.append(cn)
+        if en and en.lower() not in seen:
+            kw.append(en)
+            seen.add(en.lower())
+    return cn_list, kw
+
+
+def _strip_quotes(text: str) -> str:
+    """去掉主题两端包裹的引号/括号 (含全角弯引号 “ ” ‘ ’、书名号等)。"""
+    t = (text or "").strip()
+    for ch in ('"', "'", "\u201c", "\u201d", "\u2018", "\u2019",
+               "「", "」", "『", "』", "《", "》", "<", ">", "(", ")", "（", "）"):
+        t = t.strip(ch)
+    return t.strip("，。；;、 ,")
+
+
+def _is_garbage_topic(topic: str, request: str = "") -> bool:
+    """判断主题是否为「垃圾」——提取/兜底得到的是指令本身, 而非真实研究主题。
+
+    用于触发反问澄清: 空 / 过长 / 与指令相同或高度相似 / 以指令性客套开头且很短。
+    """
+    topic = (topic or "").strip()
+    if not topic or len(topic) > 50:
+        return True
+    req = (request or "").strip()
+    if req and topic == req:
+        return True
+    if req:
+        try:
+            from difflib import SequenceMatcher
+
+            if SequenceMatcher(None, topic, req).ratio() >= 0.6:
+                return True
+        except ImportError:
+            pass
+    import re
+
+    # 以指令性客套/动词开头且很短 → 疑似指令 (如「你帮我开展研究」「请帮我写」)
+    if re.match(r"^(帮我|请你|请|麻烦你|你|我们|开展|撰写|写|生成|检索|总结|梳理|进行|做|能否|可以)", topic) and len(topic) <= 12:
+        return True
+    return False
+
+
+def _extract_research_plan(request: str, topic_hint: str = "") -> dict:
+    """用廉价 LLM 从自然语言描述中提取结构化研究计划。
+
+    返回 {"topic", "keywords", "sub_topics", "time_range", "stages"}。
+    关键词必须包含用户给出的英文检索形式与缩写 (用于英文学术库检索)。
+    LLM 返回无效/失败时, 用规则回退提取主题与任务范围 (避免把整段描述当主题)。
+    """
+    import re
+    import json
+
+    def _to_text(result) -> str:
+        content = getattr(result, "content", None)
+        if content is None:
+            return str(result)
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(str(getattr(c, "text", c)) for c in content)
+        return str(content)
+
+    def _guess_topic(text: str) -> str:
+        """规则兜底: 从「关于 X 的 Y」「开展 X 研究」等句式提取核心主题。"""
+        text = (text or "").strip()
+        m = re.search(r"关于\s*(.{2,40}?)\s*的\s*(?:研究|综述|主题|方向|领域|课题|现状|进展)", text)
+        if m:
+            return _strip_quotes(m.group(1))
+        m = re.search(r"(?:开展|进行|做|写)\s*(.{2,40}?)\s*(?:的)?\s*(?:研究|综述)", text)
+        if m:
+            return _strip_quotes(m.group(1))
+        # 去掉客套/指令前缀, 取剩余前 40 字
+        cleaned = re.sub(r"^(我希望|我想|我打算|请|请你|帮我|麻烦你|你)(?:帮我)?(?:开展|研究|写|生成|总结|综述|做|梳理)?", "", text)
+        return _strip_quotes(cleaned[:40])
+
+    raw_text = ""
+    topic, keywords, sub_topics, time_range, stages = "", [], [], "", []
+    reuse_previous, needs_clarification = False, False
+    try:
+        from src.config import build_llm
+        from langchain_core.messages import SystemMessage, HumanMessage
+
+        llm = build_llm("cheap")
+        prompt = (
+            "请从下面的用户研究描述中提取结构化研究计划。\n\n"
+            "注意: 用户描述可能包含客套或指令性语句 (如「请你根据我的意图生成研究计划」),"
+            " 请忽略这些客套, 只提取**实际的研究对象与任务范围**。\n\n"
+            "要求：\n"
+            "1. topic: 研究主题 (中文, 简洁, 去除冗余客套)。\n"
+            "2. keywords: 核心关键词列表, **必须同时包含中文术语、其英文检索形式与缩写**"
+            " (例如「射频指纹识别」要同时给出「RF fingerprinting」「RFFI」「radio frequency fingerprint identification」),"
+            " 因为后续要在 arXiv/Semantic Scholar/OpenAlex 等英文库检索。\n"
+            "3. sub_topics: 用户希望覆盖的研究方面/子主题列表, 每个用「中文名（英文检索词）」格式,"
+            " 英文检索词便于后续在 arXiv/Semantic Scholar/OpenAlex 等英文库检索。\n"
+            "4. time_range: 若用户提及年份范围则提取 (如 2019-2026), 否则留空字符串。\n"
+            "5. stages: 用户希望执行的任务阶段/动作, 从以下取值:\n"
+            "   - \"research\" = 检索文献并生成综述总结 (文献综述/调研)\n"
+            "   - \"write\" = 撰写完整综述论文\n"
+            "   - \"figures\" = 重新生成图表/图片 (对已有综述笔记/数据重新绘图)\n"
+            "   若用户只要求检索/总结/调研而不写论文 → [\"research\"];\n"
+            "   若要求写综述论文且未表示已有数据 → [\"research\", \"write\"];\n"
+            "   若用户明确表示已有数据/报告/缓存/检索已完成, 只需撰写 → [\"write\"];\n"
+            "   若用户要求重新生成图表/图片 → [\"figures\"], 且 reuse_previous=true (复用已有上下文)。\n"
+            "6. reuse_previous: 布尔值, 用户是否表示要复用之前会话的成果"
+            " (如「已有数据/报告/材料/缓存」「检索已完成」「结合之前的」「继续」),"
+            " 即跳过重新检索、沿用已有数据。\n"
+            "7. needs_clarification: 布尔值, 若用户意图模糊 (如「撰写综述」但未指明主题、"
+            "且明显依赖上下文) 则为 true, 否则 false。\n\n"
+            '输出 JSON: {"topic": "...", "keywords": [...], "sub_topics": [...], "time_range": "...", "stages": [...], "reuse_previous": false, "needs_clarification": false}\n'
+            "只输出 JSON, 不要解释。\n\n"
+            f"用户描述:\n{request}"
+        )
+        result = llm.invoke([
+            SystemMessage(content="你是研究计划提取助手, 只输出 JSON。"),
+            HumanMessage(content=prompt),
+        ])
+        raw_text = _to_text(result)
+        m = re.search(r"\{.*\}", raw_text, re.DOTALL)
+        data = json.loads(m.group(0)) if m else {}
+        topic = _strip_quotes(data.get("topic") or "")
+        keywords = [str(x).strip() for x in (data.get("keywords") or []) if str(x).strip()]
+        sub_topics = [str(x).strip() for x in (data.get("sub_topics") or []) if str(x).strip()]
+        time_range = (data.get("time_range") or "").strip()
+        raw_stages = data.get("stages") or []
+        stages = [s for s in (str(x).strip() for x in raw_stages) if s in ("research", "write", "figures")]
+        reuse_previous = bool(data.get("reuse_previous", False))
+        needs_clarification = bool(data.get("needs_clarification", False))
+    except Exception as e:
+        print(f"  [planner] 计划提取 LLM 失败, 回退规则提取: {e}")
+
+    # 主题校验
+    if needs_clarification:
+        # LLM 明确表示意图模糊、需要澄清 → 保持主题为空, 交由 planner 反问澄清 (不回退正则)
+        topic = ""
+    elif not topic or topic == request.strip() or len(topic) > 50:
+        # LLM 未提取到有效主题 (空/等于整段输入/过长) → 规则兜底
+        if raw_text:
+            print(f"  [planner] LLM 未提取到有效主题, 回退规则提取")
+        topic = _guess_topic(request) or topic_hint or request
+    if not stages:
+        stages = _guess_stages(request)
+    # reuse_previous 正则兜底: LLM 漏判时仍能识别"已有数据/用缓存"
+    if not reuse_previous:
+        reuse_previous = _detect_use_cache(request)
+
+    return {
+        "topic": topic, "keywords": keywords, "sub_topics": sub_topics,
+        "time_range": time_range, "stages": stages,
+        "reuse_previous": reuse_previous, "needs_clarification": needs_clarification,
+    }
+
+
+def research_planner_node(state: PipelineState) -> dict:
+    """入口 Planner: 解析自然语言意图 → 结构化指令 (主题/关键词/子主题/任务阶段)。
+
+    同时在主题确定后处理 skip-retrieval 缓存加载 (原入口处逻辑迁移至此,
+    因为自然语言路径下主题要等 Planner 提取后才已知)。
+    """
+    request = (state.get("research_request") or "").strip()
+    correction = (state.get("plan_correction") or "").strip()
+    # 用户显式指定的主题 (上下文切换/主题框), 优先级高于 LLM 从指令中提取的主题
+    explicit_topic = state.get("research_topic", "").strip()
+    topic = explicit_topic
+    keywords = list(state.get("topic_keywords", []) or [])
+    sub_topics = list(state.get("sub_topics", []) or [])
+    time_range = state.get("time_range", "2019-2026")
+    stages = list(state.get("stages", []) or [])
+    reuse_previous = False
+
+    if request:
+        full = request if not correction else f"{request}\n用户修正意见: {correction}"
+        print("  [planner] 解析自然语言研究意图...")
+        plan = _extract_research_plan(full, topic_hint=topic)
+        # 无显式主题时, 才采用 LLM 从指令提取的主题 (显式主题优先)
+        if plan.get("topic") and not explicit_topic:
+            topic = plan["topic"]
+        if plan.get("keywords"):
+            keywords = plan["keywords"]
+        if plan.get("sub_topics"):
+            sub_topics = plan["sub_topics"]
+        if plan.get("time_range"):
+            time_range = plan["time_range"]
+        if plan.get("stages"):
+            stages = plan["stages"]
+        if plan.get("reuse_previous"):
+            reuse_previous = plan["reuse_previous"]
+
+    # 后处理类动作 (figures 等) 天然作用于当前上下文 → 复用已有成果 (不重新检索)
+    if any(s in _POST_ACTIONS for s in stages):
+        reuse_previous = True
+
+    if not topic:
+        topic = request
+
+    # 扁平化: 子主题「中文（英文）」→ 拆出英文并入关键词, 子主题只留中文名
+    # (覆盖 LLM 提取与用户手动填写两条路径, 保证英文检索词进入扁平关键词列表)
+    sub_topics, keywords = _normalize_subtopics(sub_topics, keywords)
+
+    # 复用之前成果 (reuse_previous) → 若无显式主题, 主题来自上下文 (会话记忆 → 最近缓存),
+    # 而非指令本身 (指令如「结合收集到的信息撰写」不含真实主题, LLM 提取的常是垃圾主题)
+    if reuse_previous and not explicit_topic:
+        try:
+            from src.utils.session_memory import load_session_memory
+            from src.utils.pipeline_cache import latest_cache_topic
+
+            mem = load_session_memory()
+            mem_topic = (mem or {}).get("topic", "") if mem else ""
+            ctx = mem_topic or latest_cache_topic()
+            if ctx:
+                topic = ctx
+                print(f"  [planner] 复用之前成果, 沿用上下文主题「{topic}」")
+            else:
+                print("  [planner] 复用之前成果, 但无可用上下文 (缓存已清空且无会话记忆)")
+        except Exception:
+            pass
+
+    # 主题仍未解决 (垃圾主题) 且为交互模式 → 反问澄清
+    # (复用之前成果时优先从上下文解析, 无上下文可用才会走到这里)
+    if state.get("interactive") and _is_garbage_topic(topic, request):
+        answer = interrupt({
+            "type": "clarify",
+            "phase": "research_planner",
+            "title": "需要澄清研究主题",
+            "content": "我无法从你的描述中确定研究主题。请告诉我你想研究的具体主题。",
+            "hint": "请输入研究主题或完整指令（如「射频指纹识别」）；q 停止",
+        })
+        answer = (answer or "").strip()
+        if answer and not _is_quit(answer) and not _is_confirm(answer):
+            try:
+                plan2 = _extract_research_plan(answer)
+                if plan2.get("topic"):
+                    topic = plan2["topic"]
+                if plan2.get("keywords"):
+                    keywords = plan2["keywords"]
+                if plan2.get("sub_topics"):
+                    sub_topics = plan2["sub_topics"]
+                if plan2.get("stages"):
+                    stages = plan2["stages"]
+                if plan2.get("reuse_previous"):
+                    reuse_previous = plan2["reuse_previous"]
+                if plan2.get("time_range"):
+                    time_range = plan2["time_range"]
+                sub_topics, keywords = _normalize_subtopics(sub_topics, keywords)
+                print(f"  [planner] 澄清后重新提取: 主题「{topic}」, 任务范围 {_format_stages(stages)}")
+            except Exception:
+                topic = _strip_quotes(answer)
+                print(f"  [planner] 澄清后主题: {topic}")
+
+    # 尝试加载缓存 (skip-retrieval 或 reuse_previous), 确定能否跳过检索
+    cached = None
+    resolved = None
+    if state.get("skip_retrieval") or reuse_previous:
+        try:
+            from src.utils.pipeline_cache import load_retrieval_cache, resolve_cache_topic
+
+            resolved = resolve_cache_topic(topic)
+            cached = load_retrieval_cache(resolved) if resolved else None
+        except Exception:
+            cached = None
+            resolved = None
+
+    cache_hit = cached is not None
+
+    # 根据缓存命中情况确定最终任务范围 (先定 cache, 再定 stages, 避免日志前后矛盾)
+    if reuse_previous and "write" in stages:
+        if cache_hit:
+            stages = ["write"]
+            print("  [planner] 复用已有数据/报告, 跳过检索直接进入撰写")
+        else:
+            stages = ["research", "write"]
+            print("  [planner] 无可用缓存可复用, 恢复为完整流程 (检索 + 撰写)")
+
+    print(f"  [planner] 主题: {topic}")
+    if keywords:
+        print(f"  [planner] 关键词: {', '.join(keywords)}")
+    if sub_topics:
+        print(f"  [planner] 子主题: {', '.join(sub_topics)}")
+    if stages:
+        print(f"  [planner] 任务范围: {_format_stages(stages)}")
+
+    out: dict = {
+        "research_topic": topic,
+        "topic_keywords": keywords,
+        "sub_topics": sub_topics,
+        "time_range": time_range,
+        "stages": stages,
+        "stage_index": 0,
+        "plan_confirmed": False,
+        "current_phase": "research_planner",
+    }
+
+    if cache_hit and cached and resolved:
+        print(f"  [planner] 命中检索缓存「{resolved}」"
+              f" (已验证引用 {len(cached.get('verified_references', []))} 篇), 跳过检索")
+        out["literature_review_notes"] = cached.get("literature_review_notes", "")
+        out["verified_references"] = cached.get("verified_references", [])
+        out["retrieved_papers"] = cached.get("retrieved_papers", [])
+        out["unfiltered_papers"] = cached.get("unfiltered_papers", [])
+        out["skip_retrieval"] = True
+        # 仅当"检索+总结"是唯一任务时, 才把综述笔记落盘 (它是该任务的产物);
+        # 对 write/figures 等后处理动作, 笔记已在 outputs/ 中, 重存会产生重复文件与误导
+        if stages == ["research"]:
+            notes = cached.get("literature_review_notes", "")
+            if notes:
+                try:
+                    safe_name = sanitize_filename(resolved or topic)
+                    ts = get_timestamp()
+                    out["literature_notes_path"] = save_file(
+                        notes, f"literature_review_notes_{safe_name}_{ts}.md",
+                        subdir=state.get("run_id"),
+                    )
+                except Exception:
+                    pass
+    else:
+        out["skip_retrieval"] = False
+
+    return out
+
+
+def human_confirm_plan_node(state: PipelineState) -> dict:
+    """计划确认暂停点: 展示提取结果 (主题/关键词/子主题/任务范围), 用户确认 / 修正 / 停止。"""
+    if not state.get("interactive"):
+        return {"plan_confirmed": True}
+    topic = state.get("research_topic", "")
+    keywords = state.get("topic_keywords", []) or []
+    sub_topics = state.get("sub_topics", []) or []
+    stages = state.get("stages", []) or []
+    response = interrupt({
+        "type": "plan",
+        "phase": "research_planner",
+        "title": "研究计划已生成，请确认",
+        "content": _format_plan_summary(topic, keywords, sub_topics, stages),
+        "topic": topic,
+        "keywords": keywords,
+        "subtopics": sub_topics,
+        "stages": stages,
+        "hint": "回车/y=确认并开始；输入修正意见=重新提取；q=停止",
+    })
+    response = (response or "").strip()
+    if _is_confirm(response):
+        return {"plan_correction": "", "plan_confirmed": True}
+    if _is_quit(response):
+        return {"plan_correction": "", "plan_confirmed": True}
+    it = state.get("plan_iteration", 0) + 1
+    if it > MAX_PLAN_ITERATIONS:
+        print(f"  [planner] 计划已重提取 {MAX_PLAN_ITERATIONS} 次, 按当前计划继续")
+        return {"plan_correction": "", "plan_confirmed": True}
+    print("  [planner] 按修正意见重新提取研究计划")
+    prev = state.get("plan_correction", "") or ""
+    return {"plan_correction": f"{prev}\n{response}".strip(), "plan_iteration": it}
+
+
+# 阶段名 → 该阶段第一个节点
+_STAGE_ENTRY = {
+    "research": "literature_review",
+    "write": "outline_generation",
+    "figures": "regenerate_figures",
+}
+
+# 后处理类动作: 天然作用于当前上下文 (复用已有成果), 不重新检索、不反问
+_POST_ACTIONS = {"figures"}
+
+
+def supervisor_node(state: PipelineState) -> dict:
+    """主控 Supervisor: 根据任务计划 (stages) 决定下一步调用哪个智能体。
+
+    工作智能体: research (检索+总结), write (撰写综述)。执行完一个阶段后回到
+    supervisor, 由其派发下一阶段或结束。skip-retrieval 命中缓存时跳过 research。
+    """
+    if not state.get("plan_confirmed"):
+        return {"supervisor_next": "research_planner"}
+
+    stages = list(state.get("stages") or ["research", "write"])
+    idx = int(state.get("stage_index", 0) or 0)
+
+    # 跳过由 skip-retrieval 缓存覆盖的 research 阶段
+    while idx < len(stages):
+        if stages[idx] == "research" and state.get("skip_retrieval"):
+            idx += 1
+            continue
+        break
+
+    if idx >= len(stages):
+        print("  [supervisor] 全部任务完成")
+        # 保存会话记忆 (主题 + 已完成阶段), 供后续"继续撰写"等指令复用
+        try:
+            from src.utils.session_memory import save_session_memory
+
+            save_session_memory(state.get("research_topic", ""), stages)
+        except Exception:
+            pass
+        return {"supervisor_next": "end"}
+
+    stage = stages[idx]
+    nxt = _STAGE_ENTRY.get(stage, "end")
+    print(f"  [supervisor] 调度: {stage} → {nxt}")
+    return {"supervisor_next": nxt, "stage_index": idx + 1}
+
+
+def route_supervisor(state: PipelineState) -> Literal["research_planner", "literature_review", "outline_generation", "regenerate_figures", "end"]:
+    """supervisor 后去向。"""
+    return state.get("supervisor_next", "end")
+
+
+def route_after_plan(state: PipelineState) -> Literal["research_planner", "supervisor"]:
+    """计划确认后去向: 有待重提取的修正 → 回 planner; 否则回 supervisor 派发执行。"""
+    if state.get("plan_correction"):
+        return "research_planner"
+    return "supervisor"
 
 
 def literature_review_node(state: PipelineState) -> dict:
@@ -118,7 +623,7 @@ def literature_review_node(state: PipelineState) -> dict:
     notes_path = None
     if notes:
         filename = f"literature_review_notes_{safe_name}_{ts}.md"
-        notes_path = save_file(notes, filename)
+        notes_path = save_file(notes, filename, subdir=state.get("run_id"))
         result["literature_notes_path"] = notes_path
     return result
 
@@ -137,7 +642,7 @@ def paper_writing_node(state: PipelineState) -> dict:
     ts = get_timestamp()
     if draft and "error" not in result:
         filename = f"draft_paper_{safe_name}_{ts}.md"
-        draft_path = save_file(draft, filename)
+        draft_path = save_file(draft, filename, subdir=state.get("run_id"))
         result["draft_path"] = draft_path
     return result
 
@@ -150,7 +655,7 @@ def pdf_ingestion_node(state: PipelineState) -> dict:
     ts = get_timestamp()
     if report:
         filename = f"pdf_ingestion_report_{safe_name}_{ts}.md"
-        save_file(report, filename)
+        save_file(report, filename, subdir=state.get("run_id"))
     return result
 
 
@@ -166,7 +671,7 @@ def citation_guard_node(state: PipelineState) -> dict:
     ts = get_timestamp()
     if report_md:
         filename = f"citation_guard_{safe_name}_{ts}.md"
-        save_file(report_md, filename)
+        save_file(report_md, filename, subdir=state.get("run_id"))
         result["guard_report_path"] = filename
     return result
 
@@ -180,14 +685,14 @@ def citation_check_node(state: PipelineState) -> dict:
     ts = get_timestamp()
     if report_md:
         filename = f"citation_report_{safe_name}_{ts}.md"
-        save_file(report_md, filename)
+        save_file(report_md, filename, subdir=state.get("run_id"))
         result["citation_report_path"] = filename
 
     # 保存证据账本
     ledger = result.get("evidence_ledger", "")
     if ledger:
         filename = f"evidence_ledger_{safe_name}_{ts}.md"
-        save_file(ledger, filename)
+        save_file(ledger, filename, subdir=state.get("run_id"))
         result["evidence_ledger_path"] = filename
 
     # 引用重编号: 按正文首次出现顺序 1..N, 且同步重排 verified_refs。
@@ -228,38 +733,62 @@ def citation_precheck_node(state: PipelineState) -> dict:
     ts = get_timestamp()
     if report:
         filename = f"citation_precheck_{safe_name}_{ts}.md"
-        save_file(report, filename)
+        save_file(report, filename, subdir=state.get("run_id"))
         result["verified_references_path"] = filename
+
+    # research 阶段结束即保存检索产物到缓存, 供"继续撰写"/多上下文切换复用。
+    # (此前仅在 outline_generation 保存, 导致"只检索+总结"的会话不产生缓存)
+    try:
+        from src.utils.pipeline_cache import save_retrieval_cache
+
+        # verified_references 由 run_citation_precheck 产出 (在 result 中), 而非输入 state
+        verified_refs = result.get("verified_references", []) or state.get("verified_references", [])
+        notes = state.get("literature_review_notes", "")
+        if notes or verified_refs:
+            save_retrieval_cache(
+                topic=topic,
+                literature_review_notes=notes,
+                verified_references=verified_refs,
+                paper_outline="",
+                retrieved_papers=list(state.get("retrieved_papers", [])),
+                unfiltered_papers=list(state.get("unfiltered_papers", [])),
+                keywords=state.get("topic_keywords", []),
+                sub_topics=state.get("sub_topics", []),
+                time_range=state.get("time_range", ""),
+                stages=["research"],
+            )
+    except Exception:
+        pass
+
     return result
 
 
 def outline_generation_node(state: PipelineState) -> dict:
     """STORM 式：写作前生成论文大纲，保证结构清晰"""
+    import time as _time
+
+    _t0 = _time.monotonic()
+    print("  [outline_generation] 开始生成论文大纲 (预计 1-3 分钟)...")
     result = run_outline_generation(state)
+    print(f"  [outline_generation] 大纲生成完成, 耗时 {_time.monotonic() - _t0:.0f}s")
+    # 人工大纲意见已由 run_outline_generation 读取并写入提示, 此处消费后清空
+    result["human_feedback"] = ""
+    result["human_feedback_phase"] = ""
     outline = result.get("paper_outline", "")
     topic = state["research_topic"]
     safe_name = sanitize_filename(topic)
     ts = get_timestamp()
     if outline and "error" not in result:
         filename = f"paper_outline_{safe_name}_{ts}.md"
-        save_file(outline, filename)
+        save_file(outline, filename, subdir=state.get("run_id"))
         result["outline_path"] = filename
 
-    # 保存检索产物到 data/pipeline_cache, 供 --skip-retrieval 复用 (跳过检索阶段)
+    # 把大纲增量写入缓存 (research 阶段已在 citation_precheck 保存过检索产物)
     try:
-        from src.utils.pipeline_cache import save_retrieval_cache
+        from src.utils.pipeline_cache import update_retrieval_cache
 
-        save_retrieval_cache(
-            topic=topic,
-            literature_review_notes=state.get("literature_review_notes", ""),
-            verified_references=state.get("verified_references", []),
-            paper_outline=outline,
-            retrieved_papers=list(state.get("retrieved_papers", [])),
-            unfiltered_papers=list(state.get("unfiltered_papers", [])),
-            keywords=state.get("topic_keywords", []),
-            sub_topics=state.get("sub_topics", []),
-            time_range=state.get("time_range", ""),
-        )
+        if outline:
+            update_retrieval_cache(topic, paper_outline=outline)
     except Exception:
         pass
 
@@ -306,7 +835,7 @@ def format_check_node(state: PipelineState) -> dict:
     safe_name = sanitize_filename(topic)
     ts = get_timestamp()
     filename = f"format_report_{safe_name}_{ts}.md"
-    save_file(report["report_md"], filename)
+    save_file(report["report_md"], filename, subdir=state.get("run_id"))
     out = {
         "current_phase": "format_check",
         "paper_draft": draft,
@@ -375,9 +904,16 @@ def _synchronize_figure_placeholders(draft: str, figure_paths: list[str]) -> str
         return draft
     existing = {int(n) for n in re.findall(r"\[图\s*(\d+)\s*[:：]", draft)}
     mappings = (
-        ("taxonomy", "3", "分类体系"),
+        # 第1章(引言): 领域总览 + 文献检索概况(计量类图)
+        ("framework", "1", "研究框架总览"),
+        ("trend", "1", "文献出版趋势与出处分布"),
+        ("heatmap", "1", "主题×年份文献分布"),
+        # 第2章(相关工作/背景): 识别流程 + 研究发展脉络
+        ("pipeline", "2", "识别流程"),
         ("timeline", "2", "研究发展脉络"),
-        ("trend", "2", "文献出版趋势与出处分布"),
+        # 第3章(核心方法): 分类体系
+        ("taxonomy", "3", "分类体系"),
+        # 第4章(比较与分析): 方法对比
         ("method_comp", "4", "主要方法多维对比"),
         ("comparison", "4", "主要方法多维对比"),
     )
@@ -407,9 +943,64 @@ def _synchronize_figure_placeholders(draft: str, figure_paths: list[str]) -> str
     return synced
 
 
+def regenerate_figures_node(state: PipelineState) -> dict:
+    """figures 动作: 重新生成图表 (从综述笔记 + 已验证引用)。"""
+    import time as _time
+
+    topic = state.get("research_topic", "")
+    lit_notes = state.get("literature_review_notes", "")
+    verified_refs = state.get("verified_references", [])
+
+    # 状态里没有素材时, 尝试从缓存加载 (planner 通常已加载)
+    if not lit_notes and not verified_refs:
+        try:
+            from src.utils.pipeline_cache import load_retrieval_cache, resolve_cache_topic
+
+            resolved = resolve_cache_topic(topic)
+            cached = load_retrieval_cache(resolved) if resolved else None
+            if cached:
+                lit_notes = cached.get("literature_review_notes", "")
+                verified_refs = cached.get("verified_references", [])
+        except Exception:
+            pass
+
+    if not lit_notes and not verified_refs:
+        return {"error": "无可用文献素材/已验证引用, 无法生成图表", "current_phase": "figures"}
+
+    print(f"  [figures] 开始生成图表 (主题: {topic})...")
+    _t0 = _time.monotonic()
+    try:
+        from src.rag.figure_generator import generate_figures_from_notes
+
+        fig_paths = generate_figures_from_notes(topic, lit_notes, verified_refs)
+        print(f"  [figures] 图表生成完成: {len(fig_paths)} 张, 耗时 {_time.monotonic() - _t0:.0f}s")
+        result = {"figure_paths": fig_paths, "current_phase": "figures"}
+        # 若有草稿, 同步图占位符
+        draft = state.get("paper_draft", "")
+        if draft and fig_paths:
+            synced = _synchronize_figure_placeholders(draft, fig_paths)
+            if synced != draft:
+                result["paper_draft"] = synced
+                print("  [figures] 已为成图补齐正文占位符")
+        return result
+    except Exception as e:
+        print(f"  [figures] 图表生成失败: {e}")
+        return {"error": f"图表生成失败: {e}", "current_phase": "figures"}
+
+
 def finalize_node(state: PipelineState) -> dict:
     """最终节点：生成图表 + 成本/用量报告"""
     result: dict = {}
+
+    # 论文已完成 → 更新缓存的进度为 research+write (供多上下文列表显示)
+    try:
+        from src.utils.pipeline_cache import update_retrieval_cache
+
+        topic = state.get("research_topic", "")
+        if topic:
+            update_retrieval_cache(topic, stages=["research", "write"])
+    except Exception:
+        pass
 
     # 生成综述图表（分类体系/时间线/趋势/方法对比, 借鉴 AI-Scientist 12 图上限）
     try:
@@ -439,7 +1030,7 @@ def finalize_node(state: PipelineState) -> dict:
         if report:
             ts = get_timestamp()
             filename = f"cost_report_{ts}.md"
-            save_file(report, filename)
+            save_file(report, filename, subdir=state.get("run_id"))
             summary = tracker.summary()
             result["usage"] = summary
             result["total_cost"] = summary["total_cost_usd"]
@@ -498,7 +1089,7 @@ def paper_review_node(state: PipelineState) -> dict:
     ts = get_timestamp()
     if report and "error" not in result:
         filename = f"paper_review_{safe_name}_{ts}.md"
-        review_path = save_file(report, filename)
+        review_path = save_file(report, filename, subdir=state.get("run_id"))
         result["review_report_path"] = review_path
 
     # 收敛检测: 用稳定质量向量而非单一总分判断进步。
@@ -535,6 +1126,261 @@ def paper_review_node(state: PipelineState) -> dict:
     return result
 
 
+# 对话式协作: 用户在各暂停点的输入分类 (集中定义, CLI 前端与节点共用)
+_CONFIRM_WORDS = {"", "y", "yes", "ok", "okay", "c", "continue", "确认", "继续", "好", "可以", "同意", "是"}
+_QUIT_WORDS = {"q", "quit", "exit", "stop", "n", "no", "abort", "取消", "停止", "退出", "放弃"}
+_FINALIZE_WORDS = {"f", "finalize", "finish", "done", "end", "accept", "accept", "定稿", "接受", "结束", "直接定稿", "就这样"}
+
+# 大纲反馈重生成的最大次数 (防止"改了又改"死循环)
+MAX_OUTLINE_ITERATIONS = 3
+
+
+def _is_confirm(response: str) -> bool:
+    return (response or "").strip().lower() in _CONFIRM_WORDS
+
+
+def _is_quit(response: str) -> bool:
+    return (response or "").strip().lower() in _QUIT_WORDS
+
+
+def _is_finalize(response: str) -> bool:
+    return (response or "").strip().lower() in _FINALIZE_WORDS
+
+
+def _parse_config_change(feedback: str) -> dict:
+    """从用户意见解析配置修改 (目前支持: 最大修订轮次)。"""
+    import re
+    args = {}
+    if re.search(r"轮次|revision|修订轮|修改轮|改.{0,3}轮|最多", feedback, re.IGNORECASE):
+        m = re.search(r"(\d+)\s*轮|轮次?\s*[=:：为改设至]+\s*(\d+)", feedback)
+        if m:
+            args["max_revisions"] = int(m.group(1) or m.group(2))
+        else:
+            m2 = re.search(r"(\d+)", feedback)
+            if m2:
+                args["max_revisions"] = int(m2.group(1))
+    return args
+
+
+def _extract_scope(feedback: str) -> dict:
+    """从范围修改意见提取新的 sub_topics / keywords (廉价 LLM + 逗号回退)。"""
+    import re as _re
+
+    def _split(t: str) -> list[str]:
+        parts = _re.split(r"[,，、;；\n]+", t)
+        return [p.strip() for p in parts if p.strip()]
+
+    try:
+        from src.config import build_llm
+        from langchain_core.messages import SystemMessage, HumanMessage
+
+        llm = build_llm("cheap")
+        prompt = (
+            "从下面的用户意见中提取他们想增加/修改的研究子主题和关键词。\n"
+            '输出 JSON: {"sub_topics": [...], "keywords": [...]}，只输出 JSON 不要解释，'
+            "未提及的项输出空数组。\n\n"
+            f"用户意见: {feedback}"
+        )
+        result = llm.invoke([
+            SystemMessage(content="你是结构化提取助手，只输出 JSON。"),
+            HumanMessage(content=prompt),
+        ])
+        text = result.content if hasattr(result, "content") else str(result)
+        m = _re.search(r"\{.*\}", text, _re.DOTALL)
+        data = __import__("json").loads(m.group(0)) if m else {}
+        return {
+            "sub_topics": [str(x).strip() for x in (data.get("sub_topics") or []) if str(x).strip()],
+            "keywords": [str(x).strip() for x in (data.get("keywords") or []) if str(x).strip()],
+        }
+    except Exception as e:
+        print(f"  [human] 范围提取 LLM 失败, 回退逗号切分: {e}")
+        return {"sub_topics": _split(feedback), "keywords": []}
+
+
+def parse_human_intent(feedback: str, phase: str) -> dict:
+    """把用户自然语言反馈解析为结构化动作。
+
+    返回 {"kind": ..., "args": {...}}
+    kind: none / regenerate_outline / revise / scope / config
+    """
+    import re
+    feedback = (feedback or "").strip()
+    if not feedback:
+        return {"kind": "none"}
+
+    if phase == "outline":
+        # 范围修改: 明确提及子主题/关键词/主题
+        if re.search(r"子主题|关键词|主题", feedback):
+            return {"kind": "scope"}
+        # 配置修改: 明确提及轮次等
+        cfg = _parse_config_change(feedback)
+        if cfg:
+            return {"kind": "config", "args": cfg}
+        # 默认: 按修改意见重新生成大纲
+        return {"kind": "regenerate_outline"}
+
+    # draft / review 阶段: 一律视为内容修订意见
+    return {"kind": "revise"}
+
+
+def _human_feedback_to_contract(feedback: str, phase: str, index: int) -> dict:
+    """把用户内容意见包装成修订契约条目 (increment_revision 会优先执行)。"""
+    return {
+        "id": f"R-HUMAN-{index:02d}",
+        "status": "未解决",
+        "priority": "高",
+        "problem": f"（用户人工要求）{feedback}",
+        "evidence": f"用户在第 {phase} 阶段提出的人工意见",
+        "human": True,
+    }
+
+
+def human_outline_node(state: PipelineState) -> dict:
+    """大纲确认暂停点: 确认继续 / 按意见重新生成大纲 / 修改范围(重新检索) / 改轮次 / 停止。"""
+    if not state.get("interactive"):
+        return {}
+    outline = state.get("paper_outline", "")
+    response = interrupt({
+        "type": "outline",
+        "phase": "outline_generation",
+        "title": "论文大纲已生成，请确认",
+        "content": outline,
+        "path": state.get("outline_path", ""),
+        "hint": "回车/y=确认；输入修改意见=重新生成大纲；含'子主题/关键词'=重新检索；含'轮次N'=改修订轮次；q=停止",
+    })
+    response = (response or "").strip()
+    if _is_confirm(response):
+        return {"human_feedback": "", "human_feedback_phase": "", "human_outline_route": "paper_writing"}
+    if _is_quit(response):
+        # quit 由 CLI 前端在 resume 前拦截; 此处仅兜底
+        return {"human_outline_route": "paper_writing"}
+
+    intent = parse_human_intent(response, "outline")
+
+    if intent["kind"] == "scope":
+        scope = _extract_scope(response)
+        out = {
+            "human_feedback": "",
+            "human_feedback_phase": "",
+            "human_outline_route": "literature_review",
+            "outline_iteration": 0,
+            # 回到 supervisor 后需重新派发 write 阶段 (research 已重跑)
+            "stage_index": 1,
+        }
+        if scope.get("sub_topics"):
+            out["sub_topics"] = scope["sub_topics"]
+            print(f"  [human] 更新子主题: {', '.join(scope['sub_topics'])} → 重新检索")
+        if scope.get("keywords"):
+            out["topic_keywords"] = scope["keywords"]
+            print(f"  [human] 更新关键词: {', '.join(scope['keywords'])} → 重新检索")
+        if not scope.get("sub_topics") and not scope.get("keywords"):
+            # 没解析到具体词 → 退化为重新生成大纲
+            print("  [human] 未解析到明确的关键词/子主题, 按修改意见重新生成大纲")
+            return {
+                "human_feedback": response,
+                "human_feedback_phase": "outline",
+                "human_outline_route": "outline_generation",
+            }
+        return out
+
+    if intent["kind"] == "config":
+        out = {"human_feedback": "", "human_feedback_phase": "", "human_outline_route": "paper_writing"}
+        mr = intent["args"].get("max_revisions")
+        if mr:
+            out["max_revisions"] = int(mr)
+            print(f"  [human] 最大修订轮次改为 {mr}")
+        return out
+
+    # regenerate_outline: 按意见重新生成大纲 (带次数上限)
+    it = state.get("outline_iteration", 0) + 1
+    if it > MAX_OUTLINE_ITERATIONS:
+        print(f"  [human] 大纲已重生成 {MAX_OUTLINE_ITERATIONS} 次, 不再继续, 按当前大纲进入撰写")
+        return {"human_feedback": "", "human_feedback_phase": "", "human_outline_route": "paper_writing"}
+    print("  [human] 按你的意见重新生成大纲")
+    return {
+        "human_feedback": response,
+        "human_feedback_phase": "outline",
+        "human_outline_route": "outline_generation",
+        "outline_iteration": it,
+    }
+
+
+def human_draft_node(state: PipelineState) -> dict:
+    """初稿确认暂停点 (仅初稿; 修订轮次由审稿暂停点接管)。"""
+    if not state.get("interactive"):
+        return {}
+    if state.get("revision_count", 0) > 0:
+        return {}
+    draft = state.get("paper_draft", "")
+    response = interrupt({
+        "type": "draft",
+        "phase": "paper_writing",
+        "title": "论文初稿已完成 (引用已守门/核查)",
+        "content": draft,
+        "path": state.get("draft_path", ""),
+        "hint": "回车/y=送审；输入修改意见=转成修订要求(首轮修订执行)；q=停止",
+    })
+    response = (response or "").strip()
+    if _is_confirm(response):
+        return {"human_feedback": "", "human_feedback_phase": ""}
+    if _is_quit(response):
+        return {"human_feedback": ""}
+    existing = list(state.get("human_revision_contract", []) or [])
+    item = _human_feedback_to_contract(response, "draft", len(existing) + 1)
+    print(f"  [human] 初稿意见已转为修订要求 [{item['id']}], 将在首轮修订中执行")
+    return {"human_feedback": "", "human_feedback_phase": "draft", "human_revision_contract": existing + [item]}
+
+
+def human_review_node(state: PipelineState) -> dict:
+    """审稿暂停点: 继续修订(可附人工意见) / 接受定稿 / 停止。"""
+    if not state.get("interactive"):
+        return {"human_review_decision": ""}
+    score = state.get("review_score", 0)
+    report = state.get("review_report", "")
+    revision_count = state.get("revision_count", 0)
+    max_revisions = state.get("max_revisions", MAX_REVISIONS)
+    response = interrupt({
+        "type": "review",
+        "phase": "paper_review",
+        "title": f"第 {revision_count} 轮审稿完成 (评分 {score}/50)",
+        "score": score,
+        "revision_count": revision_count,
+        "max_revisions": max_revisions,
+        "content": report,
+        "path": state.get("review_report_path", ""),
+        "hint": "回车/y=继续修订；输入修改意见=转成修订要求并继续修订；f/结束=接受当前稿并定稿；q=停止",
+    })
+    response = (response or "").strip()
+    if _is_finalize(response):
+        # 定稿时若仍有引用硬伤, 明确警告 (引用可能渲染为 [?])
+        hard = (
+            int(state.get("citation_not_found_count", 0) or 0)
+            + len(state.get("hallucinated_refs", []) or [])
+            + int(state.get("guard_invalid_count", 0) or 0)
+        )
+        if hard:
+            print(f"  [human] ⚠️ 当前稿仍有 {hard} 处引用硬伤, 定稿后 PDF 引用可能显示为 [?]")
+        return {"human_review_decision": "finalize", "human_feedback": ""}
+    if _is_confirm(response):
+        return {"human_review_decision": "revise", "human_feedback": ""}
+    if _is_quit(response):
+        return {"human_review_decision": "revise", "human_feedback": ""}
+    # 其余输入: 继续修订 + 附人工意见 (转为修订契约条目)
+    existing = list(state.get("human_revision_contract", []) or [])
+    item = _human_feedback_to_contract(response, "review", len(existing) + 1)
+    print(f"  [human] 审稿阶段意见已转为修订要求 [{item['id']}], 将随本轮修订执行")
+    return {
+        "human_review_decision": "revise",
+        "human_feedback": "",
+        "human_revision_contract": existing + [item],
+    }
+
+
+def route_after_human_outline(state: PipelineState) -> str:
+    """大纲暂停点后去向: 重新生成大纲 / 重新检索(改范围) / 进入撰写。"""
+    return state.get("human_outline_route", "paper_writing")
+
+
 def should_continue_review(state: PipelineState) -> Literal["paper_writing", "end"]:
     score = state.get("review_score", 0)
     revision_count = state.get("revision_count", 0)
@@ -549,7 +1395,18 @@ def should_continue_review(state: PipelineState) -> Literal["paper_writing", "en
     ) or 0
     max_revisions = state.get("max_revisions", MAX_REVISIONS)
 
+    # 人工决策优先: 用户在审稿暂停点选择"接受定稿" → 无论机器门禁如何都结束
+    if state.get("human_review_decision") == "finalize":
+        return "end"
+
     if error:
+        return "end"
+
+    # 有待处理的人工要求 → 必须修订执行 (即使机器门禁已达标/停滞, 人工指令优先于机器门禁)
+    if state.get("human_revision_contract"):
+        if revision_count < max_revisions:
+            return "paper_writing"
+        print("  [review] 已达最大修订轮次, 仍有未执行的人工要求, 结束")
         return "end"
 
     # review_score 是 50 分制，需换算为 100 分制与 REVIEW_ACCEPT_THRESHOLD 比较
@@ -1034,6 +1891,12 @@ def increment_revision(state: PipelineState) -> dict:
     revision_contract = _augment_contract_with_blocked(revision_contract, prev_blocked)
     # 文献稀缺类条目 → 附上合并/声明稀缺处置方式 (防止硬凑引用引入不当文献)
     revision_contract = _augment_contract_sparse(revision_contract)
+    # 人工意见优先: 用户在暂停点提出的要求作为最高优先级契约条目 (保持原文, 不做自动扩充)
+    human_items = list(state.get("human_revision_contract", []) or [])
+    revision_contract = human_items + revision_contract
+    if human_items:
+        print("  [revision] 本轮并入人工要求 (最高优先级): "
+              + "; ".join(f"{h.get('id', '')}={str(h.get('problem', ''))[:60]}" for h in human_items))
 
     revision_prompt = (
         f"请根据以下审稿意见对论文进行修订。这是第 {count} 轮修订，当前评分 {score}/50。\n\n"
@@ -1164,6 +2027,8 @@ def increment_revision(state: PipelineState) -> dict:
         "revision_history": prev_history + this_summary,
         "verified_references": verified_refs,
         "review_blocked_suggestions": prev_blocked,
+        # 人工意见已并入本轮契约, 清空待处理队列 (避免下一轮重复执行)
+        "human_revision_contract": [],
         # 审稿人需要确定性差异对比来判断旧问题是否已解决 (否则易误判"未解决")
         "previous_paper_draft": prior_draft,
         "messages": [{"role": "user", "content": revision_prompt}],
@@ -1179,43 +2044,127 @@ def build_pipeline(checkpointer=None, persist: bool = False) -> StateGraph:
     graph = StateGraph(PipelineState)
 
     graph.add_node("start", start_node)
+    graph.add_node("supervisor", supervisor_node)
+    graph.add_node("research_planner", research_planner_node)
+    graph.add_node("human_confirm_plan", human_confirm_plan_node)
     graph.add_node("literature_review", literature_review_node)
     graph.add_node("pdf_ingestion", pdf_ingestion_node)
     graph.add_node("citation_precheck", citation_precheck_node)
     graph.add_node("outline_generation", outline_generation_node)
+    graph.add_node("human_outline", human_outline_node)
     graph.add_node("paper_writing", paper_writing_node)
     graph.add_node("citation_guard", citation_guard_node)
     graph.add_node("citation_check", citation_check_node)
+    graph.add_node("human_draft", human_draft_node)
     graph.add_node("paper_review", paper_review_node)
+    graph.add_node("human_review", human_review_node)
     graph.add_node("increment_revision", increment_revision)
     graph.add_node("format_check", format_check_node)
     graph.add_node("latex_render", latex_render_node)
     graph.add_node("finalize", finalize_node)
+    graph.add_node("regenerate_figures", regenerate_figures_node)
 
     graph.set_entry_point("start")
 
-    # 主流水线（STORM 式：预验证引用 → 大纲 → 写作 → 引用守门）
-    # skip-retrieval 模式: start → outline_generation (跳过检索/摄入/预验证,
-    # 大纲及之后的草稿/审阅循环全部重新生成)
+    # 编排式多智能体 (Supervisor 循环):
+    #   start → supervisor → 工作智能体 → supervisor → ... → end
+    graph.add_edge("start", "supervisor")
     graph.add_conditional_edges(
-        "start",
-        route_after_start,
+        "supervisor",
+        route_supervisor,
+        {
+            "research_planner": "research_planner",
+            "literature_review": "literature_review",
+            "outline_generation": "outline_generation",
+            "regenerate_figures": "regenerate_figures",
+            "end": END,
+        },
+    )
+
+    # 工作智能体 1 (计划): 确定关键词/子主题 → 确认 → supervisor
+    graph.add_edge("research_planner", "human_confirm_plan")
+    graph.add_conditional_edges(
+        "human_confirm_plan",
+        route_after_plan,
+        {
+            "research_planner": "research_planner",
+            "supervisor": "supervisor",
+        },
+    )
+
+    # 工作智能体 2 (research): 检索文献 + 生成总结 → supervisor
+    graph.add_edge("literature_review", "pdf_ingestion")
+    graph.add_edge("pdf_ingestion", "citation_precheck")
+    graph.add_edge("citation_precheck", "supervisor")
+
+    # 工作智能体 3 (write): 大纲 → 写作 → 引用守门/核查 → 审稿循环 → 收尾 → supervisor
+    graph.add_edge("outline_generation", "human_outline")
+    graph.add_conditional_edges(
+        "human_outline",
+        route_after_human_outline,
         {
             "outline_generation": "outline_generation",
             "literature_review": "literature_review",
+            "paper_writing": "paper_writing",
         },
     )
-    graph.add_edge("literature_review", "pdf_ingestion")
-    graph.add_edge("pdf_ingestion", "citation_precheck")
-    graph.add_edge("citation_precheck", "outline_generation")
-    graph.add_edge("outline_generation", "paper_writing")
     graph.add_edge("paper_writing", "citation_guard")
     graph.add_edge("citation_guard", "citation_check")
-    graph.add_edge("citation_check", "paper_review")
+    graph.add_edge("citation_check", "human_draft")
+    graph.add_edge("human_draft", "paper_review")
 
-    # 审阅 → 修订循环 或 收尾
+    # 审阅 → (人工确认) → 修订循环 或 收尾
+    graph.add_edge("paper_review", "human_review")
     graph.add_conditional_edges(
-        "paper_review",
+        "human_review",
+        should_continue_review,
+        {
+            "paper_writing": "increment_revision",
+            "end": "format_check",
+        },
+    )
+    graph.add_edge("increment_revision", "paper_writing")
+    graph.add_edge("format_check", "finalize")
+    graph.add_edge("finalize", "latex_render")
+    graph.add_edge("latex_render", "supervisor")
+
+    # 工作智能体 4 (figures): 重新生成图表 → supervisor
+    graph.add_edge("regenerate_figures", "supervisor")
+
+    if checkpointer is None:
+        checkpointer = MemorySaver()
+
+    return graph.compile(checkpointer=checkpointer)
+
+
+def build_writing_graph(checkpointer=None):
+    """构建"撰写"子图: 初稿 → 引用守门/核查 → 审阅 → [修订循环] → 格式 → 图表 → LaTeX
+
+    供模块化流水线的"模块3·撰写"使用 (依赖缓存中的综述笔记/大纲/已验证引用)。
+    """
+    graph = StateGraph(PipelineState)
+
+    graph.add_node("paper_writing", paper_writing_node)
+    graph.add_node("citation_guard", citation_guard_node)
+    graph.add_node("citation_check", citation_check_node)
+    graph.add_node("human_draft", human_draft_node)
+    graph.add_node("paper_review", paper_review_node)
+    graph.add_node("human_review", human_review_node)
+    graph.add_node("increment_revision", increment_revision)
+    graph.add_node("format_check", format_check_node)
+    graph.add_node("finalize", finalize_node)
+    graph.add_node("latex_render", latex_render_node)
+
+    graph.set_entry_point("paper_writing")
+    graph.add_edge("paper_writing", "citation_guard")
+    graph.add_edge("citation_guard", "citation_check")
+    graph.add_edge("citation_check", "human_draft")
+    graph.add_edge("human_draft", "paper_review")
+
+    # 审阅 → (人工确认) → 修订循环 或 收尾
+    graph.add_edge("paper_review", "human_review")
+    graph.add_conditional_edges(
+        "human_review",
         should_continue_review,
         {
             "paper_writing": "increment_revision",
@@ -1248,7 +2197,7 @@ def _get_persistent_checkpointer():
 
 
 def run_pipeline(
-    topic: str,
+    topic: str = "",
     keywords: list[str] = None,
     sub_topics: list[str] = None,
     time_range: str = "2019-2026",
@@ -1256,6 +2205,7 @@ def run_pipeline(
     checkpointer = None,
     resume: bool = False,
     skip_retrieval: bool = False,
+    request: str = None,
 ) -> dict:
     ensure_utf8_console()  # Windows 终端编码修复
 
@@ -1263,7 +2213,7 @@ def run_pipeline(
         checkpointer = _get_persistent_checkpointer() if resume else MemorySaver()
     app = build_pipeline(checkpointer)
 
-    thread_id = sanitize_filename(topic)
+    thread_id = sanitize_filename(topic or request or "research")
 
     if resume:
         # 断点续跑: 用同一 thread_id 恢复之前的状态 (借鉴 HKUDS 缓存续跑)
@@ -1283,26 +2233,12 @@ def run_pipeline(
         except Exception as e:
             print(f"  [warning] 续跑失败, 从头开始: {e}")
 
-    # skip-retrieval 模式: 扫描 data/pipeline_cache/{topic}.json,
-    # 命中且满足条件则加载检索产物, 跳过检索直接进入撰写/审稿循环
-    cached = None
-    if skip_retrieval:
-        try:
-            from src.utils.pipeline_cache import load_retrieval_cache
-
-            cached = load_retrieval_cache(topic)
-        except Exception as e:
-            print(f"  [warning] 检索缓存加载失败: {e}")
-            cached = None
-        if cached:
-            print(f"  [skip-retrieval] 命中检索缓存 (已验证引用 {len(cached.get('verified_references', []))} 篇), "
-                  f"跳过检索/摄入/预验证, 从大纲生成开始重新撰写")
-        else:
-            print("  [skip-retrieval] 未命中可用缓存, 回退完整检索")
-
+    # 自然语言请求由入口 planner 节点解析; 此处仅透传。
+    # 检索缓存加载已迁移至 research_planner_node (自然语言路径下主题待提取后才已知)。
     initial_state: PipelineState = {
         "messages": [],
-        "research_topic": topic,
+        "research_topic": topic or "",
+        "research_request": (request or "").strip(),
         "topic_keywords": keywords or [],
         "sub_topics": sub_topics or [],
         "time_range": time_range,
@@ -1310,16 +2246,8 @@ def run_pipeline(
         "max_revisions": max_revisions if max_revisions is not None else MAX_REVISIONS,
         "retrieved_papers": [],
         "current_phase": "start",
-        "skip_retrieval": bool(cached),
+        "skip_retrieval": bool(skip_retrieval),
     }
-
-    if cached:
-        # 只加载检索产物 (文献素材 + 已验证引用), 大纲/草稿等撰写阶段产出不加载,
-        # 由 outline_generation → paper_writing 循环重新生成
-        initial_state["literature_review_notes"] = cached.get("literature_review_notes", "")
-        initial_state["verified_references"] = cached.get("verified_references", [])
-        initial_state["retrieved_papers"] = cached.get("retrieved_papers", [])
-        initial_state["unfiltered_papers"] = cached.get("unfiltered_papers", [])
 
     config = {"configurable": {"thread_id": thread_id}}
 
@@ -1331,54 +2259,251 @@ def run_pipeline(
     final_state = None
     for event in app.stream(initial_state, config):
         for node_name, node_state in event.items():
-            if node_name == "paper_review":
-                score = node_state.get("review_score", "N/A")
-                print(f"  [{node_name}] 审稿评分: {score}/50")
-            elif node_name == "paper_writing":
-                words = node_state.get("total_words", "N/A")
-                print(f"  [{node_name}] 初稿字数: {words}")
-            elif node_name == "literature_review":
-                papers = len(node_state.get("retrieved_papers", []))
-                print(f"  [{node_name}] 检索到: {papers} 篇论文")
-            elif node_name == "pdf_ingestion":
-                ingested = len(node_state.get("ingested_papers", []))
-                print(f"  [{node_name}] 全文入库: {ingested} 篇论文")
-            elif node_name == "citation_precheck":
-                verified = node_state.get("citation_precheck_verified", 0)
-                not_found = node_state.get("citation_precheck_not_found", 0)
-                print(f"  [{node_name}] 引用预验证: 可信 {verified}, 未通过 {not_found}")
-            elif node_name == "outline_generation":
-                outline = node_state.get("paper_outline", "")
-                print(f"  [{node_name}] 大纲生成: {len(outline)} 字符")
-            elif node_name == "citation_guard":
-                invalid = node_state.get("guard_invalid_count", 0)
-                print(f"  [{node_name}] 引用守门: {'✅ 全部在可信清单内' if invalid == 0 else f'⚠️ {invalid} 个越界引用'}")
-            elif node_name == "format_check":
-                report = node_state.get("format_report", {})
-                ok = report.get("all_ok", False)
-                print(f"  [{node_name}] 格式检查: {'✅ 通过' if ok else '❌ 发现问题'}")
-                if not ok:
-                    tbl = report.get("table", {}).get("issues", [])
-                    fig = report.get("figure", {}).get("issues", [])
-                    cit = report.get("citation", {}).get("issues", [])
-                    for i in (tbl + fig + cit)[:5]:
-                        print(f"    ⚠️ {i}")
-            elif node_name == "citation_check":
-                verified = node_state.get("citation_verified_count", 0)
-                not_found = node_state.get("citation_not_found_count", 0)
-                total = node_state.get("citation_total", 0)
-                print(f"  [{node_name}] 引用核查: {total} 条, 已验证 {verified}, 未找到 {not_found}")
-            elif node_name == "finalize":
-                cost = node_state.get("total_cost", 0)
-                print(f"  [{node_name}] 成本统计: ${cost}")
-            elif node_name == "latex_render":
-                ok = node_state.get("tex_compiled", False)
-                print(f"  [{node_name}] LaTeX: {'✅ PDF 已生成' if ok else '⚠ 仅 .tex (编译失败/跳过)'}")
-            else:
-                print(f"  [{node_name}] 完成")
+            _print_node_progress(node_name, node_state)
 
     # 用 checkpointer 的完整最终状态作为返回值 (langgraph 1.x 中
     # stream 事件只含当前节点更新, 直接返回最后事件会丢失 review_score 等字段)
+    try:
+        final_state = app.get_state(config).values
+    except Exception:
+        final_state = None
+
+    return final_state if final_state else {}
+
+
+def _describe_node(node_name: str, node_state: dict) -> str:
+    """返回单个节点的进度摘要文本 (CLI 打印与 Web 流式共用)。"""
+    if node_name == "paper_review":
+        score = node_state.get("review_score", "N/A")
+        return f"[{node_name}] 审稿评分: {score}/50"
+    elif node_name == "supervisor":
+        nxt = node_state.get("supervisor_next", "")
+        return f"[supervisor] 调度: {nxt}"
+    elif node_name == "regenerate_figures":
+        figs = len(node_state.get("figure_paths", []) or [])
+        return f"[figures] 图表生成: {figs} 张"
+    elif node_name == "research_planner":
+        topic = node_state.get("research_topic", "")
+        return f"[research_planner] 主题: {topic}"
+    elif node_name == "paper_writing":
+        words = node_state.get("total_words", "N/A")
+        return f"[{node_name}] 初稿字数: {words}"
+    elif node_name == "literature_review":
+        papers = len(node_state.get("retrieved_papers", []))
+        return f"[{node_name}] 检索到: {papers} 篇论文"
+    elif node_name == "pdf_ingestion":
+        ingested = len(node_state.get("ingested_papers", []))
+        return f"[{node_name}] 全文入库: {ingested} 篇论文"
+    elif node_name == "citation_precheck":
+        verified = node_state.get("citation_precheck_verified", 0)
+        not_found = node_state.get("citation_precheck_not_found", 0)
+        return f"[{node_name}] 引用预验证: 可信 {verified}, 未通过 {not_found}"
+    elif node_name == "outline_generation":
+        outline = node_state.get("paper_outline", "")
+        return f"[{node_name}] 大纲生成: {len(outline)} 字符"
+    elif node_name == "citation_guard":
+        invalid = node_state.get("guard_invalid_count", 0)
+        return f"[{node_name}] 引用守门: {'✅ 全部在可信清单内' if invalid == 0 else f'⚠️ {invalid} 个越界引用'}"
+    elif node_name == "format_check":
+        report = node_state.get("format_report", {})
+        ok = report.get("all_ok", False)
+        line = f"[{node_name}] 格式检查: {'✅ 通过' if ok else '❌ 发现问题'}"
+        if not ok:
+            tbl = report.get("table", {}).get("issues", [])
+            fig = report.get("figure", {}).get("issues", [])
+            cit = report.get("citation", {}).get("issues", [])
+            for i in (tbl + fig + cit)[:5]:
+                line += f"\n    ⚠️ {i}"
+        return line
+    elif node_name == "citation_check":
+        verified = node_state.get("citation_verified_count", 0)
+        not_found = node_state.get("citation_not_found_count", 0)
+        total = node_state.get("citation_total", 0)
+        return f"[{node_name}] 引用核查: {total} 条, 已验证 {verified}, 未找到 {not_found}"
+    elif node_name == "finalize":
+        cost = node_state.get("total_cost", 0)
+        return f"[{node_name}] 成本统计: ${cost}"
+    elif node_name == "latex_render":
+        ok = node_state.get("tex_compiled", False)
+        return f"[{node_name}] LaTeX: {'✅ PDF 已生成' if ok else '⚠ 仅 .tex (编译失败/跳过)'}"
+    else:
+        return f"[{node_name}] 完成"
+
+
+def _print_node_progress(node_name: str, node_state: dict):
+    """打印单个节点的进度摘要 (run_pipeline 与模块化撰写共用)"""
+    print("  " + _describe_node(node_name, node_state))
+
+
+def run_retrieval_module(
+    topic: str,
+    keywords: list[str] = None,
+    sub_topics: list[str] = None,
+    time_range: str = "2019-2026",
+) -> dict:
+    """模块1·文献查找/入库: 检索 → PDF 下载入库 → 引用预验证。
+
+    产物写入 data/pipeline_cache/{topic}.json (retrieved_papers/unfiltered_papers/
+    verified_references), 供模块2/模块3 复用。
+    """
+    ensure_utf8_console()
+
+    from src.agents.literature_reviewer import run_retrieval
+    from src.agents.pdf_ingestor import run_pdf_ingestion
+    from src.agents.citation_prechecker import run_citation_precheck
+    from src.utils.pipeline_cache import update_retrieval_cache
+
+    print("=" * 60)
+    print("  模块1 · 文献查找/入库")
+    print("=" * 60)
+
+    state = {
+        "research_topic": topic,
+        "topic_keywords": keywords or [],
+        "sub_topics": sub_topics or [],
+        "time_range": time_range,
+        "retrieved_papers": [],
+        "unfiltered_papers": [],
+        "manual_papers": [],
+        "current_phase": "start",
+    }
+
+    # 1. 检索 + 过滤 + 出处解析
+    r = run_retrieval(state)
+    state["retrieved_papers"] = r.get("retrieved_papers", [])
+    state["unfiltered_papers"] = r.get("unfiltered_papers", [])
+
+    # 2. PDF 下载 + 全文入库 (+ 人工导入 PDF)
+    state.update(run_pdf_ingestion(state))
+
+    # 3. 引用预验证 → verified_references
+    state.update(run_citation_precheck(state))
+
+    # 4. 保存中间产物
+    update_retrieval_cache(
+        topic,
+        retrieved_papers=state.get("retrieved_papers", []),
+        unfiltered_papers=state.get("unfiltered_papers", []),
+        verified_references=state.get("verified_references", []),
+        keywords=state.get("topic_keywords", []),
+        sub_topics=state.get("sub_topics", []),
+        time_range=time_range,
+    )
+
+    print("=" * 60)
+    print(f"  模块1 完成: {len(state.get('retrieved_papers', []))} 篇候选, "
+          f"{len(state.get('verified_references', []))} 篇已验证引用")
+    print("=" * 60)
+    return state
+
+
+def run_analysis_module(
+    topic: str,
+    keywords: list[str] = None,
+    sub_topics: list[str] = None,
+    time_range: str = "2019-2026",
+) -> dict:
+    """模块2·文件分析: 生成文献综述笔记 + 论文大纲。
+
+    依赖模块1 的检索产物 (从缓存加载), 产出 literature_review_notes / paper_outline。
+    """
+    ensure_utf8_console()
+
+    from src.agents.literature_reviewer import run_notes_synthesis
+    from src.agents.outline_generator import run_outline_generation
+    from src.utils.pipeline_cache import load_retrieval_cache_raw, update_retrieval_cache
+
+    cached = load_retrieval_cache_raw(topic)
+    if not cached:
+        return {"error": "未找到检索缓存，请先运行「模块1 · 文献查找/入库」。", "current_phase": "analysis"}
+
+    print("=" * 60)
+    print("  模块2 · 文件分析")
+    print("=" * 60)
+
+    state = {
+        "research_topic": topic,
+        "topic_keywords": keywords or cached.get("keywords", []),
+        "sub_topics": sub_topics or cached.get("sub_topics", []),
+        "time_range": time_range or cached.get("time_range", ""),
+        "retrieved_papers": cached.get("retrieved_papers", []),
+        "verified_references": cached.get("verified_references", []),
+        "current_phase": "analysis",
+    }
+
+    # 1. 生成综述笔记
+    state["literature_review_notes"] = run_notes_synthesis(state).get("literature_review_notes", "")
+
+    # 2. 生成大纲
+    state["paper_outline"] = run_outline_generation(state).get("paper_outline", "")
+
+    # 3. 保存中间产物
+    update_retrieval_cache(
+        topic,
+        literature_review_notes=state.get("literature_review_notes", ""),
+        paper_outline=state.get("paper_outline", ""),
+    )
+
+    print("=" * 60)
+    print(f"  模块2 完成: 综述笔记 {len(state.get('literature_review_notes', ''))} 字符, "
+          f"大纲 {len(state.get('paper_outline', ''))} 字符")
+    print("=" * 60)
+    return state
+
+
+def run_writing_module(
+    topic: str,
+    keywords: list[str] = None,
+    sub_topics: list[str] = None,
+    time_range: str = "2019-2026",
+    max_revisions: int = None,
+) -> dict:
+    """模块3·撰写: 初稿 → 审阅循环 → 图表 → LaTeX。
+
+    依赖模块1/2 的缓存产物 (综述笔记/大纲/已验证引用), 输出草稿/审稿报告/PDF。
+    """
+    ensure_utf8_console()
+
+    from src.utils.pipeline_cache import load_retrieval_cache_raw
+
+    cached = load_retrieval_cache_raw(topic)
+    if not cached:
+        return {"error": "未找到检索缓存，请先运行模块1和模块2。", "current_phase": "paper_writing"}
+    if not cached.get("literature_review_notes"):
+        return {"error": "缓存中缺少文献综述笔记，请先运行「模块2 · 文件分析」。", "current_phase": "paper_writing"}
+    if not cached.get("verified_references"):
+        return {"error": "缓存中缺少已验证引用，请先运行「模块1 · 文献查找/入库」。", "current_phase": "paper_writing"}
+
+    max_rev = max_revisions if max_revisions is not None else MAX_REVISIONS
+    app = build_writing_graph()
+
+    print("=" * 60)
+    print("  模块3 · 撰写")
+    print("=" * 60)
+
+    initial_state: PipelineState = {
+        "messages": [],
+        "research_topic": topic,
+        "topic_keywords": keywords or cached.get("keywords", []),
+        "sub_topics": sub_topics or cached.get("sub_topics", []),
+        "time_range": time_range or cached.get("time_range", ""),
+        "literature_review_notes": cached.get("literature_review_notes", ""),
+        "verified_references": cached.get("verified_references", []),
+        "paper_outline": cached.get("paper_outline", ""),
+        "revision_count": 0,
+        "max_revisions": max_rev,
+        "current_phase": "paper_writing",
+    }
+
+    config = {"configurable": {"thread_id": sanitize_filename(topic)}}
+    langfuse_handler = _get_langfuse_handler()
+    if langfuse_handler:
+        config["callbacks"] = [langfuse_handler]
+
+    for event in app.stream(initial_state, config):
+        for node_name, node_state in event.items():
+            _print_node_progress(node_name, node_state)
+
     try:
         final_state = app.get_state(config).values
     except Exception:

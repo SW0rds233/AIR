@@ -100,8 +100,15 @@ def run_outline_generation(state: PipelineState) -> dict:
         f"{budget_text(lit_notes, 20000, label='文献综述素材')}\n"
         f"---素材结束---\n"
         f"{ref_block}\n"
-        f"请按上述格式输出完整大纲。"
     )
+    human_feedback = state.get("human_feedback", "")
+    if human_feedback:
+        prompt += (
+            f"\n---用户修改意见（必须严格遵守，优先于上面的设计要求）---\n"
+            f"{human_feedback}\n"
+            f"---意见结束---\n"
+        )
+    prompt += f"请按上述格式输出完整大纲。"
 
     messages = [SystemMessage(content=OUTLINE_GENERATOR_SYSTEM), HumanMessage(content=prompt)]
     result = llm.invoke(messages)

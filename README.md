@@ -1,11 +1,14 @@
-# AIR — AIResearch
+# AIR智能体研究系统
 
-基于 **LangGraph** 多智能体 + **RAG (ChromaDB)** 的学术综述论文自动撰写系统。
+基于 **LangGraph** 多智能体 + **RAG (ChromaDB)** 的学术综述论文自动撰写系统（对话式协作）。
 
 借鉴 [AI-Researcher](https://github.com/RyannDaGreat/AI-Researcher)、[OpenAI4S](https://github.com/ranpox/OpenAI4S)、[gpt-researcher](https://github.com/assafelovic/gpt-researcher) 等项目，构建**撰写 → 审稿 → 修改**的完整闭环流水线。
 
 ## 功能特性
 
+- **对话式协作（编排式多智能体）**：主控 Supervisor 理解自然语言意图，生成任务计划（主题/关键词/子主题 + 任务范围），确认后动态调度工作智能体
+- **自然语言入口**：无需精确填写关键词/子主题，一句话描述研究即可（自动提取中英文关键词与缩写）
+- **局部任务支持**：可"只检索+总结"或"写完整综述"，按意图停在不同阶段
 - **文献查阅**：多源检索（arXiv + Semantic Scholar + OpenAlex），LLM 筛选与综述
 - **引用预验证（STORM）**：写作前逐条验证引用真实性，杜绝幻觉引用
 - **论文大纲生成**：结构化大纲保证论文逻辑清晰
@@ -16,6 +19,9 @@
 - **LaTeX 渲染**：Markdown → ctexart → xelatex 编译 PDF
 - **图表生成**：分类体系树、时间线、趋势图、方法对比图
 - **成本追踪**：分阶段 Token 用量与费用统计
+- **对话记录与历史回看**：每个会话的完整对话（消息/节点进度/中断点/产物摘要）落盘到 `data/conversations/`，关闭浏览器/服务后可在「历史会话」中回看
+- **断点续跑**：会话检查点持久化（每会话一个 SQLite，`data/checkpoints/`），重启服务后可从上次中断处继续（停在 interrupt 会重新提示输入）
+- **产物按对话隔离**：不同对话的产物（笔记/大纲/初稿/审稿报告等）存到 `outputs/{主题}_{时间戳}/` 独立文件夹
 
 ## 快速开始
 
@@ -48,6 +54,34 @@ cp .env.example .env
 python -m src.main "研究主题" --keywords K1 K2 --subtopics S1 S2
 ```
 
+**自然语言入口（无需精确主题/关键词）：**
+
+```bash
+python -m src.main --request "我想开展关于射频指纹识别(RF fingerprinting, RFFI)的研究，涉及特征提取、分类识别、对抗攻击"
+```
+
+入口 `research_planner` 会用廉价 LLM 把描述提取成结构化指令（主题/关键词/子主题）。**建议在描述里带上关键术语的英文检索形式和缩写**，便于在 arXiv / Semantic Scholar / OpenAlex 等英文库检索。
+
+**对话式协作（Web 界面）：**
+
+```bash
+python -m src.server
+# 打开浏览器访问 http://127.0.0.1:8000
+```
+
+在研究计划生成后、大纲生成后、初稿完成后、每轮审稿后暂停，等待你确认或提意见：
+
+- 计划：确认提取的主题/关键词/子主题 / 输入修正意见重新提取
+- 大纲：确认 / 按意见重新生成大纲 / 含「子主题·关键词」则重新检索 / 含「轮次N」则改修订轮次
+- 初稿：确认送审 / 输入修改意见（转成修订要求，首轮修订执行）
+- 审稿：继续修订 / 输入意见继续修订 / 定稿 / 停止
+
+需要 `fastapi`、`uvicorn`（已加入 `requirements.txt`）。命令行版对话入口：`python -m src.main_chat --request "..."` 或 `python -m src.main_chat "主题" --skip-retrieval`。
+
+**历史会话与断点续跑**：Web 界面顶部「历史会话」按钮列出所有历史对话（主题/时间/状态），可点击回看完整对话；未完成的会话显示「继续」按钮，点击后从上次中断处恢复（若停在暂停点会重新提示你输入）。顶部「切换研究上下文」下拉框可切换不同主题，切换时会预览该上下文的文献综述笔记。
+
+**调试提速**：调低 `.env` 里的 `PDF_DOWNLOAD_LIMIT`（如 10）可减少 PDF 下载篇数；`SKIP_EMBEDDING=1` 可跳过向量化入库，均可显著缩短全流程调试时间。
+
 **示例：**
 
 ```bash
@@ -60,7 +94,8 @@ python -m src.main "射频指纹识别技术综述" \
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `topic` | 研究主题（必填） | — |
+| `topic` | 研究主题（可选；用 `--request` 时可不填） | — |
+| `--request, -r` | 自然语言研究描述，Planner 自动提取主题/关键词/子主题 | — |
 | `--keywords, -k` | 核心关键词列表 | — |
 | `--subtopics, -s` | 子主题列表 | — |
 | `--time-range` | 时间范围 | `2019-2026` |
@@ -78,21 +113,29 @@ python -m src.main "射频指纹识别技术综述" --skip-retrieval
 
 ## 流水线流程
 
+编排式多智能体（Supervisor 循环）：主控 `supervisor` 理解自然语言意图、生成任务计划（主题/关键词/子主题 + 任务范围 `stages`），确认后依次派发工作智能体，每个完成后回到 supervisor 再派发下一阶段。
+
 ```
 start
-  → literature_review     (多源检索 + 文献综述)
-  → pdf_ingestion         (PDF下载 + 解析 + 向量入库)
-  → citation_precheck     (引用预验证)
-  → outline_generation    (论文大纲生成)
-  → paper_writing         (初稿撰写)
-  → citation_guard        (引用编号守门)
-  → citation_check        (引文交叉验证)
-  → paper_review          (跨模型审稿，50分制)
-       │
-       ├── [评分<40 或 存在虚构引用] → increment_revision → paper_writing (修订循环)
-       │
-       └── [评分≥40 且 无虚构引用] → format_check → finalize → latex_render → END
+  → supervisor            (主控: 决定下一步调用哪个智能体)
+       ├── research_planner   (确定关键词/子主题) → human_confirm_plan (确认/修正)
+       ├── research 阶段:
+       │     literature_review (多源检索 + 综述总结)
+       │   → pdf_ingestion     (PDF下载 + 解析 + 向量入库)
+       │   → citation_precheck (引用预验证)
+       └── write 阶段 (若任务范围含 write):
+             outline_generation (大纲) → human_outline (确认/修改)
+           → paper_writing      (初稿撰写)
+           → citation_guard     (引用编号守门)
+           → citation_check     (引文交叉验证)
+           → paper_review       (跨模型审稿，50分制)
+                ├── [需修订] → increment_revision → paper_writing (修订循环)
+                └── [达标/收敛] → format_check → finalize → latex_render
 ```
+
+**任务范围（stages）**：主控根据意图决定执行哪些阶段——
+- `["research"]`：只检索文献 + 生成综述总结（不写论文）
+- `["research", "write"]`：完整综述论文
 
 ## 项目结构
 
@@ -100,8 +143,12 @@ start
 AIR/
 ├── src/
 │   ├── main.py              # CLI 入口 (python -m src.main)
+│   ├── main_chat.py         # 对话式 CLI 入口 (python -m src.main_chat)
+│   ├── server.py            # Web 界面入口 (python -m src.server, FastAPI + SSE)
 │   ├── gui.py               # tkinter 图形界面 (python -m src.gui)
 │   ├── config.py            # 全局配置 (模型/超时/断路器/阈值等)
+│   ├── web/                 # Web 前端 (原生 HTML + JS, 无构建)
+│   │   └── index.html       # 单文件前端 (对话 + 产物预览)
 │   ├── agents/              # 智能体
 │   │   ├── literature_reviewer.py    # 文献查阅 (多源检索 + 子查询 + 中文补充 + 综述素材)
 │   │   ├── paper_writer.py          # 论文撰写/修订 (证据纪律 + 字数硬约束)
@@ -112,7 +159,7 @@ AIR/
 │   │   ├── citation_guard.py        # 引用守门 (越界修复 + 语义错配检测)
 │   │   └── pdf_ingestor.py          # PDF 下载 + 解析 + 向量入库
 │   ├── graph/               # LangGraph 流水线
-│   │   ├── pipeline.py      # 图定义/编排/修订循环/收敛检测
+│   │   ├── pipeline.py      # 图定义/Supervisor 编排/修订循环/收敛检测
 │   │   └── state.py         # 状态类型
 │   ├── rag/                 # RAG 与格式化
 │   │   ├── vector_store.py          # ChromaDB 向量库 (embedding 降级/深度上限)
@@ -139,6 +186,8 @@ AIR/
 │       ├── context_budget.py        # 上下文预算控制
 │       ├── http_client.py           # HTTP (重试 + 429退避 + 断路器)
 │       ├── pipeline_cache.py        # 检索缓存 (--skip-retrieval)
+│       ├── conversation_store.py    # 会话对话记录落盘 (历史回看/断点续跑)
+│       ├── session_memory.py        # 会话记忆 (最近主题/阶段, 供 Planner 续写)
 │       ├── console.py               # Windows 终端编码修复
 │       └── file_utils.py            # 文件工具
 ├── tests/                   # 离线测试 (python tests/xxx.py)
@@ -184,6 +233,14 @@ AIR/
 ### 检索缓存（--skip-retrieval）
 
 检索产物（文献素材 + 已验证引用）写入 `data/pipeline_cache/{主题}.json`，跳过检索/摄入/预验证，从大纲开始重跑撰写/审稿循环，大幅缩短重复测试时间。
+
+### 对话记录与断点续跑
+
+Web 界面（`src/server.py`）把每个会话的完整对话记录到 `data/conversations/{session_id}.json`（含 `thread_id`、主题、状态、消息流水、启动参数与产物摘要），并自会话启动即落盘，未跑完也能在重启后找到。断点续跑依赖 LangGraph 的 `SqliteSaver`（每会话一个 `data/checkpoints/{session_id}.sqlite`，开启 WAL）：恢复时用同一 `thread_id` + 同一 checkpointer 从 checkpoint 继续，停在 `interrupt()` 的会话会自动重新抛出中断点等待输入。
+
+- **会话 ID 与主题解耦**：`session_id`（uuid）独立于主题，同一主题可跑多次
+- **无 checkpoint 兜底**：若会话在产生 checkpoint 前就关闭，恢复时用保存的启动参数从头重跑
+- **清理**：「清除缓存」会一并清理 `data/checkpoints/`（对话记录与输出产物保留）
 
 ## 当前状态与后续改进
 

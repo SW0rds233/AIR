@@ -183,13 +183,14 @@ def _synthesize_notes(
     for i, p in enumerate(papers[:SYNTHESIS_MAX_PAPERS], 1):
         venue = (p.get("venue") or p.get("source") or "").strip()
         doi = (p.get("doi") or "").strip()
+        authors = (p.get("authors") or "").strip()
         # 标注正式出处 (有 DOI 的论文优先显示 DOI, 避免 LLM 误判为 arXiv 预印本)
         src = venue or "来源未标注"
         if doi:
             src = f"{src} | DOI: {doi}"
         line = (
-            f"{i}. {p.get('title', '')} | {p.get('year', '')} | "
-            f"{src} | 被引 {p.get('citations', 0)}"
+            f"{i}. {p.get('title', '')} | 作者: {authors or '未标注'} | "
+            f"{p.get('year', '')} | {src} | 被引 {p.get('citations', 0)}"
         )
         abstract = (p.get("abstract") or "").strip()
         if abstract:
@@ -230,14 +231,14 @@ def _synthesize_notes(
     return result.content if hasattr(result, "content") else str(result)
 
 
-def run_literature_review(state: PipelineState) -> dict:
+def run_retrieval(state: PipelineState) -> dict:
+    """模块1·检索阶段: 多源检索 + 相关性过滤 + 出处解析 → 产出论文清单"""
     topic = state["research_topic"]
     keywords = state.get("topic_keywords", [])
     sub_topics = state.get("sub_topics", [])
     time_range = state.get("time_range", "2019-2026")
 
     llm_with_tools = build_literature_reviewer()
-    main_llm = build_llm("main")
     cheap_llm = build_llm("cheap")
 
     # 研究 wiki 记忆：检索该主题的历史笔记作为补充上下文
@@ -266,7 +267,7 @@ def run_literature_review(state: PipelineState) -> dict:
     # ===== 阶段 1: agent 循环（工具调用闭环）=====
     all_papers = list(state.get("retrieved_papers", []))
     messages = [SystemMessage(content=LITERATURE_REVIEWER_SYSTEM), HumanMessage(content=search_query)]
-    notes = _run_agent_loop(llm_with_tools, messages, all_papers)
+    _run_agent_loop(llm_with_tools, messages, all_papers)
     print(f"  [文献检索] agent 循环完成, 已收集 {len(all_papers)} 篇候选论文")
 
     # ===== 阶段 2: 子查询确定性检索 (借鉴 gpt-researcher, 廉价模型生成) =====
@@ -365,6 +366,34 @@ def run_literature_review(state: PipelineState) -> dict:
     except Exception as e:
         print(f"  [warning] 出处预解析跳过: {e}")
 
+    # ===== 阶段 6: 向量入库 (摘要级) =====
+    if all_papers:
+        try:
+            from src.rag.vector_store import add_papers_to_store, embedding_available
+
+            if embedding_available():
+                add_papers_to_store(all_papers)
+        except Exception:
+            pass
+
+    return {
+        "messages": messages,
+        "retrieved_papers": all_papers,
+        "unfiltered_papers": unfiltered_papers,
+        "current_phase": "retrieval",
+    }
+
+
+def run_notes_synthesis(state: PipelineState) -> dict:
+    """模块2·分析阶段: 基于检索论文清单综合生成文献综述素材"""
+    topic = state["research_topic"]
+    keywords = state.get("topic_keywords", [])
+    sub_topics = state.get("sub_topics", [])
+    time_range = state.get("time_range", "2019-2026")
+    all_papers = list(state.get("retrieved_papers", []))
+
+    main_llm = build_llm("main")
+
     # ===== 阶段 5: 综合生成综述素材（真实论文数据驱动）=====
     notes = _synthesize_notes(
         main_llm, topic, keywords, sub_topics, time_range, all_papers
@@ -380,16 +409,6 @@ def run_literature_review(state: PipelineState) -> dict:
         for i, p in enumerate(all_papers[:30], 1):
             notes += f"{i}. {p.get('title', '')} ({p.get('year', '')}) [{p.get('source', '')}]\n"
 
-    # ===== 阶段 6: 向量入库 + 研究 wiki =====
-    if all_papers:
-        try:
-            from src.rag.vector_store import add_papers_to_store, embedding_available
-
-            if embedding_available():
-                add_papers_to_store(all_papers)
-        except Exception:
-            pass
-
     if notes:
         try:
             from src.rag.vector_store import save_to_wiki
@@ -399,9 +418,22 @@ def run_literature_review(state: PipelineState) -> dict:
             pass
 
     return {
-        "messages": messages,
         "literature_review_notes": notes,
-        "retrieved_papers": all_papers,
-        "unfiltered_papers": unfiltered_papers,
+        "current_phase": "notes_synthesis",
+    }
+
+
+def run_literature_review(state: PipelineState) -> dict:
+    """完整文献查阅 (兼容旧调用): 检索 + 笔记综合"""
+    r = run_retrieval(state)
+    merged = dict(state)
+    merged.update(r)
+    n = run_notes_synthesis(merged)
+    merged.update(n)
+    return {
+        "messages": r.get("messages", []),
+        "literature_review_notes": n.get("literature_review_notes", ""),
+        "retrieved_papers": r.get("retrieved_papers", []),
+        "unfiltered_papers": r.get("unfiltered_papers", []),
         "current_phase": "literature_review",
     }

@@ -106,6 +106,38 @@ def test_figure_placeholder_missing_fig_text_fallback():
     assert "图9" in body
 
 
+def test_wide_table_uses_tabularx():
+    """宽表 (列多/内容长) 必须用 tabularx 自动换行撑满 \\textwidth,
+    否则溢出右边界被裁切 (实测 PDF 表1/表5/表6 左右不对齐)"""
+    md = (
+        "| 方法类别 | 特征来源 | 标注依赖 | 可解释性 | 计算开销 | 信道鲁棒性 | 对抗鲁棒性 |\n"
+        "|---|---|---|---|---|---|---|\n"
+        "| 数据高效与扩展学习范式 | 自动学习 | 低/中 | 低 | 中/高 | 中 | 中 |\n"
+    )
+    tab = _convert_table_pandoc(md)
+    assert r"\begin{tabularx}{\textwidth}" in tab
+    assert "L" * 7 in tab
+
+
+def test_narrow_table_keeps_plain_tabular():
+    md = (
+        "| 特征类型 | 代表文献 |\n|---|---|\n| 差分星座轨迹图 | [26] |\n"
+    )
+    tab = _convert_table_pandoc(md)
+    assert r"\begin{tabular}{ll}" in tab
+    assert "tabularx" not in tab
+
+
+def test_long_citation_list_gets_breakable_spaces():
+    """长引用串 [15,18,...,49] 必须在逗号后允许断行, 否则窄列溢出"""
+    md = (
+        "| 技术路线 | 代表文献 | 典型场景 |\n|---|---|---|\n"
+        "| 安全鲁棒与硬件增强 | [15,18,19,44,45,46,47,48,49] | 对抗环境、低SNR、跨域部署 |\n"
+    )
+    tab = _convert_table_pandoc(md)
+    assert "[15, 18, 19" in tab
+
+
 if __name__ == "__main__":
     tests = [
         test_thebibliography_matches_body_citations,
@@ -116,6 +148,9 @@ if __name__ == "__main__":
         test_build_thebibliography_from_draft_empty,
         test_escape_latex_protects_math,
         test_figure_placeholder_missing_fig_text_fallback,
+        test_wide_table_uses_tabularx,
+        test_narrow_table_keeps_plain_tabular,
+        test_long_citation_list_gets_breakable_spaces,
     ]
     passed = 0
     for t in tests:

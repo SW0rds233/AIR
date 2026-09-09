@@ -33,7 +33,8 @@ def main():
   python -m src.main "机器学习可解释性综述" --max-revisions 3
         """,
     )
-    parser.add_argument("topic", help="研究主题（综述论文主题）")
+    parser.add_argument("topic", nargs="?", default="", help="研究主题（综述论文主题; 用 --request 时可不填）")
+    parser.add_argument("--request", "-r", help="自然语言研究描述 (无需精确主题/关键词, Planner 自动提取)")
     parser.add_argument("--keywords", "-k", nargs="+", help="核心关键词列表")
     parser.add_argument("--subtopics", "-s", nargs="+", help="子主题列表")
     parser.add_argument("--time-range", default="2019-2026", help="时间范围 (默认: 2019-2026)")
@@ -46,10 +47,16 @@ def main():
 
     args = parser.parse_args()
 
+    if not args.topic and not args.request:
+        parser.error("请提供研究主题，或用 --request 输入自然语言描述")
+
     print("=" * 60)
     print("  AIR (AIResearch) — 多智能体科研综述论文撰写系统")
     print("=" * 60)
-    print(f"  研究主题: {args.topic}")
+    if args.request:
+        print(f"  研究描述: {args.request}")
+    else:
+        print(f"  研究主题: {args.topic}")
     if args.keywords:
         print(f"  关键词:   {', '.join(args.keywords)}")
     if args.subtopics:
@@ -78,6 +85,7 @@ def main():
             max_revisions=args.max_revisions,
             resume=args.resume,
             skip_retrieval=args.skip_retrieval,
+            request=args.request,
         )
     except KeyboardInterrupt:
         print("\n\n流水线已中断。")

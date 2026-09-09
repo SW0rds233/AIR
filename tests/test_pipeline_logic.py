@@ -22,6 +22,7 @@ from src.agents.paper_reviewer import (
     _extract_dimension_scores,
     _extract_issue_ledger,
     _extract_score,
+    _normalize_report_total,
 )
 
 
@@ -486,6 +487,73 @@ def test_generated_figures_get_semantic_placeholders():
     assert synced.index("[图4:") > synced.index("## 4 比较与分析")
 
 
+def test_metric_figures_go_to_introduction():
+    """文献计量类图 (trend/heatmap) 应放第1章引言, 而非与识别流程/时间线一起堆在第2章
+    (实测: 旧映射把 4 张图都塞进第2章, 图片集中)"""
+    draft = ("# 标题\n\n## 摘要\n内容\n\n## 1 引言\n内容\n\n## 2 相关工作\n内容\n\n"
+             "## 3 核心方法\n内容\n\n## 4 比较与分析\n内容\n\n## 6 结论\n结束")
+    synced = _synchronize_figure_placeholders(
+        draft, ["framework_0.png", "pipeline_1.png", "trend_2.png", "heatmap_3.png"]
+    )
+    # trend(图3)/heatmap(图4) 落在第1章引言内
+    for tag in ("[图3:", "[图4:"):
+        assert synced.index(tag) > synced.index("## 1 引言")
+        assert synced.index(tag) < synced.index("## 2 相关工作")
+    # pipeline(图2) 在第2章
+    assert synced.index("[图2:") > synced.index("## 2 相关工作")
+
+
+def test_report_total_normalized_to_dimension_sum():
+    """审稿报告的「总分」与逐项求和分数不一致时, 统一改写为程序求和分数,
+    避免报告分数与前端显示分数不一致"""
+    report = (
+        "## 1. 总体评价\n- 推荐: 小修后接受\n- **总分**: 38/50\n\n"
+        "## 2. 逐项评分\n| 维度 | 评分 | 说明 |\n|---|---|---|\n"
+        "| 标题 | 4 | 好 |\n| 摘要 | 4 | 好 |\n"
+        "| **总分** | **38/50** | |\n"
+    )
+    out = _normalize_report_total(report, 37)
+    assert "**总分**: **37/50**" in out
+    assert "| **总分** | **37/50** |" in out
+    assert "38/50" not in out
+    # 无效分数 (0) 不改写
+    assert _normalize_report_total(report, 0) == report
+
+
+def test_compliance_check_detects_unchanged_table():
+    """契约要求修改表格 (如'从表3移除[47]') 但 Writer 只改正文不动表格 → 判未完成"""
+    from src.agents.paper_writer import check_contract_compliance
+
+    filler = "射频指纹识别是物理层安全的重要支撑技术。" * 6
+    prior = (
+        f"# 标题\n\n## 摘要\n{filler}\n\n## 3 核心方法\n\n"
+        f"### 3.4 识别模型\n"
+        f"[表3: 五大方法族与代表性文献映射]\n"
+        f"| 方法族 | 代表性文献 |\n|---|---|\n| C 识别模型 | [8,46,47,48] |\n"
+        f"\n### 3.5 鲁棒性\n{filler}\n"
+        f"## 6 结论\n{filler}"
+    )
+    contract = [{"id": "R-REF-01", "status": "部分解决", "priority": "高",
+                 "problem": "将[47]从表3中移除，仅在正文保留其降级说明",
+                 "evidence": "表3仍列[47]"}]
+    # 只改正文、未改表3 → 表3 仍含 [47] → 判未完成
+    revised_body_only = prior.replace(
+        "### 3.4 识别模型\n",
+        "### 3.4 识别模型\n[47]为早期探索性模型，不构成成熟识别路线。\n",
+    )
+    unaddressed = check_contract_compliance(prior, revised_body_only, contract)
+    assert len(unaddressed) == 1
+    assert "表3" in unaddressed[0]["reason"]
+
+    # 同时改了表3 (移除[47]) → 完成
+    revised_with_table = prior.replace(
+        "| C 识别模型 | [8,46,47,48] |",
+        "| C 识别模型 | [8,46,48] |",
+    )
+    assert check_contract_compliance(prior, revised_with_table, contract) == []
+
+
+
 if __name__ == "__main__":
     tests = [
         test_high_score_no_revision,
@@ -522,6 +590,9 @@ if __name__ == "__main__":
         test_contract_items_for_sparse_subclasses_get_merge_hint,
         test_quality_key_prefers_hard_gate_then_score,
         test_generated_figures_get_semantic_placeholders,
+        test_metric_figures_go_to_introduction,
+        test_report_total_normalized_to_dimension_sum,
+        test_compliance_check_detects_unchanged_table,
     ]
     passed = 0
     for t in tests:

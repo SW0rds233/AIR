@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIR智能体研究系统</title>
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<style>
+  :root {
+    --bg: #f4f6f9;
+    --card: #ffffff;
+    --border: #e5e7eb;
+    --text: #1f2937;
+    --muted: #6b7280;
+    --primary: #2f6fed;
+    --primary-dark: #2457c4;
+    --success: #2e9e5b;
+    --danger: #d64545;
+    --warn: #e0a100;
+    --mono: "Consolas", "JetBrains Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    background: var(--card); border-bottom: 1px solid var(--border);
+    padding: 12px 20px; display: flex; align-items: center; gap: 16px;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 700; }
+  #status { font-size: 12px; color: var(--muted); margin-left: 12px; }
+  #status.dot-running { color: var(--warn); }
+  #status.dot-done { color: var(--success); }
+  #status.dot-error { color: var(--danger); }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #eef2fb; color: var(--primary); }
+  #ctx {
+    border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font-size: 12px;
+    max-width: 220px; color: var(--text); background: #fff;
+  }
+  #btn-clearcache { margin-left: auto; }
+  button.ghost {
+    background: transparent; color: var(--muted); border: 1px solid var(--border);
+    padding: 5px 12px; font-size: 12px;
+  }
+  button.ghost:hover { color: var(--danger); border-color: var(--danger); background: transparent; }
+
+  details {
+    background: var(--card); border-bottom: 1px solid var(--border); padding: 8px 20px;
+  }
+  details summary { cursor: pointer; font-size: 12px; color: var(--muted); user-select: none; }
+  details .adv-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 8px; }
+  details label { font-size: 12px; color: var(--muted); }
+  details input[type=text], details input[type=number] {
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px;
+  }
+  #topic, #keywords, #subtopics { flex: 1 1 180px; }
+
+  main {
+    flex: 1; display: grid; grid-template-columns: 46% 54%; min-height: 0;
+  }
+  .panel { display: flex; flex-direction: column; min-height: 0; background: var(--card); }
+  .panel + .panel { border-left: 1px solid var(--border); }
+  .panel-head {
+    padding: 8px 14px; border-bottom: 1px solid var(--border);
+    font-size: 12px; font-weight: 700; color: var(--muted); display: flex; gap: 8px; align-items: center;
+  }
+  .panel-head .tabs { margin-left: auto; display: flex; gap: 4px; }
+  .panel-head .tab { font-size: 12px; padding: 3px 10px; border-radius: 4px; cursor: pointer; color: var(--muted); }
+  .panel-head .tab.active { background: #eef2fb; color: var(--primary); }
+
+  /* 左侧对话区 */
+  #log { flex: 1; overflow-y: auto; padding: 12px 14px; font-size: 13px; line-height: 1.7; }
+  .msg { display: flex; margin: 6px 0; }
+  .msg .avatar { width: 28px; height: 28px; border-radius: 6px; flex: 0 0 auto; font-size: 13px; line-height: 28px; text-align: center; margin-right: 8px; }
+  .msg .bubble {
+    padding: 7px 12px; border-radius: 10px; max-width: 82%; word-break: break-word;
+    white-space: pre-wrap; font-size: 13px;
+  }
+  .msg-user { flex-direction: row-reverse; }
+  .msg-user .avatar { margin-right: 0; margin-left: 8px; background: var(--primary); color: #fff; }
+  .msg-user .bubble { background: var(--primary); color: #fff; border-top-right-radius: 2px; }
+  .msg-agent .avatar { background: #eef2fb; color: var(--primary); }
+  .msg-agent .bubble { background: #f4f6f9; color: var(--text); border-top-left-radius: 2px; }
+  .msg-node .bubble { background: transparent; color: var(--muted); font-family: var(--mono); font-size: 12px; padding: 2px 4px; }
+  .msg-node .avatar { background: transparent; color: var(--muted); }
+  .msg-node { margin: 2px 0; }
+  .msg-done .bubble { background: #eaf7ef; color: var(--success); }
+  .msg-done .avatar { background: #eaf7ef; color: var(--success); }
+  .msg-error .bubble { background: #fdecea; color: var(--danger); }
+  .msg-error .avatar { background: #fdecea; color: var(--danger); }
+
+  .interrupt-card {
+    border: 1px solid var(--primary); background: #f0f5ff; border-radius: 8px;
+    padding: 10px 12px; margin: 10px 0;
+  }
+  .interrupt-card .it-title { font-weight: 700; color: var(--primary); margin-bottom: 4px; }
+  .interrupt-card .it-hint { font-size: 11px; color: var(--muted); white-space: pre-wrap; }
+
+  /* 左侧输入区 (合并进对话面板) */
+  #inputbar {
+    border-top: 1px solid var(--border); padding: 10px 12px; display: flex; gap: 8px; align-items: flex-end;
+  }
+  #inputbar textarea {
+    flex: 1; border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; font-size: 13px;
+    font-family: inherit; resize: none; line-height: 1.5; max-height: 180px; overflow-y: auto;
+  }
+  #inputbar textarea:disabled { background: #f3f4f6; }
+
+  /* 右侧输出区 */
+  #preview { flex: 1; overflow-y: auto; padding: 14px 18px; }
+  #preview .markdown { font-size: 14px; line-height: 1.8; }
+  #preview .markdown h1 { font-size: 20px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  #preview .markdown h2 { font-size: 16px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+  #preview .markdown h3 { font-size: 14px; }
+  #preview .markdown table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 13px; }
+  #preview .markdown th, #preview .markdown td { border: 1px solid var(--border); padding: 5px 8px; text-align: left; }
+  #preview .markdown th { background: #f7f8fa; }
+  #preview .markdown code { background: #f0f1f3; padding: 1px 4px; border-radius: 3px; font-family: var(--mono); font-size: 12px; }
+  #preview .markdown pre { background: #1e222a; color: #d4d7dd; padding: 10px; border-radius: 6px; overflow-x: auto; }
+  #preview .markdown pre code { background: none; color: inherit; }
+  #preview .empty { color: var(--muted); font-size: 13px; text-align: center; margin-top: 60px; }
+
+  #files { flex: 1; overflow-y: auto; padding: 8px; display: none; }
+  .file-item { padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; display: flex; justify-content: space-between; gap: 8px; }
+  .file-item:hover { background: #f0f5ff; }
+  .file-item .fname { word-break: break-all; }
+  .file-item .fsize { color: var(--muted); font-size: 11px; white-space: nowrap; }
+
+  button {
+    border: none; border-radius: 8px; padding: 9px 16px; font-size: 13px; cursor: pointer;
+    background: var(--primary); color: #fff; font-weight: 600;
+  }
+  button:hover { background: var(--primary-dark); }
+  button:disabled { background: #a9c0f0; cursor: not-allowed; }
+  button.danger { background: var(--danger); }
+  button.danger:disabled { background: #e5a8a8; }
+
+  /* 历史会话弹窗 */
+  .overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+    display: flex; align-items: center; justify-content: center; z-index: 100;
+  }
+  .history-dialog {
+    background: var(--card); width: min(720px, 92vw); height: min(620px, 85vh);
+    border-radius: 10px; display: flex; flex-direction: column; overflow: hidden;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+  }
+  .history-head {
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px; font-size: 14px; font-weight: 700;
+  }
+  .history-head .history-actions { margin-left: auto; display: flex; gap: 6px; }
+  .history-body { flex: 1; overflow-y: auto; padding: 10px 14px; }
+  .history-body .empty { color: var(--muted); text-align: center; margin-top: 60px; font-size: 13px; }
+  .history-item {
+    display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+    border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; cursor: pointer;
+  }
+  .history-item:hover { background: #f0f5ff; }
+  .hist-main { flex: 1; min-width: 0; }
+  .hist-topic { font-size: 13px; font-weight: 600; word-break: break-all; }
+  .hist-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .hist-status { font-size: 11px; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
+  .hist-resume {
+    font-size: 12px; padding: 3px 12px; border-radius: 6px; border: 1px solid var(--primary);
+    background: #fff; color: var(--primary); cursor: pointer; white-space: nowrap;
+  }
+  .hist-resume:hover { background: var(--primary); color: #fff; }
+  .st-running { background: #fff6e0; color: var(--warn); }
+  .st-waiting { background: #f0f5ff; color: var(--primary); }
+  .st-done { background: #eaf7ef; color: var(--success); }
+  .st-stopped { background: #f3f4f6; color: var(--muted); }
+  .st-error { background: #fdecea; color: var(--danger); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>AIR智能体研究系统</h1>
+  <span class="badge">综述论文 · 多智能体 · 对话式协作</span>
+  <select id="ctx" onchange="onContextChange()" title="切换研究上下文">
+    <option value="">+ 新主题</option>
+  </select>
+  <button id="btn-clearcache" class="ghost" onclick="clearCache()">清除缓存</button>
+  <button id="btn-history" class="ghost" onclick="openHistory()">历史会话</button>
+  <span id="status">就绪</span>
+</header>
+
+<details>
+  <summary>高级选项（精确主题 / 关键词 / 子主题，可选）</summary>
+  <div class="adv-row">
+    <input type="text" id="topic" placeholder="精确主题（可选）">
+    <input type="text" id="keywords" placeholder="关键词，逗号分隔（可选）">
+    <input type="text" id="subtopics" placeholder="子主题，逗号分隔（可选）">
+    <input type="number" id="maxrev" value="3" min="1" max="10" style="width:80px" title="最大修订轮次">
+    <label>轮次</label>
+    <label><input type="checkbox" id="skipret"> 跳过检索(复用缓存)</label>
+  </div>
+</details>
+
+<main>
+  <div class="panel">
+    <div class="panel-head">对话</div>
+    <div id="log"></div>
+    <div id="inputbar">
+      <textarea id="reply" rows="1" placeholder="用一句话描述研究（建议含英文检索形式/缩写），回车发送"></textarea>
+      <button id="btn-send" onclick="onSend()">启动</button>
+      <button id="btn-stop" class="danger" onclick="stopSession()" disabled>停止</button>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-head">
+      输出
+      <div class="tabs">
+        <span class="tab active" data-tab="preview" onclick="switchTab('preview')">当前内容</span>
+        <span class="tab" data-tab="files" onclick="switchTab('files')">outputs/ 文件</span>
+      </div>
+    </div>
+    <div id="preview"><div class="empty">在左侧描述你的研究，回车启动。大纲 / 初稿 / 审稿报告会显示在这里</div></div>
+    <div id="files"></div>
+  </div>
+</main>
+
+<div id="history-overlay" class="overlay" style="display:none">
+  <div class="history-dialog">
+    <div class="history-head">
+      <span id="history-title">历史会话</span>
+      <span class="history-actions">
+        <button id="btn-history-back" class="ghost" onclick="historyBack()" style="display:none">返回列表</button>
+        <button class="ghost" onclick="closeHistory()">关闭</button>
+      </span>
+    </div>
+    <div id="history-list" class="history-body"></div>
+    <div id="history-detail" class="history-body" style="display:none"></div>
+  </div>
+</div>
+
+<script>
+let currentThreadId = null;
+let es = null;
+let mode = 'idle'; // idle / running / waiting
+let currentContext = '';
+
+const $ = (id) => document.getElementById(id);
+const statusEl = $('status');
+
+function setStatus(text, cls) {
+  statusEl.textContent = text;
+  statusEl.className = cls ? ('dot-' + cls) : '';
+}
+
+function setMode(m) {
+  mode = m;
+  const input = $('reply');
+  const btn = $('btn-send');
+  const stop = $('btn-stop');
+  if (m === 'idle') {
+    input.disabled = false;
+    input.placeholder = '用一句话描述研究（建议含英文检索形式/缩写），回车发送';
+    btn.textContent = '启动';
+    btn.disabled = false;
+    stop.disabled = true;
+  } else if (m === 'running') {
+    input.disabled = true;
+    input.placeholder = '运行中…';
+    btn.textContent = '发送';
+    btn.disabled = true;
+    stop.disabled = false;
+  } else { // waiting
+    input.disabled = false;
+    btn.textContent = '发送';
+    btn.disabled = false;
+    stop.disabled = false;
+  }
+}
+
+function addMsg(text, cls) {
+  const row = document.createElement('div');
+  row.className = 'msg ' + cls;
+  const avatar = document.createElement('div');
+  avatar.className = 'avatar';
+  avatar.textContent = cls === 'msg-user' ? '我' : (cls === 'msg-node' ? '·' : 'AI');
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text;
+  row.appendChild(avatar);
+  row.appendChild(bubble);
+  $('log').appendChild(row);
+  $('log').scrollTop = $('log').scrollHeight;
+}
+
+function splitList(s) {
+  return (s || '').split(/[,，、;；]+/).map(x => x.trim()).filter(Boolean);
+}
+
+function onSend() {
+  if (mode === 'waiting') { sendResponse(); }
+  else if (mode === 'idle') { start($('reply').value); }
+}
+
+function start(requestText) {
+  const request = (requestText || '').trim();
+  const topic = currentContext || $('topic').value.trim();
+  if (!request && !topic) { alert('请描述研究主题，或用一句话说明你想研究的内容'); return; }
+
+  setMode('running');
+  setStatus('解析研究意图…', 'running');
+  addMsg(request || topic, 'msg-user');
+  clearReply();
+
+  fetch('/api/sessions', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      request: request,
+      topic: topic,
+      keywords: splitList($('keywords').value),
+      subtopics: splitList($('subtopics').value),
+      time_range: '2019-2026',
+      max_revisions: parseInt($('maxrev').value) || 3,
+      skip_retrieval: $('skipret').checked,
+    })
+  }).then(r => r.json()).then(data => {
+    if (data.thread_id) {
+      currentThreadId = data.thread_id;
+      connectSSE(currentThreadId);
+    } else {
+      addMsg('启动失败: ' + JSON.stringify(data), 'msg-error');
+setMode('idle');
+refreshContexts();
+refreshArtifacts();
+    }
+  }).catch(e => {
+    addMsg('启动失败: ' + e, 'msg-error');
+    setMode('idle');
+  });
+}
+
+function connectSSE(tid) {
+  if (es) es.close();
+  es = new EventSource('/api/sessions/' + tid + '/events');
+  es.onmessage = (e) => { try { handleEvent(JSON.parse(e.data)); } catch (err) {} };
+  es.onerror = () => {};
+}
+
+function handleEvent(ev) {
+  switch (ev.type) {
+    case 'connected': break;
+    case 'node': addMsg(ev.text, 'msg-node'); break;
+    case 'log': addMsg(ev.text, 'msg-node'); break;
+    case 'interrupt': onInterrupt(ev.payload); break;
+    case 'done': onDone(ev.state); break;
+    case 'stopped': onStopped(); break;
+    case 'error': addMsg('出错: ' + (ev.message || ''), 'msg-error'); setStatus('出错', 'error'); finishRun(); break;
+  }
+}
+
+function onInterrupt(p) {
+  mode = 'waiting';
+  setStatus('等待你的输入', 'running');
+  const card = document.createElement('div');
+  card.className = 'interrupt-card';
+  card.innerHTML = '<div class="it-title">' + escapeHtml(p.title || '') + '</div>' +
+                   '<div class="it-hint">' + escapeHtml(p.hint || '') + '</div>';
+  $('log').appendChild(card);
+  $('log').scrollTop = $('log').scrollHeight;
+
+  renderMarkdown($('preview'), p.content || '');
+  switchTab('preview');
+
+  $('reply').disabled = false;
+  $('reply').placeholder = (p.hint || '') + '（回车发送）';
+  $('btn-send').disabled = false;
+  $('btn-stop').disabled = false;
+  clearReply();
+  $('reply').focus();
+}
+
+function onDone(state) {
+  setStatus('完成', 'done');
+  if (state && state.error) {
+    addMsg('错误: ' + state.error, 'msg-error');
+  } else if (state) {
+    let parts = ['完成'];
+    if (state.literature_notes_path) parts.push('文献综述总结: ' + basename(state.literature_notes_path));
+    if (state.figure_count) parts.push('已生成图表: ' + state.figure_count + ' 张');
+    if (state.review_score && state.review_score !== 'N/A') {
+      parts.push('审稿评分: ' + state.review_score + '/50，修改轮次: ' + state.revision_count);
+    }
+    if (state.draft_path) parts.push('初稿: ' + basename(state.draft_path));
+    if (state.paper_tex_path) parts.push('LaTeX: ' + basename(state.paper_tex_path));
+    addMsg(parts.join('\n'), 'msg-done');
+    if (state.literature_notes_path) { loadArtifact(artifactNameFromPath(state.literature_notes_path)); }
+    else if (state.draft_path) { loadArtifact(artifactNameFromPath(state.draft_path)); }
+  } else {
+    addMsg('完成', 'msg-done');
+  }
+  finishRun();
+  refreshArtifacts();
+}
+
+function basename(p) {
+  return (p || '').replace(/\\/g, '/').split('/').pop();
+}
+
+function artifactNameFromPath(p) {
+  // 绝对路径 → 相对 outputs/ 的路径 (含 run_id 子目录), 供 /api/artifacts 使用
+  const norm = (p || '').replace(/\\/g, '/');
+  const idx = norm.lastIndexOf('/outputs/');
+  if (idx >= 0) return norm.slice(idx + '/outputs/'.length);
+  return basename(norm);
+}
+
+function onStopped() {
+  setStatus('已停止', 'done');
+  addMsg('已停止（会话状态已保存到检查点）。', 'msg-agent');
+  finishRun();
+}
+
+function finishRun() {
+  setMode('idle');
+  currentThreadId = null;
+  if (es) { es.close(); es = null; }
+  refreshContexts();
+}
+
+function sendResponse() {
+  if (!currentThreadId || mode !== 'waiting') return;
+  const response = $('reply').value;
+  clearReply();
+  setMode('running');
+  addMsg(response, 'msg-user');
+  setStatus('运行中…', 'running');
+  fetch('/api/sessions/' + currentThreadId + '/respond', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({response: response})
+  }).catch(e => addMsg('发送失败: ' + e, 'msg-error'));
+}
+
+function stopSession() {
+  if (!currentThreadId) return;
+  fetch('/api/sessions/' + currentThreadId + '/stop', {method: 'POST'}).catch(() => {});
+  addMsg('已请求停止（等待当前节点完成）…', 'msg-agent');
+}
+
+function clearCache() {
+  if (!confirm('确认清除已有缓存（检索缓存 / 向量库 / 检查点 / 会话记忆）？\n输出产物 (outputs/) 会保留。')) return;
+  fetch('/api/cache', {method: 'DELETE'}).then(r => r.json()).then(d => {
+    const removed = (d.removed || []).join('、');
+    addMsg(removed ? '已清除缓存: ' + removed : '无缓存可清除', 'msg-agent');
+    refreshArtifacts();
+    refreshContexts();
+  }).catch(e => addMsg('清除失败: ' + e, 'msg-error'));
+}
+
+function stageLabel(stages) {
+  if (!stages || stages.length === 0) return '无';
+  if (stages.includes('write')) return '已撰写';
+  if (stages.includes('research')) return '已检索';
+  return stages.join('+');
+}
+
+function refreshContexts() {
+  fetch('/api/contexts?_=' + Date.now()).then(r => r.json()).then(d => {
+    const sel = $('ctx');
+    const prev = currentContext || '';
+    sel.innerHTML = '<option value="">+ 新主题</option>';
+    (d.contexts || []).forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.topic;
+      opt.textContent = c.topic + '（' + stageLabel(c.stages) + '）';
+      sel.appendChild(opt);
+    });
+    sel.value = prev;
+    currentContext = prev;
+  }).catch(() => {});
+}
+
+function onContextChange() {
+  currentContext = $('ctx').value;
+  if (currentContext) {
+    addMsg('已切换到上下文: ' + currentContext, 'msg-agent');
+    loadContextNotes(currentContext);
+  } else {
+    addMsg('已切换到新主题', 'msg-agent');
+  }
+}
+
+function loadContextNotes(topic) {
+  fetch('/api/contexts/' + encodeURIComponent(topic) + '/notes')
+    .then(r => r.json()).then(d => {
+      if (d.notes) {
+        renderMarkdown($('preview'), '# ' + escapeHtml(d.topic || topic) + '\n\n' + d.notes);
+      } else {
+        renderMarkdown($('preview'), '# ' + escapeHtml(d.topic || topic) + '\n\n该上下文暂无综述笔记。');
+      }
+      switchTab('preview');
+    }).catch(() => {
+      addMsg('加载上下文笔记失败', 'msg-error');
+    });
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  $('preview').style.display = name === 'preview' ? 'block' : 'none';
+  $('files').style.display = name === 'files' ? 'block' : 'none';
+  if (name === 'files') refreshArtifacts();
+}
+
+function renderMarkdown(el, text) {
+  if (typeof marked !== 'undefined' && marked.parse) {
+    el.className = 'markdown';
+    el.innerHTML = marked.parse(text || '');
+  } else {
+    el.className = '';
+    el.innerHTML = '<pre>' + escapeHtml(text || '') + '</pre>';
+  }
+}
+
+function escapeHtml(s) {
+  return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function refreshArtifacts() {
+  fetch('/api/artifacts?_=' + Date.now()).then(r => r.json()).then(data => {
+    const el = $('files');
+    el.innerHTML = '';
+    const dirs = {};
+    (data.files || []).forEach(f => {
+      const parts = f.name.split('/');
+      const dir = parts.length > 1 ? parts.slice(0, -1).join('/') : '';
+      const base = parts[parts.length - 1];
+      const size = f.size > 1024 ? (f.size / 1024).toFixed(1) + ' KB' : f.size + ' B';
+      const item = document.createElement('div');
+      item.className = 'file-item';
+      item.innerHTML = '<span class="fname">' + escapeHtml(dir ? dir + '/' + base : base) + '</span>' +
+                       '<span class="fsize">' + size + '</span>';
+      item.onclick = () => loadArtifact(f.name);
+      el.appendChild(item);
+    });
+  }).catch(() => {});
+}
+
+function loadArtifact(name) {
+  fetch('/api/artifacts/' + encodeURI(name)).then(r => r.json()).then(data => {
+    if (data.binary) { window.open(data.url, '_blank'); }
+    else if (data.error) { addMsg('读取失败: ' + data.error, 'msg-error'); }
+    else { renderMarkdown($('preview'), data.content || ''); switchTab('preview'); }
+  }).catch(() => {});
+}
+
+function autoGrowReply() {
+  const el = $('reply');
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 180) + 'px';
+}
+
+function clearReply() {
+  $('reply').value = '';
+  autoGrowReply();
+}
+
+function openHistory() {
+  $('history-overlay').style.display = 'flex';
+  showHistoryList();
+}
+
+function closeHistory() {
+  $('history-overlay').style.display = 'none';
+}
+
+function historyBack() {
+  showHistoryList();
+}
+
+function statusLabel(s) {
+  const map = {running: '运行中', waiting: '等待中', done: '已完成', stopped: '已停止', error: '出错'};
+  return map[s] || s || '未知';
+}
+
+function showHistoryList() {
+  $('history-title').textContent = '历史会话';
+  $('btn-history-back').style.display = 'none';
+  $('history-list').style.display = 'block';
+  $('history-detail').style.display = 'none';
+  $('history-detail').innerHTML = '';
+  fetch('/api/conversations?_=' + Date.now()).then(r => r.json()).then(d => {
+    renderHistoryList(d.conversations || []);
+  }).catch(() => {
+    $('history-list').innerHTML = '<div class="empty">加载失败</div>';
+  });
+}
+
+function renderHistoryList(items) {
+  const el = $('history-list');
+  el.innerHTML = '';
+  if (!items.length) { el.innerHTML = '<div class="empty">暂无历史会话</div>'; return; }
+  items.forEach(c => {
+    const item = document.createElement('div');
+    item.className = 'history-item';
+    const resumable = (c.status || '') !== 'done';
+    let actions = '<span class="hist-status st-' + escapeHtml(c.status || 'unknown') + '">' + statusLabel(c.status) + '</span>';
+    if (resumable) {
+      actions += '<button class="hist-resume" data-sid="' + escapeHtml(c.session_id) + '">继续</button>';
+    }
+    item.innerHTML = '<div class="hist-main">' +
+      '<div class="hist-topic">' + escapeHtml(c.topic || c.session_id) + '</div>' +
+      '<div class="hist-meta">' + escapeHtml((c.updated_at || c.created_at || '').replace('T', ' ')) +
+      ' · ' + (c.message_count || 0) + ' 条消息</div>' +
+      '</div>' +
+      actions;
+    item.onclick = () => viewConversation(c.session_id);
+    el.appendChild(item);
+    const btn = item.querySelector('.hist-resume');
+    if (btn) {
+      btn.onclick = (e) => { e.stopPropagation(); resumeConversation(c.session_id); };
+    }
+  });
+}
+
+function resumeConversation(sid) {
+  fetch('/api/sessions/' + encodeURIComponent(sid) + '/resume', {method: 'POST'})
+    .then(r => r.json()).then(d => {
+      if (d.thread_id) {
+        closeHistory();
+        currentThreadId = d.thread_id;
+        $('log').innerHTML = '';
+        setMode('running');
+        setStatus('恢复会话…', 'running');
+        connectSSE(d.thread_id);
+      } else {
+        alert('恢复失败: ' + JSON.stringify(d));
+      }
+    }).catch(e => alert('恢复失败: ' + e));
+}
+
+function viewConversation(sid) {
+  fetch('/api/conversations/' + encodeURIComponent(sid)).then(r => r.json()).then(rec => {
+    renderHistory(rec);
+  }).catch(() => {
+    $('history-list').innerHTML = '<div class="empty">加载失败</div>';
+  });
+}
+
+function renderHistory(rec) {
+  $('history-title').textContent = rec.topic || '会话回看';
+  $('btn-history-back').style.display = 'inline-block';
+  $('history-list').style.display = 'none';
+  const detail = $('history-detail');
+  detail.style.display = 'block';
+  detail.innerHTML = '';
+  (rec.messages || []).forEach(m => {
+    if (m.role === 'interrupt') {
+      const card = document.createElement('div');
+      card.className = 'interrupt-card';
+      card.innerHTML = '<div class="it-title">' + escapeHtml(m.title || '') + '</div>' +
+                       '<div class="it-hint">' + escapeHtml(m.hint || '') + '</div>';
+      detail.appendChild(card);
+      return;
+    }
+    const row = document.createElement('div');
+    row.className = 'msg ' + msgClass(m);
+    const avatar = document.createElement('div');
+    avatar.className = 'avatar';
+    avatar.textContent = m.role === 'user' ? '我' : (m.role === 'node' ? '·' : 'AI');
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = m.text || '';
+    row.appendChild(avatar);
+    row.appendChild(bubble);
+    detail.appendChild(row);
+  });
+  detail.scrollTop = detail.scrollHeight;
+}
+
+function msgClass(m) {
+  switch (m.role) {
+    case 'user': return 'msg-user';
+    case 'node': return 'msg-node';
+    case 'done': return 'msg-done';
+    case 'error': return 'msg-error';
+    case 'stopped': return 'msg-agent';
+    default: return 'msg-agent';
+  }
+}
+
+$('reply').addEventListener('input', autoGrowReply);
+$('reply').addEventListener('keydown', (e) => {
+  // 回车发送, Shift+回车换行
+  if (e.key === 'Enter' && !e.shiftKey && !$('btn-send').disabled) {
+    e.preventDefault();
+    onSend();
+  }
+});
+
+setMode('idle');
+refreshContexts();
+refreshArtifacts();
+</script>
+</body>
+</html>

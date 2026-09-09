@@ -30,9 +30,11 @@ def compile_latex(tex_path: str, workdir: str | None = None, engine: str = "xela
     第 1 遍生成 .aux (此时 PDF 中引用显示为 [?]), 第 2 遍起解析引用。
     若第 2 遍后仍有 undefined 引用警告则再编译一遍。
 
-    Windows 实测问题: 第 1 遍刚写出 PDF 后, 杀毒软件/索引服务会瞬时锁定文件,
-    导致第 2 遍 dvipdfmx 报 "Unable to open" → 旧版直接判失败,
-    留下只编译一遍、引用全是 [?] 的 PDF。此处对每遍编译做重试。
+    Windows 实测问题: 目标 PDF 若被占用 (PDF 阅读器打开旧文件 / 杀毒瞬时锁),
+    dvipdfmx 报 "Unable to open" → 第一遍直接失败。旧版在第一遍失败即 return,
+    根本没走到"PDF 已生成"兜底。修复:
+    - 编译前删除旧 PDF (占用则警告提示关闭阅读器)
+    - 第一遍失败不中断, 继续后续遍 (锁可能在下一遍前释放)
     """
     path = Path(tex_path).resolve()
     cwd = str(path.parent) if workdir is None else str(workdir)
@@ -71,18 +73,23 @@ def compile_latex(tex_path: str, workdir: str | None = None, engine: str = "xela
                 time.sleep(wait)
         return ok and "Unable to open" not in log, log
 
-    # 第 1 遍
-    ok, log = _run_with_retry()
-    if not ok:
-        return False, log
+    # 编译前删除旧 PDF: 目标 PDF 被占用 (阅读器打开) 是 dvipdfmx 失败的常见根因。
+    # 能删掉就排除了冲突; 删不掉则明确提示用户关闭阅读器。
+    if pdf_path.exists():
+        try:
+            pdf_path.unlink()
+        except OSError as e:
+            logger.warning(
+                f"目标 PDF 被占用无法覆盖: {pdf_path.name} ({e})。"
+                f"若是 PDF 阅读器正在打开该文件, 请关闭后重试。"
+            )
 
-    # 第 2 遍起: 解析 \cite; 若仍有 undefined 引用警告则继续 (至多 MAX_COMPILE_ROUNDS 遍)
-    last_log = log
-    for _ in range(MAX_COMPILE_ROUNDS - 1):
-        ok2, last_log = _run_with_retry()
-        if not ok2:
-            break
-        if not re.search(r"Citation\s+`[^']+'\s+.*undefined", last_log):
+    # 多遍编译: 至多 MAX_COMPILE_ROUNDS 遍, 每遍带瞬时失败重试。
+    # 某遍失败 (如第一遍锁) 不中断, 继续下一遍; 直到成功且无 undefined 引用。
+    last_log = ""
+    for _ in range(MAX_COMPILE_ROUNDS):
+        ok, last_log = _run_with_retry()
+        if ok and not re.search(r"Citation\s+`[^']+'\s+.*undefined", last_log):
             break
 
     # 成功标准: PDF 实际生成且非空 (即使某遍报瞬时错误, 只要最终 PDF 在就算成功)。
