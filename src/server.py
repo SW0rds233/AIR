@@ -30,7 +30,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
 from src.utils.console import ensure_utf8_console
-from src.utils.conversation_store import save_conversation, list_conversations, load_conversation
+from src.utils.conversation_store import save_conversation, list_conversations, load_conversation, delete_conversation
 from src.utils.file_utils import sanitize_filename
 from src.config import MAX_REVISIONS, OUTPUT_DIR, DATA_DIR
 from src.graph.pipeline import build_pipeline, _get_langfuse_handler, _describe_node
@@ -80,10 +80,11 @@ class RespondRequest(BaseModel):
 
 class Session:
     def __init__(self, thread_id: str, topic: str = "", session_id: str | None = None,
-                 checkpointer=None, checkpoint_conn=None):
+                 checkpointer=None, checkpoint_conn=None, run_id: str = ""):
         self.thread_id = thread_id
         self.session_id = session_id or uuid.uuid4().hex
         self.topic = topic
+        self.run_id = run_id  # outputs/{run_id}/ 产物子目录
         self.created_at = datetime.now().isoformat(timespec="seconds")
         self.checkpointer = checkpointer or MemorySaver()
         self.checkpoint_conn = checkpoint_conn
@@ -142,6 +143,7 @@ def _session_record(session: Session) -> dict:
         "session_id": session.session_id,
         "thread_id": session.thread_id,
         "topic": session.topic,
+        "run_id": session.run_id,
         "created_at": session.created_at,
         "status": session.status,
         "summary": _final_summary(session.final_state) if session.final_state else {},
@@ -342,6 +344,7 @@ def start_session(req: StartRequest):
     }
     SESSIONS[thread_id] = session
     initial_state = build_initial_state(req)
+    session.run_id = initial_state.get("run_id", "")
     # 立即落盘一条 running 记录, 保证"未跑到 interrupt 就关闭"的会话也能在历史列表被看到并续跑
     _persist_session(session)
     threading.Thread(target=_run_session, args=(session, initial_state), daemon=True).start()
@@ -427,6 +430,7 @@ def resume_session(session_id: str):
         session_id=session_id,
         checkpointer=checkpointer,
         checkpoint_conn=conn,
+        run_id=record.get("run_id", ""),
     )
     session.request = dict(record.get("request") or {})
     session.created_at = record.get("created_at", session.created_at)
@@ -455,6 +459,78 @@ def resume_session(session_id: str):
 
     threading.Thread(target=_run_session, args=(session, initial_state), daemon=True).start()
     return {"thread_id": thread_id, "session_id": session_id, "status": session.status}
+
+
+@app.delete("/api/sessions/{session_id}")
+def delete_session(session_id: str):
+    """删除会话: 连同对话记录 / 检查点 / 产出 / 检索缓存 / 向量库一并删除,
+    便于按会话管理项目进度。"""
+    record = load_conversation(session_id)
+    if record is None:
+        raise HTTPException(404, "会话不存在")
+    thread_id = record.get("thread_id", "")
+    run_id = record.get("run_id", "")
+    topic = record.get("topic", "")
+
+    removed = []
+    # 1. 停止并从内存移除活跃会话
+    if thread_id and thread_id in SESSIONS:
+        sess = SESSIONS.pop(thread_id)
+        sess.stop_flag.set()
+        try:
+            sess.responses.put(_STOP)
+        except Exception:
+            pass
+    # 2. 删除对话记录
+    if delete_conversation(session_id):
+        removed.append(f"data/conversations/{session_id}.json")
+    # 3. 删除检查点 (每会话一个 SQLite, 含 WAL/SHM)
+    try:
+        for suffix in ("", "-shm", "-wal"):
+            ckpt = CHECKPOINT_DIR / f"{session_id}.sqlite{suffix}"
+            if ckpt.exists():
+                ckpt.unlink()
+        removed.append(f"data/checkpoints/{session_id}.sqlite")
+    except Exception:
+        pass
+    # 4. 删除产出文件夹 outputs/{run_id}/
+    if run_id:
+        out_dir = (OUTPUT_DIR / run_id).resolve()
+        try:
+            if out_dir.exists() and str(out_dir).startswith(str(OUTPUT_DIR.resolve())):
+                shutil.rmtree(out_dir)
+                removed.append(f"outputs/{run_id}")
+        except Exception:
+            pass
+    # 5. 删除检索缓存 (data/pipeline_cache/{topic}.json)
+    if topic:
+        try:
+            from src.utils.pipeline_cache import resolve_cache_topic, CACHE_DIR
+
+            resolved = resolve_cache_topic(topic)
+            if resolved:
+                cache_path = CACHE_DIR / f"{sanitize_filename(resolved)}.json"
+                if cache_path.exists():
+                    cache_path.unlink()
+                    removed.append(f"data/pipeline_cache/{cache_path.name}")
+        except Exception:
+            pass
+    # 6. 清空向量库 (RAG 检索数据, 全局共享无法按主题精确删除, 单项目场景下清空)
+    try:
+        from src.rag.vector_store import clear_collection
+        from src.config import CHROMA_CONFIG
+
+        for name in (CHROMA_CONFIG["collection_name"],
+                     CHROMA_CONFIG["fulltext_collection"],
+                     CHROMA_CONFIG["wiki_collection"]):
+            try:
+                clear_collection(name)
+            except Exception:
+                pass
+        removed.append("data/chroma (向量库)")
+    except Exception:
+        pass
+    return {"ok": True, "removed": removed}
 
 
 @app.get("/api/conversations")

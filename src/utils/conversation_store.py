@@ -63,3 +63,15 @@ def load_conversation(session_id: str) -> dict | None:
         return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def delete_conversation(session_id: str) -> bool:
+    """删除单条会话记录文件; 返回是否删除成功。"""
+    p = _path(session_id)
+    if not p.exists():
+        return False
+    try:
+        p.unlink()
+        return True
+    except Exception:
+        return False

@@ -7,44 +7,73 @@
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
 <style>
   :root {
-    --bg: #f4f6f9;
+    --bg: #eef1f6;
     --card: #ffffff;
-    --border: #e5e7eb;
+    --border: #e3e8ef;
     --text: #1f2937;
     --muted: #6b7280;
-    --primary: #2f6fed;
-    --primary-dark: #2457c4;
-    --success: #2e9e5b;
-    --danger: #d64545;
-    --warn: #e0a100;
+    --primary: #3b82f6;
+    --primary-dark: #2563eb;
+    --primary-soft: #eef4ff;
+    --success: #10b981;
+    --success-soft: #e7f8f1;
+    --danger: #ef4444;
+    --danger-soft: #fdecec;
+    --warn: #f59e0b;
+    --warn-soft: #fef4e6;
+    --shadow-sm: 0 1px 2px rgba(16,24,40,.06);
+    --shadow-md: 0 4px 16px rgba(16,24,40,.08);
     --mono: "Consolas", "JetBrains Mono", monospace;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
-    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
-    height: 100vh; display: flex; flex-direction: column;
+    font-family: "Microsoft YaHei UI", "Segoe UI", "PingFang SC", sans-serif;
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden;
   }
   header {
     background: var(--card); border-bottom: 1px solid var(--border);
-    padding: 12px 20px; display: flex; align-items: center; gap: 16px;
+    box-shadow: var(--shadow-sm);
+    padding: 10px 20px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
   }
-  header h1 { font-size: 16px; margin: 0; font-weight: 700; }
-  #status { font-size: 12px; color: var(--muted); margin-left: 12px; }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .logo {
+    width: 30px; height: 30px; border-radius: 8px; flex: 0 0 auto;
+    background: linear-gradient(135deg, var(--primary), #6366f1);
+    color: #fff; font-size: 12px; font-weight: 800; letter-spacing: .5px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 700; letter-spacing: .3px; white-space: nowrap; }
+  .badge { font-size: 11px; padding: 3px 10px; border-radius: 20px; background: var(--primary-soft); color: var(--primary); white-space: nowrap; }
+  .header-controls { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  .sel-label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  select {
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 12px;
+    color: var(--text); background: #fff; max-width: 260px; cursor: pointer; outline: none;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  select:hover { border-color: #c7d2e0; }
+  select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(59,130,246,.12); }
+  #status {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--muted); white-space: nowrap;
+  }
+  #status::before {
+    content: ''; width: 8px; height: 8px; border-radius: 50%; background: #cbd5e1;
+    flex: 0 0 auto;
+  }
   #status.dot-running { color: var(--warn); }
+  #status.dot-running::before { background: var(--warn); }
   #status.dot-done { color: var(--success); }
+  #status.dot-done::before { background: var(--success); }
   #status.dot-error { color: var(--danger); }
-  .badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #eef2fb; color: var(--primary); }
-  #ctx {
-    border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font-size: 12px;
-    max-width: 220px; color: var(--text); background: #fff;
-  }
-  #btn-clearcache { margin-left: auto; }
+  #status.dot-error::before { background: var(--danger); }
   button.ghost {
-    background: transparent; color: var(--muted); border: 1px solid var(--border);
-    padding: 5px 12px; font-size: 12px;
+    background: #fff; color: var(--muted); border: 1px solid var(--border);
+    padding: 6px 12px; font-size: 12px; border-radius: 8px; cursor: pointer;
+    transition: color .15s, border-color .15s;
   }
-  button.ghost:hover { color: var(--danger); border-color: var(--danger); background: transparent; }
+  button.ghost:hover { color: var(--danger); border-color: var(--danger); background: #fff; }
 
   details {
     background: var(--card); border-bottom: 1px solid var(--border); padding: 8px 20px;
@@ -59,41 +88,47 @@
 
   main {
     flex: 1; display: grid; grid-template-columns: 46% 54%; min-height: 0;
+    padding: 12px; gap: 12px;
   }
-  .panel { display: flex; flex-direction: column; min-height: 0; background: var(--card); }
-  .panel + .panel { border-left: 1px solid var(--border); }
+  .panel {
+    display: flex; flex-direction: column; min-height: 0; background: var(--card);
+    border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-sm);
+    overflow: hidden;
+  }
   .panel-head {
-    padding: 8px 14px; border-bottom: 1px solid var(--border);
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
     font-size: 12px; font-weight: 700; color: var(--muted); display: flex; gap: 8px; align-items: center;
+    background: #fafbfc;
   }
-  .panel-head .tabs { margin-left: auto; display: flex; gap: 4px; }
-  .panel-head .tab { font-size: 12px; padding: 3px 10px; border-radius: 4px; cursor: pointer; color: var(--muted); }
-  .panel-head .tab.active { background: #eef2fb; color: var(--primary); }
+  .panel-head .tabs { margin-left: auto; display: flex; gap: 2px; background: #eef1f6; border-radius: 8px; padding: 3px; }
+  .panel-head .tab { font-size: 12px; padding: 4px 12px; border-radius: 6px; cursor: pointer; color: var(--muted); transition: all .15s; }
+  .panel-head .tab.active { background: #fff; color: var(--primary); box-shadow: var(--shadow-sm); }
 
   /* 左侧对话区 */
-  #log { flex: 1; overflow-y: auto; padding: 12px 14px; font-size: 13px; line-height: 1.7; }
-  .msg { display: flex; margin: 6px 0; }
-  .msg .avatar { width: 28px; height: 28px; border-radius: 6px; flex: 0 0 auto; font-size: 13px; line-height: 28px; text-align: center; margin-right: 8px; }
+  #log { flex: 1; overflow-y: auto; padding: 16px; font-size: 13px; line-height: 1.7; background: #fbfcfe; }
+  .msg { display: flex; margin: 8px 0; animation: fadein .2s ease; }
+  @keyframes fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  .msg .avatar { width: 30px; height: 30px; border-radius: 8px; flex: 0 0 auto; font-size: 13px; line-height: 30px; text-align: center; margin-right: 8px; box-shadow: var(--shadow-sm); }
   .msg .bubble {
-    padding: 7px 12px; border-radius: 10px; max-width: 82%; word-break: break-word;
-    white-space: pre-wrap; font-size: 13px;
+    padding: 8px 13px; border-radius: 12px; max-width: 82%; word-break: break-word;
+    white-space: pre-wrap; font-size: 13px; box-shadow: var(--shadow-sm);
   }
   .msg-user { flex-direction: row-reverse; }
   .msg-user .avatar { margin-right: 0; margin-left: 8px; background: var(--primary); color: #fff; }
-  .msg-user .bubble { background: var(--primary); color: #fff; border-top-right-radius: 2px; }
-  .msg-agent .avatar { background: #eef2fb; color: var(--primary); }
-  .msg-agent .bubble { background: #f4f6f9; color: var(--text); border-top-left-radius: 2px; }
-  .msg-node .bubble { background: transparent; color: var(--muted); font-family: var(--mono); font-size: 12px; padding: 2px 4px; }
-  .msg-node .avatar { background: transparent; color: var(--muted); }
+  .msg-user .bubble { background: var(--primary); color: #fff; border-top-right-radius: 3px; }
+  .msg-agent .avatar { background: var(--primary-soft); color: var(--primary); }
+  .msg-agent .bubble { background: #f4f6f9; color: var(--text); border-top-left-radius: 3px; }
+  .msg-node .bubble { background: transparent; color: var(--muted); font-family: var(--mono); font-size: 12px; padding: 2px 4px; box-shadow: none; }
+  .msg-node .avatar { background: transparent; color: var(--muted); box-shadow: none; }
   .msg-node { margin: 2px 0; }
-  .msg-done .bubble { background: #eaf7ef; color: var(--success); }
-  .msg-done .avatar { background: #eaf7ef; color: var(--success); }
-  .msg-error .bubble { background: #fdecea; color: var(--danger); }
-  .msg-error .avatar { background: #fdecea; color: var(--danger); }
+  .msg-done .bubble { background: var(--success-soft); color: var(--success); }
+  .msg-done .avatar { background: var(--success-soft); color: var(--success); }
+  .msg-error .bubble { background: var(--danger-soft); color: var(--danger); }
+  .msg-error .avatar { background: var(--danger-soft); color: var(--danger); }
 
   .interrupt-card {
-    border: 1px solid var(--primary); background: #f0f5ff; border-radius: 8px;
-    padding: 10px 12px; margin: 10px 0;
+    border: 1px solid var(--primary); background: var(--primary-soft); border-radius: 10px;
+    padding: 12px 14px; margin: 10px 0; box-shadow: var(--shadow-sm);
   }
   .interrupt-card .it-title { font-weight: 700; color: var(--primary); margin-bottom: 4px; }
   .interrupt-card .it-hint { font-size: 11px; color: var(--muted); white-space: pre-wrap; }
@@ -124,17 +159,20 @@
 
   #files { flex: 1; overflow-y: auto; padding: 8px; display: none; }
   .file-item { padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; display: flex; justify-content: space-between; gap: 8px; }
-  .file-item:hover { background: #f0f5ff; }
+  .file-item:hover { background: var(--primary-soft); }
   .file-item .fname { word-break: break-all; }
   .file-item .fsize { color: var(--muted); font-size: 11px; white-space: nowrap; }
 
   button {
     border: none; border-radius: 8px; padding: 9px 16px; font-size: 13px; cursor: pointer;
     background: var(--primary); color: #fff; font-weight: 600;
+    box-shadow: var(--shadow-sm); transition: background .15s, box-shadow .15s, transform .05s;
   }
-  button:hover { background: var(--primary-dark); }
-  button:disabled { background: #a9c0f0; cursor: not-allowed; }
+  button:hover { background: var(--primary-dark); box-shadow: var(--shadow-md); }
+  button:active { transform: translateY(1px); }
+  button:disabled { background: #a9c0f0; cursor: not-allowed; box-shadow: none; }
   button.danger { background: var(--danger); }
+  button.danger:hover { background: #dc2626; }
   button.danger:disabled { background: #e5a8a8; }
 
   /* 历史会话弹窗 */
@@ -158,7 +196,7 @@
     display: flex; align-items: center; gap: 10px; padding: 10px 12px;
     border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; cursor: pointer;
   }
-  .history-item:hover { background: #f0f5ff; }
+  .history-item:hover { background: var(--primary-soft); }
   .hist-main { flex: 1; min-width: 0; }
   .hist-topic { font-size: 13px; font-weight: 600; word-break: break-all; }
   .hist-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
@@ -168,23 +206,38 @@
     background: #fff; color: var(--primary); cursor: pointer; white-space: nowrap;
   }
   .hist-resume:hover { background: var(--primary); color: #fff; }
-  .st-running { background: #fff6e0; color: var(--warn); }
-  .st-waiting { background: #f0f5ff; color: var(--primary); }
-  .st-done { background: #eaf7ef; color: var(--success); }
+  .st-running { background: var(--warn-soft); color: var(--warn); }
+  .st-waiting { background: var(--primary-soft); color: var(--primary); }
+  .st-done { background: var(--success-soft); color: var(--success); }
   .st-stopped { background: #f3f4f6; color: var(--muted); }
-  .st-error { background: #fdecea; color: var(--danger); }
+  .st-error { background: var(--danger-soft); color: var(--danger); }
+
+  /* 滚动条 */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #a8b8cc; }
+  ::-webkit-scrollbar-track { background: transparent; }
 </style>
 </head>
 <body>
 
 <header>
-  <h1>AIR智能体研究系统</h1>
+  <div class="brand">
+    <span class="logo">AIR</span>
+    <h1>AIR智能体研究系统</h1>
+  </div>
   <span class="badge">综述论文 · 多智能体 · 对话式协作</span>
-  <select id="ctx" onchange="onContextChange()" title="切换研究上下文">
-    <option value="">+ 新主题</option>
-  </select>
-  <button id="btn-clearcache" class="ghost" onclick="clearCache()">清除缓存</button>
-  <button id="btn-history" class="ghost" onclick="openHistory()">历史会话</button>
+  <div class="header-controls">
+    <label class="sel-label" for="hist">会话</label>
+    <select id="hist" onchange="onHistoryChange()" title="切换到历史会话并继续工作">
+      <option value="">+ 历史会话</option>
+    </select>
+    <label class="sel-label" for="ctx">主题</label>
+    <select id="ctx" onchange="onContextChange()" title="切换研究上下文">
+      <option value="">+ 新主题</option>
+    </select>
+    <button id="btn-del" class="ghost" onclick="deleteSession()">删除会话</button>
+  </div>
   <span id="status">就绪</span>
 </header>
 
@@ -239,6 +292,7 @@
 
 <script>
 let currentThreadId = null;
+let currentSessionId = null;
 let es = null;
 let mode = 'idle'; // idle / running / waiting
 let currentContext = '';
@@ -325,7 +379,9 @@ function start(requestText) {
   }).then(r => r.json()).then(data => {
     if (data.thread_id) {
       currentThreadId = data.thread_id;
+      currentSessionId = data.session_id || null;
       connectSSE(currentThreadId);
+      refreshHistorySelect();
     } else {
       addMsg('启动失败: ' + JSON.stringify(data), 'msg-error');
 setMode('idle');
@@ -424,6 +480,7 @@ function finishRun() {
   currentThreadId = null;
   if (es) { es.close(); es = null; }
   refreshContexts();
+  refreshHistorySelect();
 }
 
 function sendResponse() {
@@ -501,6 +558,139 @@ function loadContextNotes(topic) {
     }).catch(() => {
       addMsg('加载上下文笔记失败', 'msg-error');
     });
+}
+
+function fmtTime(iso) {
+  if (!iso) return '';
+  const m = (iso || '').match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  return m ? (m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5]) : (iso || '').slice(0, 16);
+}
+
+function refreshHistorySelect() {
+  fetch('/api/conversations?_=' + Date.now(), {cache: 'no-store'}).then(r => r.json()).then(d => {
+    const sel = $('hist');
+    const prev = currentSessionId || '';
+    sel.innerHTML = '<option value="">+ 历史会话</option>';
+    (d.conversations || []).forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.session_id;
+      opt.textContent = (c.topic || c.session_id) + ' · ' + fmtTime(c.updated_at || c.created_at) + ' · ' + statusLabel(c.status);
+      sel.appendChild(opt);
+    });
+    sel.value = prev;
+  }).catch(() => {});
+}
+
+function onHistoryChange() {
+  const sid = $('hist').value;
+  if (!sid) { newSession(); return; }
+  switchToConversation(sid);
+}
+
+function newSession() {
+  // 切回「+ 历史会话」(空选项) → 回到新建对话状态
+  currentSessionId = null;
+  currentThreadId = null;
+  if (es) { es.close(); es = null; }
+  $('log').innerHTML = '';
+  setMode('idle');
+  setStatus('就绪', '');
+  addMsg('欢迎使用 AIR 智能体研究系统。', 'msg-agent');
+  addMsg('在下方输入研究主题或用一句话描述研究内容，回车启动；或从顶部「会话」下拉框切换历史会话继续工作。', 'msg-agent');
+}
+
+function switchToConversation(sid) {
+  currentSessionId = sid;
+  fetch('/api/conversations/' + encodeURIComponent(sid)).then(r => r.json()).then(rec => {
+    renderHistoryToLog(rec);
+    if ((rec.status || '') !== 'done') {
+      resumeSession(sid);
+    } else {
+      currentThreadId = null;
+      setMode('idle');
+      setStatus('已完成', 'done');
+    }
+  }).catch(() => addMsg('加载历史会话失败', 'msg-error'));
+}
+
+function renderHistoryToLog(rec) {
+  const log = $('log');
+  log.innerHTML = '';
+  const msgs = rec.messages || [];
+  const resumable = (rec.status || '') !== 'done';
+  // 若停在 interrupt 且要续跑, 跳过最后一条 interrupt 卡片,
+  // 避免 resume 时 SSE 重新抛出造成重复展示
+  const skipLast = resumable && msgs.length && msgs[msgs.length - 1].role === 'interrupt';
+  const toRender = skipLast ? msgs.slice(0, -1) : msgs;
+  addMsg('[历史会话] ' + (rec.topic || rec.session_id || ''), 'msg-agent');
+  toRender.forEach(m => {
+    if (m.role === 'interrupt') {
+      const card = document.createElement('div');
+      card.className = 'interrupt-card';
+      card.innerHTML = '<div class="it-title">' + escapeHtml(m.title || '') + '</div>' +
+                       '<div class="it-hint">' + escapeHtml(m.hint || '') + '</div>';
+      log.appendChild(card);
+      return;
+    }
+    const row = document.createElement('div');
+    row.className = 'msg ' + msgClass(m);
+    const avatar = document.createElement('div');
+    avatar.className = 'avatar';
+    avatar.textContent = m.role === 'user' ? '我' : (m.role === 'node' ? '·' : 'AI');
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = m.text || '';
+    row.appendChild(avatar);
+    row.appendChild(bubble);
+    log.appendChild(row);
+  });
+  log.scrollTop = log.scrollHeight;
+}
+
+function resumeSession(sid) {
+  fetch('/api/sessions/' + encodeURIComponent(sid) + '/resume', {method: 'POST'})
+    .then(r => r.json()).then(d => {
+      if (d.thread_id) {
+        currentThreadId = d.thread_id;
+        setMode('running');
+        setStatus('恢复会话…', 'running');
+        connectSSE(d.thread_id);
+      } else {
+        addMsg('恢复失败: ' + JSON.stringify(d), 'msg-error');
+      }
+    }).catch(e => addMsg('恢复失败: ' + e, 'msg-error'));
+}
+
+function deleteSession() {
+  const sid = currentSessionId || $('hist').value;
+  if (!sid) { alert('请先在「历史会话」下拉框选择要删除的会话'); return; }
+  const label = $('hist').selectedOptions[0] ? $('hist').selectedOptions[0].textContent : sid;
+  if (!confirm('确认删除该会话？\n\n' + label + '\n\n将删除以下内容（不可恢复）：\n' +
+    '· 对话记录（data/conversations/）\n' +
+    '· 检查点（data/checkpoints/）\n' +
+    '· 产出文件夹（outputs/ 对应子目录）\n' +
+    '· 检索缓存（data/pipeline_cache/ 对应主题）\n' +
+    '· 向量库（data/chroma/，全局 RAG 检索数据）\n\n' +
+    '确定删除吗？')) return;
+  fetch('/api/sessions/' + encodeURIComponent(sid), {method: 'DELETE'})
+    .then(r => r.json()).then(d => {
+      const removed = (d.removed || []).join('、');
+      addMsg(removed ? '已删除会话: ' + removed : '会话已删除', 'msg-agent');
+      currentSessionId = null;
+      currentThreadId = null;
+      if (es) { es.close(); es = null; }
+      $('log').innerHTML = '';
+      setMode('idle');
+      setStatus('就绪', '');
+      // 立即从下拉框移除被删会话 (不等异步刷新返回, 保证即时反馈)
+      const sel = $('hist');
+      const opt = sel.querySelector('option[value="' + sid + '"]');
+      if (opt) opt.remove();
+      sel.value = '';
+      refreshHistorySelect();
+      refreshArtifacts();
+      refreshContexts();
+    }).catch(e => addMsg('删除失败: ' + e, 'msg-error'));
 }
 
 function switchTab(name) {
@@ -699,6 +889,8 @@ $('reply').addEventListener('keydown', (e) => {
 setMode('idle');
 refreshContexts();
 refreshArtifacts();
+refreshHistorySelect();
+newSession();
 </script>
 </body>
 </html>

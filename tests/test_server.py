@@ -373,6 +373,65 @@ def test_resume_missing_session_returns_404():
     assert client.post("/api/sessions/nope/resume").status_code == 404
 
 
+def test_delete_session_removes_record_checkpoint_and_outputs():
+    """删除会话: 连同对话记录 / 检查点 / 产出 / 检索缓存一并删除"""
+    import tempfile
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    import src.utils.conversation_store as store
+    import src.utils.pipeline_cache as pc
+
+    tmp = Path(tempfile.mkdtemp())
+    orig_dir = store.CONVERSATIONS_DIR
+    store.CONVERSATIONS_DIR = tmp / "conversations"
+    orig_ckpt = server.CHECKPOINT_DIR
+    server.CHECKPOINT_DIR = tmp / "checkpoints"
+    orig_out = server.OUTPUT_DIR
+    server.OUTPUT_DIR = tmp / "outputs"
+    orig_cache = pc.CACHE_DIR
+    pc.CACHE_DIR = tmp / "pipeline_cache"
+    try:
+        run_id = "test_run_123"
+        topic = "测试主题"
+        store.save_conversation("sess-del", {
+            "session_id": "sess-del", "thread_id": "t-del", "topic": topic,
+            "run_id": run_id, "status": "done",
+            "messages": [{"role": "done", "text": "完成"}], "request": {},
+        })
+        server.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+        (server.CHECKPOINT_DIR / "sess-del.sqlite").write_text("", encoding="utf-8")
+        out_dir = server.OUTPUT_DIR / run_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "draft.md").write_text("x", encoding="utf-8")
+        # 检索缓存 (按 topic 存)
+        pc.save_retrieval_cache(topic, "笔记内容", [])
+
+        client = TestClient(server.app)
+        r = client.delete("/api/sessions/sess-del")
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+        assert store.load_conversation("sess-del") is None
+        assert not (server.CHECKPOINT_DIR / "sess-del.sqlite").exists()
+        assert not out_dir.exists()
+        # 检索缓存也被删除
+        assert not (pc.CACHE_DIR / f"{server.sanitize_filename(topic)}.json").exists()
+    finally:
+        store.CONVERSATIONS_DIR = orig_dir
+        server.CHECKPOINT_DIR = orig_ckpt
+        server.OUTPUT_DIR = orig_out
+        pc.CACHE_DIR = orig_cache
+
+
+def test_delete_session_missing_returns_404():
+    from fastapi.testclient import TestClient
+
+    client = TestClient(server.app)
+    assert client.delete("/api/sessions/nope").status_code == 404
+
+
 if __name__ == "__main__":
     tests = [
         test_build_initial_state,
@@ -387,6 +446,8 @@ if __name__ == "__main__":
         test_clear_cache_endpoint,
         test_resume_from_interrupt_after_restart,
         test_resume_missing_session_returns_404,
+        test_delete_session_removes_record_checkpoint_and_outputs,
+        test_delete_session_missing_returns_404,
     ]
     passed = 0
     for t in tests:
