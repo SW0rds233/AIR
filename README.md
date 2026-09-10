@@ -25,7 +25,20 @@
 
 ## 快速开始
 
-### 1. 一键搭建环境（Windows 推荐）
+### 1. 获取代码
+
+```bash
+git clone https://github.com/SW0rds233/AIR.git
+cd AIR
+```
+
+已有仓库时拉取最新代码：
+
+```bash
+git pull
+```
+
+### 2. 一键搭建环境（Windows 推荐）
 
 项目根目录的 `setup_env.bat` 会自动完成整个环境搭建：
 
@@ -61,7 +74,7 @@ cp .env.example .env   # Windows: copy .env.example .env
 ```
 </details>
 
-### 2. 配置环境变量（.env）
+### 3. 配置环境变量（.env）
 
 `.env` 由 `python-dotenv` 在程序启动时自动加载（`src/config.py:5`）。该文件已被 `.gitignore` 忽略，**不会**提交到版本库；未配置的变量一律使用 `src/config.py` 中的默认值。完整注释版见 `.env.example`。
 
@@ -127,7 +140,7 @@ cp .env.example .env   # Windows: copy .env.example .env
 | `HTTP_CIRCUIT_BREAKER_THRESHOLD` / `HTTP_CIRCUIT_BREAKER_COOLDOWN` | 断路器：连续失败 N 次后暂停 M 秒 | `5` / `60` |
 | `LLM_TIMEOUT` / `LLM_MAX_RETRIES` | LLM 单次调用超时（秒）/ 重试次数 | `900` / `2` |
 
-### 3. 运行
+### 4. 运行
 
 ```bash
 python -m src.main "研究主题" --keywords K1 K2 --subtopics S1 S2
