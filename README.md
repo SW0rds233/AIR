@@ -25,28 +25,107 @@
 
 ## 快速开始
 
-### 1. 安装依赖
+### 1. 一键搭建环境（Windows 推荐）
+
+项目根目录的 `setup_env.bat` 会自动完成整个环境搭建：
+
+1. 检测 Python（要求 3.10+，未安装会提示下载地址）
+2. 在项目目录创建虚拟环境 `.venv`
+3. 安装 `requirements.txt` 全部依赖
+4. 若 `.env` 不存在，从 `.env.example` 复制生成
+5. 验证关键依赖（langgraph / fastapi / uvicorn / chromadb / pymupdf / matplotlib）可正常导入
+
+双击 `setup_env.bat`，或在项目根目录执行：
+
+```bat
+setup_env.bat
+```
+
+国内网络下载慢或超时，可改用清华 PyPI 镜像：
+
+```bat
+setup_env.bat --mirror
+```
+
+脚本可重复执行：已存在 `.venv` / `.env` 时自动跳过创建与安装步骤。
+
+<details>
+<summary>手动搭建（macOS / Linux 或自定义环境）</summary>
 
 ```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env   # Windows: copy .env.example .env
 ```
+</details>
 
-### 2. 配置环境变量
+### 2. 配置环境变量（.env）
 
-```bash
-cp .env.example .env
-# 编辑 .env，填入你的 API Key
-```
+`.env` 由 `python-dotenv` 在程序启动时自动加载（`src/config.py:5`）。该文件已被 `.gitignore` 忽略，**不会**提交到版本库；未配置的变量一律使用 `src/config.py` 中的默认值。完整注释版见 `.env.example`。
 
-**必需配置：**
-- `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` — 主模型
-- `EMBEDDING_MODEL` / `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` — RAG 向量检索（如 DeepSeek 不支持 embedding，推荐硅基流动 `BAAI/bge-large-zh-v1.5`）
+**必填（主模型）：**
 
-**可选配置：**
-- `REVIEWER_MODEL` — 跨模型审阅（推荐开启，避免撰写/审阅共享认知盲区）
-- `CHEAP_MODEL` — 廉价模型分层（子查询、相关性打分等轻量任务降本）
-- `GROBID_BASE_URL` — PDF 结构化解析
-- `LANGFUSE_*` — LLM 调用追踪
+| 变量 | 说明 | 示例 |
+|------|------|------|
+| `OPENAI_API_KEY` | 主模型 API Key | `sk-xxx` |
+| `OPENAI_BASE_URL` | OpenAI 兼容接口地址 | `https://api.deepseek.com/v1` |
+| `OPENAI_MODEL` | 主模型名称 | `deepseek-chat` |
+
+**RAG 向量检索（建议配置）：**
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `EMBEDDING_MODEL` | embedding 模型。DeepSeek 等不支持 embedding 的服务留空即可（RAG 自动降级，主流程仍可运行）；推荐硅基流动 `BAAI/bge-large-zh-v1.5` | `text-embedding-3-small` |
+| `EMBEDDING_BASE_URL` | embedding 接口地址（如 `https://api.siliconflow.cn/v1`） | 回退主模型 |
+| `EMBEDDING_API_KEY` | embedding API Key | 回退主模型 |
+| `SKIP_EMBEDDING` | `1` = 跳过向量化入库（调试提速，不影响写作/审阅） | `0` |
+| `PDF_FULLTEXT_MAX_CHARS` | 单篇论文全文摄入最大字符数 | `20000` |
+
+**跨模型审阅（推荐开启）：**
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `REVIEWER_MODEL` / `REVIEWER_API_KEY` / `REVIEWER_BASE_URL` | 独立审阅模型，避免与撰写模型共享认知盲区；留空则复用主模型 | 空 |
+| `REVIEWER_TEMPERATURE` | 审阅温度 | `0.1` |
+
+**廉价模型分层（推荐开启）：**
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `CHEAP_MODEL` / `CHEAP_BASE_URL` / `CHEAP_API_KEY` | 子查询生成、相关性打分等轻量任务使用；留空回退主模型 | 空 |
+
+**检索与流程：**
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `ARXIV_SEARCH_MAX_RESULTS` | arXiv 单次检索结果上限 | `50` |
+| `SEMANTIC_SCHOLAR_MAX_RESULTS` | Semantic Scholar 单次检索结果上限 | `50` |
+| `MAX_REVISIONS` | 最大修订轮次 | `3` |
+| `REVIEW_ACCEPT_THRESHOLD` | 审稿通过阈值（百分制，`80` 对应 50 分制 `40`） | `80` |
+| `STAGNATION_LIMIT` | 连续 N 轮评分无提升则提前终止修订 | `2` |
+| `CROSSREF_EMAIL` | CrossRef 礼貌池联系邮箱 | 空 |
+| `PDF_DOWNLOAD_LIMIT` | PDF 下载篇数上限（调试可调低至 5~10 提速） | `30` |
+| `OPENALEX_API_KEY` | OpenAlex API Key（注册后额度更高，避免 429） | 空 |
+
+**可选数据源与追踪：**
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `CNKI_API_KEY` / `WANFANG_API_KEY` | 中文文献源（CNKI / 万方开放平台） | 空 |
+| `GROBID_BASE_URL` | GROBID 结构化 PDF 解析服务；留空回退 PyMuPDF 纯文本 | 空 |
+| `LANGFUSE_API_KEY` / `LANGFUSE_HOST` | Langfuse LLM 调用追踪 | 空 / `https://cloud.langfuse.com` |
+
+**网络容错与超时：**
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `HTTP_CONNECT_TIMEOUT` / `HTTP_READ_TIMEOUT` / `HTTP_WRITE_TIMEOUT` | 连接 / 读取 / 发送超时（秒） | `10` / `30` / `30` |
+| `HTTP_MAX_RETRIES` | 最大重试次数（3 = 首次 + 2 次重试） | `3` |
+| `HTTP_BACKOFF_BASE` / `HTTP_429_BACKOFF_BASE` | 网络错误 / 429 限流退避基值（秒） | `2` / `4` |
+| `HTTP_CIRCUIT_BREAKER_THRESHOLD` / `HTTP_CIRCUIT_BREAKER_COOLDOWN` | 断路器：连续失败 N 次后暂停 M 秒 | `5` / `60` |
+| `LLM_TIMEOUT` / `LLM_MAX_RETRIES` | LLM 单次调用超时（秒）/ 重试次数 | `900` / `2` |
 
 ### 3. 运行
 
@@ -68,6 +147,8 @@ python -m src.main --request "我想开展关于射频指纹识别(RF fingerprin
 python -m src.server
 # 打开浏览器访问 http://127.0.0.1:8000
 ```
+
+Windows 下也可直接双击 `start.bat`：自动优先使用 `.venv` 虚拟环境，依赖缺失时自动安装，然后启动 Web 界面。
 
 在研究计划生成后、大纲生成后、初稿完成后、每轮审稿后暂停，等待你确认或提意见：
 
@@ -194,6 +275,8 @@ AIR/
 ├── data/                    # 数据目录 (chroma/ pdfs/ manual_pdfs/ pipeline_cache/)
 ├── outputs/                 # 输出目录 (草稿/审稿报告/图表/LaTeX)
 ├── references/              # 参考项目源码 (调研用)
+├── setup_env.bat            # 一键搭建环境 (创建 .venv + 安装依赖 + 生成 .env)
+├── start.bat                # 一键启动 Web 界面
 ├── pyproject.toml
 └── requirements.txt
 ```
