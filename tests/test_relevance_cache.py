@@ -113,7 +113,7 @@ def test_rule_filter_matches_mixed_language_keywords():
     assert not any("Website fingerprinting" in t for t in titles), "Tor 网站指纹论文应剔除"
 
 
-def test_load_cache_filters_off_domain_refs():
+def test_load_cache_filters_off_domain_refs(monkeypatch):
     """历史缓存中的跨域论文在加载时兜底剔除 (避免重跑 --skip-retrieval 时复发)"""
     import src.utils.pipeline_cache as pc
 
@@ -130,6 +130,16 @@ def test_load_cache_filters_off_domain_refs():
         "literature_review_notes": "素材" * 100,
         "verified_references": refs,
     }
+    # 显式注入领域识别: 本用例的假主题 ("测试主题") 匹配不上任何词表别名,
+    # 生产路径会退化到"按资料库语料识别领域" —— 那需要工作区里存在 data/pdfs 等
+    # 真实语料, 于是这条测试**隐式依赖运行数据**(语料被清理后即失败, 实测)。
+    # 这里直接给出真实词表, 使测试只验证"加载缓存时的跨域兜底过滤"这一个行为。
+    from src.rag.relevance_filter import load_terms
+
+    terms = load_terms("rf-fingerprint")
+    assert not terms.is_empty(), "领域词表必须可加载 (evals/cases/rf-fingerprint)"
+    monkeypatch.setattr("src.rag.relevance_filter.domain_terms", lambda *a, **k: terms)
+
     with tempfile.TemporaryDirectory() as tmp:
         orig_dir = pc.CACHE_DIR
         pc.CACHE_DIR = Path(tmp)
