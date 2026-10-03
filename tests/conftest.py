@@ -31,7 +31,57 @@ _DATA_BOUND_MODULES = (
     "src.server",
     "src.rag.figure_llm",
     "src.tools.pdf_fetcher",
+    # 向量库落盘目录: `persist_directory()` 按调用时读 `config.DATA_DIR`, 但模块里
+    # 仍留有导入期的 `DATA_DIR`, 一并重映射以免任何直读常量的路径写回仓库。
+    "src.rag.vector_store",
 )
+
+# 运行时产物目录: 测试前后都不应出现在仓库里 (会话级兜底)
+_RUNTIME_ARTIFACTS = ("data/chroma", "data/checkpoints", "data/research",
+                      "data/conversations", "data/kb", "data/pdfs",
+                      "data/manual_pdfs", "outputs/figures")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_repo_runtime_artifacts():
+    """会话级兜底: 测试不得在仓库留下运行时产物。
+
+    为什么需要: 每个测试的 `tmp_path` 隔离对**后台线程**无效 —— 图线程的生命周期
+    可能长于测试, 夹具恢复后它才落盘, 于是 `data/chroma/chroma.sqlite3` 这类产物会
+    在整轮测试结束后出现 (实测: 单文件运行不出现, 全量运行出现)。这里在会话开始与
+    结束时都清一遍, 并**把"又出现了"如实报出来**, 而不是让工作区悄悄被污染。
+    """
+    import shutil
+
+    from src import config
+
+    repo_data = Path(config.DATA_DIR).resolve()
+    repo_out = Path(config.OUTPUT_DIR).resolve()
+
+    def _clean() -> list[str]:
+        found = []
+        for rel in _RUNTIME_ARTIFACTS:
+            base = repo_data.parent if rel.startswith("data/") else repo_out.parent
+            target = base / rel
+            if target.exists():
+                found.append(rel)
+                shutil.rmtree(target, ignore_errors=True)
+        return found
+
+    _clean()            # 开始前清干净, 保证测的是"从零状态"
+
+    # 兜底: 图线程的生命周期可能长于**整个会话** (fixture teardown 之后才落盘),
+    # 因此再挂一个进程退出钩子。实测: 只在 session fixture 里清, 结束后
+    # data/chroma/chroma.sqlite3 仍会出现。
+    import atexit
+
+    atexit.register(_clean)
+
+    yield
+    left = _clean()     # 结束后清掉并报告
+    if left:
+        print(f"\n[测试隔离] 会话结束清理了运行时产物: {', '.join(left)}")
+
 
 
 @pytest.fixture(autouse=True)
