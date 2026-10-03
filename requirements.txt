@@ -22,3 +22,8 @@ uvicorn>=0.29.0
 
 # Langfuse 追踪 (设置 LANGFUSE_* 环境变量后生效; 4.x 中 LangChain 集成仍在核心包)
 langfuse>=4.0.0
+
+# 理论研究模式: 符号运算与逻辑/约束求解验证 (受限执行器调用)
+sympy>=1.12
+z3-solver>=4.12
+python-multipart>=0.0.9

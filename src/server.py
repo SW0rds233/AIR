@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import queue
+import re
 import shutil
 import threading
 import uuid
@@ -22,23 +24,88 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
-from pydantic import BaseModel
-
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
+from pydantic import BaseModel
 
+from src.config import DATA_DIR, MAX_REVISIONS, OUTPUT_DIR
+from src.graph.pipeline import _describe_node, _get_langfuse_handler, build_pipeline
 from src.utils.console import ensure_utf8_console
-from src.utils.conversation_store import save_conversation, list_conversations, load_conversation, delete_conversation
-from src.utils.file_utils import sanitize_filename
-from src.config import MAX_REVISIONS, OUTPUT_DIR, DATA_DIR
-from src.graph.pipeline import build_pipeline, _get_langfuse_handler, _describe_node
+from src.utils.conversation_store import (
+    delete_conversation,
+    list_conversations,
+    load_conversation,
+    save_conversation,
+)
+from src.utils.file_utils import safe_join, sanitize_filename
 
 _STOP = object()
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 INDEX_HTML = WEB_DIR / "index.html"
+# F4: Vite 构建产物 (源码模板在 WEB_DIR, 产物在 dist/ 与 assets/)
+WEB_DIST = WEB_DIR / "dist"
+WEB_BUILT_INDEX = WEB_DIST / "index.html"
+WEB_ASSETS = WEB_DIR / "assets"
+
+
+def output_dir() -> Path:
+    """交付/产物根目录 (**调用时**读取配置)。
+
+    为什么不在模块级直接引用 `OUTPUT_DIR`: 模块只在首次导入时求值一次, 于是
+    "先导入 server 的测试/进程"会把产物目录永久钉在那一次的配置上 ——
+    后续 monkeypatch `config.OUTPUT_DIR`(测试隔离) 或运行时改配置都不生效,
+    表现为"产物清单为空"这类难查的问题。这里按调用时取值, 保持单一权威。
+    """
+    from src import config
+
+    return Path(getattr(config, "OUTPUT_DIR", OUTPUT_DIR))
+
+
+def _web_dev_mode() -> bool:
+    """开发模式开关 (仅供 `vite dev`): 允许直接提供源码模板。
+
+    生产路径只提供构建产物 —— 源码模板引用 `/src/main.ts`, 在浏览器里没有任何脚本,
+    页面能打开但按钮全都没反应, 属于"看起来正常其实坏了"的状态。
+    """
+    return os.getenv("AIR_WEB_DEV", "").strip() == "1"
+
+
+def _index_page_path() -> Path:
+    """优先提供**已构建**页面; 未构建时回退到源码模板 (仅 `vite dev` 使用)。"""
+    return WEB_BUILT_INDEX if WEB_BUILT_INDEX.is_file() else INDEX_HTML
+
+
+_NOT_BUILT_PAGE = """<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>AIR · 前端尚未构建</title></head>
+<body style="font-family:system-ui;max-width:720px;margin:8vh auto;line-height:1.7">
+<h1>前端尚未构建</h1>
+<p>服务端只提供构建产物 <code>src/web/dist/index.html</code>，当前该文件不存在，
+因此不返回未构建的源码模板（它引用 <code>/src/main.ts</code>，在浏览器里没有任何脚本）。</p>
+<p>请在项目根目录执行：</p>
+<pre style="background:#f6f8fb;padding:12px;border-radius:6px">cd src/web
+npm install
+npm run build</pre>
+<p>然后刷新本页。若你是在做前端开发（已有 <code>vite dev</code> 在跑），
+请设置环境变量 <code>AIR_WEB_DEV=1</code> 后重启服务端。</p>
+</body></html>
+"""
+
+
+def _csp_headers() -> dict:
+    return {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Content-Security-Policy": (
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; "
+            "object-src 'none'; base-uri 'none'; form-action 'self'; "
+            "frame-ancestors 'none'"),
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+    }
 CHECKPOINT_DIR = DATA_DIR / "checkpoints"
 
 
@@ -72,23 +139,64 @@ class StartRequest(BaseModel):
     time_range: str = "2019-2026"
     max_revisions: int | None = None
     skip_retrieval: bool = False
+    # 理论研究模式 (默认 survey, 完全兼容旧请求)
+    mode: str = "survey"  # survey / theory
+    project_id: str = ""
+    problem_id: str = "problem"
+    research_spec: dict = {}
+    max_actions: int | None = None
+    max_tool_calls: int | None = None
+    # 显式续研同一问题: 与 start 分开语义 (计划书 §9.1)。
+    # resume=true 时复用已落盘规格, 即使本次请求文本不同也不报冲突。
+    resume: bool = False
+    # 资料源绑定 (计划书 §3 R0): 用户显式选择的资料库; 为空时按主题名匹配
+    source_set_id: str = ""
+    source_set_kind: str = "kb"
+    # 资料授权策略 (P0-1): user_kb=只用授权资料库; autonomous=只给方向自主检索; both=两者合并
+    source_policy: str = "user_kb"
+    # 上传的"问题说明"附件 (id 来自 POST /api/uploads kind=problem): 文本并入问题陈述
+    attachment_ids: list[str] = []
 
 
 class RespondRequest(BaseModel):
     response: str
+    # 反馈作用对象所属的研究问题 (多问题项目必须显式给出, 否则服务端返回 409)
+    problem_id: str = ""
+    # 响应对应的中断 ID (F2 幂等键): 留空时按服务端当前等待的暂停点处理
+    interrupt_id: str = ""
+    # 对象选择器指定的作用对象 (F1-5): 不填时由语义解析决定
+    object_id: str = ""
+
+
+class ForkRequest(BaseModel):
+    """从既有快照派生新研究问题 (计划书 §9.1: start / resume / fork 三种操作)。"""
+
+    snapshot_id: str = ""
+    claim_ids: list[str] = []
+    # 源问题: 派生所依据的研究问题
+    problem_id: str = ""
+    # 新问题 id: 留空时由服务端生成
+    new_problem_id: str = ""
+    project_id: str = ""
 
 
 class Session:
     def __init__(self, thread_id: str, topic: str = "", session_id: str | None = None,
-                 checkpointer=None, checkpoint_conn=None, run_id: str = ""):
+                 checkpointer=None, checkpoint_conn=None, run_id: str = "", mode: str = "survey"):
         self.thread_id = thread_id
         self.session_id = session_id or uuid.uuid4().hex
         self.topic = topic
         self.run_id = run_id  # outputs/{run_id}/ 产物子目录
+        self.mode = mode or "survey"
         self.created_at = datetime.now().isoformat(timespec="seconds")
         self.checkpointer = checkpointer or MemorySaver()
         self.checkpoint_conn = checkpoint_conn
-        self.app = build_pipeline(self.checkpointer)
+        if self.mode == "theory":
+            from src.graph.theory_pipeline import build_theory_pipeline
+
+            self.app = build_theory_pipeline(self.checkpointer)
+        else:
+            self.app = build_pipeline(self.checkpointer)
         self.config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
         lf = _get_langfuse_handler()
         if lf:
@@ -101,9 +209,57 @@ class Session:
         self.error: str | None = None
         self.messages: list[dict] = []
         self.request: dict = {}
+        # F2: 当前等待中的 interrupt 稳定 ID 与已回答记录 (幂等 + 只接受等待态响应)
+        self.pending_interrupt_id: str = ""
+        self.answered_interrupts: list[str] = []
+        # F2: 事件日志 (可重放) —— SSE 是单消费者队列, 断线或多标签页会丢事件;
+        # 这里保留带序号的日志, 重连时按 last_event_id 回放缺失部分。
+        self.event_log: list[dict] = []
+        self.event_seq: int = 0
+        self.event_lock = threading.RLock()
+        # 跑这一会话的后台线程 (start 时登记): 关闭检查点连接前必须等它退出,
+        # 否则会在"线程还在用 sqlite 连接"时 close, Windows 上直接崩进程。
+        self.worker_thread: threading.Thread | None = None
 
-    def emit(self, event: dict):
-        self.events.put(event)
+    def shutdown(self, timeout: float = 10.0) -> bool:
+        """关闭会话持有的检查点连接 (幂等)。
+
+        为什么必须有这一步: 每个会话一个 SQLite 检查点, 连接不关闭时在 Windows 上
+        会**一直持有文件句柄** —— 删除会话时 `unlink` 静默失败 (留下无法删除的文件),
+        测试的临时目录清理也会报 `WinError 32`。这里显式关闭, 并让调用方知道结果。
+
+        为什么要先等后台线程: `checkpoint_conn` 是 `check_same_thread=False` 的 sqlite3
+        连接, 后台研究线程仍在 `app.stream`/落盘中用它。在另一个线程还在使用时 close,
+        CPython 的 sqlite3 会访问已释放的句柄 —— 实测直接触发
+        `0xC0000005` (STATUS_ACCESS_VIOLATION) 崩掉整个进程, 而且崩点在 C 层,
+        Python 的 `except Exception` 拦不住。因此这里先 join, 只在线程确实退出后才关;
+        线程还在跑就**不关**并如实返回 False (宁可有句柄残留, 也不崩进程)。
+        """
+        thread = self.worker_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout)
+        if thread is not None and thread.is_alive():
+            self.error = self.error or "研究线程仍在运行, 未关闭检查点连接"
+            return False
+        conn, self.checkpoint_conn = self.checkpoint_conn, None
+        if conn is None:
+            return True
+        try:
+            conn.close()
+            return True
+        except Exception as e:  # noqa: BLE001 - 关闭失败不应掩盖删除结果
+            self.error = self.error or f"检查点连接关闭失败: {e}"
+            return False
+
+    def emit(self, event: dict):        # 先入可重放日志 (带序号), 再入实时队列: 断线/多标签页时按序号补齐
+        with self.event_lock:
+            self.event_seq += 1
+            record = {**event, "_seq": self.event_seq}
+            self.event_log.append(record)
+            # 只保留最近 500 条: 重放日志用于补偿短时断线, 不是完整归档
+            if len(self.event_log) > 500:
+                del self.event_log[:-500]
+        self.events.put(record)
         msg = _event_to_message(event)
         if msg is None:
             return
@@ -163,6 +319,61 @@ def _persist_session(session: Session):
 SESSIONS: dict[str, Session] = {}
 
 
+def _research_progress(session, node_name: str, node_state: dict) -> dict | None:
+    """理论研究模式的进度摘要: 当前动作 + 待处理缺口 + 已关闭/未决计数。
+
+    只读取已落盘的研究状态, 失败一律返回 None (进度显示不得影响研究本身)。
+    """
+    project_id = (session.request or {}).get("project_id", "")
+    if session.mode != "theory" or not project_id:
+        return None
+    info = (node_state or {}).get("action") or {}
+    try:
+        from src.research.loop import ResearchBudget, TheoryEngine
+        from src.research.schemas import ResearchSpec
+        from src.research.store import KIND_SPEC, ResearchStore, default_db_path
+
+        # 进度查询不得建库: 没有该项目时直接返回 None (避免留下空 sqlite 垃圾)
+        if not default_db_path(project_id).exists():
+            return None
+        store = ResearchStore(project_id)
+        spec_data = None
+        for obj_id in store.version_index(KIND_SPEC):
+            spec_data = store.get(KIND_SPEC, obj_id)
+            break
+        if not spec_data:
+            return None
+        engine = TheoryEngine(ResearchSpec.model_validate(spec_data), store=store,
+                              budget=ResearchBudget())
+        engine.load_runtime()
+        claims = engine._claims()
+        obligations = engine._obligations()
+        return {
+            "action": info.get("action", ""),
+            "reason": info.get("reason", ""),
+            "target_gap": info.get("target_gap", ""),
+            "object_id": info.get("object_id", ""),
+            "available_actions": info.get("available_actions", []),
+            "claims_supported": len([c for c in claims if c.status.value == "supported"]),
+            "claims_refuted": len([c for c in claims if c.status.value == "refuted"]),
+            "claims_open": len([c for c in claims
+                                if c.status.value in ("proposed", "in_progress")]),
+            "claims_blocked": len([c for c in claims if c.status.value == "blocked"]),
+            "obligations_open": len([o for o in obligations if o.status.value == "open"]),
+            "obligations_blocked": len([o for o in obligations if o.status.value == "blocked"]),
+            "evidence": len(engine._evidence()),
+            "actions_used": engine._actions,
+            "max_actions": engine.budget.max_actions,
+            "tool_calls_used": engine._tool_calls,
+            "events": engine.event_digest(limit=8),
+            "needs_confirmation": bool((node_state or {}).get("needs_confirmation")),
+            "delivery_level": (node_state or {}).get("delivery_level", ""),
+            "gate_passed": (node_state or {}).get("gate_passed"),
+        }
+    except Exception:  # noqa: BLE001 - 进度显示失败不得影响研究
+        return None
+
+
 def _final_summary(final: dict) -> dict:
     return {
         "draft_path": final.get("draft_path", ""),
@@ -174,7 +385,229 @@ def _final_summary(final: dict) -> dict:
         "revision_count": final.get("revision_count", 0),
         "total_cost": final.get("total_cost", 0),
         "error": final.get("error", ""),
+        # 理论研究模式
+        "package_dir": final.get("package_dir", ""),
+        "manuscript_path": final.get("manuscript_path", ""),
+        "tex_path": final.get("tex_path", ""),
+        "gate_passed": final.get("gate_passed", None),
+        "gate_report": final.get("gate_report", ""),
+        "delivery_level": final.get("delivery_level", ""),
+        "snapshot_id": final.get("snapshot_id", ""),
+        "project_id": final.get("project_id", ""),
+        "problem_id": final.get("problem_id", ""),
+        "needs_clarification": final.get("needs_clarification", False),
+        # 资源用量与停止原因 (计划书 §9.3)
+        "usage": final.get("usage", {}),
+        "stopped_reason": final.get("stopped_reason", ""),
     }
+
+
+# ----------------------------------------------------------------------
+# 科研工作台: 把研究状态读成前端可渲染的结构 (计划书 §9.5)
+# ----------------------------------------------------------------------
+def problem_index(store) -> list[dict]:
+    """项目下的所有研究问题 (计划书 F0-2 / R6: 问题是一等身份)。
+
+    `ResearchSpec` 的主键就是 `problem_id`, 因此枚举规格即枚举问题。
+    返回顺序稳定 (按 obj_id), 便于前端展示与测试断言。
+    """
+    from src.research.schemas import ResearchSpec
+    from src.research.store import KIND_SPEC
+
+    out: list[dict] = []
+    for obj_id in sorted(store.version_index(KIND_SPEC)):
+        data = store.get(KIND_SPEC, obj_id)
+        if not data:
+            continue
+        try:
+            spec = ResearchSpec.model_validate(data)
+        except Exception:  # noqa: BLE001 - 坏规格不应让整个工作台 500
+            out.append({"problem_id": obj_id, "invalid": True, "statement": ""})
+            continue
+        out.append({
+            "problem_id": obj_id,
+            "statement": (spec.problem_statement or spec.original_request
+                          or spec.direction or ""),
+            "direction": spec.direction,
+            "confirmed": bool(spec.confirmed),
+            "version": store.latest_version(KIND_SPEC, obj_id),
+        })
+    return out
+
+
+def resolve_problem(store, problem_id: str = "") -> tuple[str, dict]:
+    """把 (project, problem_id 可能为空) 解析成**唯一**问题规格 (F0-2)。
+
+    约束:
+    - 指定 `problem_id` 时精确取该规格; 不存在 → `ProblemNotFound`;
+    - 未指定且项目只有一个问题 → 用它 (向后兼容旧请求);
+    - 未指定且项目有多个问题 → `ProblemAmbiguous`, 由调用方返回 409 让用户选择;
+      **绝不**擅自取第一个 (早期实现正是这样把 A 问题的对象显示在 B 问题上)。
+    """
+    from src.research.schemas import ResearchSpec
+    from src.research.store import KIND_SPEC
+
+    if problem_id:
+        data = store.get(KIND_SPEC, problem_id)
+        if not data:
+            raise ProblemNotFound(problem_id)
+        return problem_id, ResearchSpec.model_validate(data)
+
+    index = problem_index(store)
+    if not index:
+        raise ProblemNotFound("")
+    if len(index) > 1:
+        raise ProblemAmbiguous(index)
+    only = index[0]["problem_id"]
+    data = store.get(KIND_SPEC, only)
+    if not data:
+        raise ProblemNotFound(only)
+    return only, ResearchSpec.model_validate(data)
+
+
+class ProblemNotFound(LookupError):
+    def __init__(self, problem_id: str):
+        self.problem_id = problem_id
+        super().__init__(f"项目下没有该研究问题: {problem_id or '(未指定)'}")
+
+
+class ProblemAmbiguous(LookupError):
+    def __init__(self, problems: list[dict]):
+        self.problems = problems
+        super().__init__(f"项目含 {len(problems)} 个研究问题, 必须显式指定 problem_id")
+
+
+def _claims_of_problem(claims: list, problem_id: str, problem_ids: set[str]) -> list:
+    """按研究问题过滤命题 (F0-2 / R6: 对象必须归属到具体问题)。
+
+    归属规则 (必须显式, 不能靠"取第一个"):
+    - 命题记录了 `problem_id` → 只属于该问题;
+    - 命题没有记录 (旧库遗留) 且项目只有**一个问题** → 属于它 (向后兼容);
+    - 命题没有记录且项目有多个问题 → 不归属任何问题, 只在当前问题**完全
+      没有**已标注命题时用于兜底显示 (否则一个遗留命题会出现在每个问题里)。
+    """
+    ids = sorted(problem_ids)
+    if len(ids) <= 1:
+        return list(claims)
+    owned = [c for c in claims if str(getattr(c, "problem_id", "") or "") == problem_id]
+    if owned:
+        return owned
+    return [c for c in claims if not str(getattr(c, "problem_id", "") or "")]
+
+
+def _research_state(project_id: str, problem_id: str = "") -> dict:
+    """汇总**单个研究问题**的对象状态。
+
+    只读: 只从版本化存储取最新版本, 不触发任何研究动作, 也不改变任何结论状态。
+    全部对象都按当前问题过滤 —— 同项目多问题时不得互相串数据 (F0-2 / R6)。
+    """
+    from src.research.loop import OBLIGATION_PRIORITY, TheoryEngine
+
+    # 只读接口: 打开前先确认库文件存在, 避免"查询不存在的项目"顺手建出空库
+    # (否则工作台的一次 404 查询就会在 data/research/ 留下垃圾文件)
+    from src.research.store import (
+        KIND_ATTEMPT,
+        KIND_GAP,
+        KIND_NOVELTY,
+        ResearchStore,
+        default_db_path,
+    )
+
+    if not default_db_path(project_id).exists():
+        raise HTTPException(404, "该项目下没有研究问题规格")
+    store = ResearchStore(project_id)
+    try:
+        problems = problem_index(store)
+        problem_id, spec = resolve_problem(store, problem_id)
+    except ProblemNotFound as e:
+        store.close()
+        raise HTTPException(404, str(e)) from e
+    except ProblemAmbiguous as e:
+        store.close()
+        raise HTTPException(409, {"message": str(e), "problems": e.problems}) from e
+
+    engine = TheoryEngine(spec, store=store, budget=__import__(
+        "src.research.loop", fromlist=["ResearchBudget"]).ResearchBudget())
+    engine.load_runtime()
+
+    # ---- 问题级作用域: 结论/义务/证据/验证/路线只取当前问题的对象 (F0-2 / R6) ----
+    all_claims = engine._claims()
+    # 项目里**全部**命题 id (含别的问题的): 未知 id 与"别的问题的对象"必须区分,
+    # 否则别的问题的实验建议会因为 id 不在本问题里而被当成"未知"照旧展示。
+    known_claim_ids = {str(d.get("id", "")) for d in store.list_latest("claim")}
+    claims = _claims_of_problem(all_claims, problem_id,
+                                {p["problem_id"] for p in problems})
+    scoped_ids = {c.id for c in claims}
+    # 同一项目多问题时, 无法归属到当前问题的对象一律不展示 (fail-closed);
+    # 单问题项目里旧数据 (无 problem_id) 仍然展示, 不凭空清空工作台。
+    multi_problem = len(problems) > 1
+
+    def _owned(claim_id: str) -> bool:
+        """对象是否属于当前问题 (R6)。
+
+        - 明确属于本问题 → 展示;
+        - 明确是项目里**别的问题**的命题 → 不展示 (fail-closed);
+        - 无法归属 (旧数据没有 problem_id, 或 id 未知) → 单问题项目照旧展示,
+          多问题项目下隐藏, 因为此时"归属不明"本身就是问题。
+        """
+        if not claim_id:
+            return not multi_problem
+        if claim_id in scoped_ids:
+            return True
+        if claim_id in known_claim_ids:
+            return False
+        return not multi_problem
+
+    obligations = sorted([o for o in engine._obligations() if _owned(o.claim_id)],
+                         key=lambda o: OBLIGATION_PRIORITY.get(o.kind, 9))
+    verifications = [v for v in engine._verifications() if _owned(v.claim_id)]
+    evidence = [e for e in engine._evidence() if _owned(e.claim_id)]
+    routes = [r for r in engine.routes.routes
+              if _owned(r.target_ref.id if r.target_ref else "")]
+    models = [m for m in engine._models()]
+
+    # 实验中引用**别的问题**命题的建议不得出现在本问题的工作台 (R6)
+    foreign_claim_ids = known_claim_ids - scoped_ids
+
+    # 组装交给深模块 reporting (计划书 §4): 服务端只负责取数、解析问题与过滤,
+    # 字段契约与计数口径集中在那一处, 便于单独测试。
+    from src.research import reporting
+
+    payload = reporting.workbench_projection(
+        project_id=project_id, problem_id=problem_id,
+        claims=claims, obligations=obligations, verifications=verifications,
+        evidence=evidence, routes=routes, models=models, engine=engine, store=store,
+        problems=problems, spec=spec,
+        experiment_specs=[d for d in store.list_latest(KIND_GAP)
+                          if str(d.get("id", "")).startswith("exp-")],
+        novelty_records=[n for n in store.list_latest(KIND_NOVELTY)
+                         if _owned(str(n.get("claim_id", "")))],
+        attempts=[a for a in store.list_latest(KIND_ATTEMPT)
+                  if _owned(a.get("target_claim_id", ""))],
+        foreign_claim_ids=foreign_claim_ids,
+    )
+    store.close()
+    return payload
+
+
+def objects_counts(claims, obligations, evidence, verifications,
+                   models=None, routes=None) -> dict:
+    """工作台统计字段 (F0-3) —— 委托给 `research.reporting` 的唯一实现。
+
+    计数口径必须只有一处 (`reporting.objects_counts`): 这里保留同名入口只是为了
+    不打断既有调用方, 任何口径调整都应改那一处。
+    """
+    from src.research import reporting
+
+    return reporting.objects_counts(claims, obligations, evidence, verifications,
+                                    models=models, routes=routes)
+
+
+def _uncovered_factors(claim) -> list[str]:
+    """结论明确未覆盖的现实因素 (§4.3-4) —— 委托给 `research.reporting`。"""
+    from src.research import reporting
+
+    return reporting.uncovered_factors(claim)
 
 
 def build_initial_state(req: StartRequest) -> dict:
@@ -201,6 +634,88 @@ def build_initial_state(req: StartRequest) -> dict:
     }
 
 
+def build_theory_initial_state(req: StartRequest) -> dict:
+    """理论研究模式初始状态 (对象存于 SQLite, 状态只带指针)。"""
+    project_id = req.project_id.strip() or sanitize_filename(
+        (req.topic or req.request).strip())[:30].strip("_") or "research"
+    # R6: 理论研究也必须带运行身份。此前它不设 run_id, 于是 `session.run_id` 恒为空:
+    # 启动响应无法告诉前端"这是哪一次运行", 产物清单也没法按 run 过滤 ——
+    # 引擎内部另起的 run_id 与产物目录就对不上。这里与 survey 模式一样先定身份,
+    # 引擎通过 `_engine_from_state` 采用同一个值。
+    base = sanitize_filename((req.topic or req.request).strip())[:20].strip("_") or "theory"
+    run_id = f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    # R4: 顶层用户陈述与附件**保持分离** —— 附件文本不再拼进 request,
+    # 而是作为"候选要求"(外部资料定界 + 有界长度)随状态保存, 由用户确认后才写入契约。
+    from src.research.schemas import SourcePolicy, utcnow
+
+    request_text = req.request.strip() or req.topic.strip()
+    rejected_attachments: list[str] = []
+    attachment_candidates = ""
+    attachment_hashes: list[dict] = []
+    if getattr(req, "attachment_ids", None):
+        from src.utils import uploads
+        from src.utils.external_data import wrap_external_with_scan
+
+        # R3: 只认属于本项目的问题说明附件 (A 的附件不得挂到 B)
+        allowed, rejected = uploads.resolve_problem_attachments(
+            list(req.attachment_ids), project_id, req.problem_id or "problem")
+        rejected_attachments = [str(i) for i in rejected]
+        attachment_hashes = [{"attachment_id": i.get("attachment_id"),
+                              "filename": i.get("filename"),
+                              "sha256": i.get("sha256"),
+                              "parse_quality": i.get("parse_quality"),
+                              "visibility_flags": i.get("visibility_flags") or []}
+                             for i in allowed]
+        raw = uploads.problem_text([i.get("attachment_id") for i in allowed],
+                                   project_id, req.problem_id or "problem")
+        if raw:
+            # 按相关片段有界传入 + 显式标注为外部资料 (其中的指令不得执行)
+            bounded = raw[: uploads.MAX_ATTACHMENT_CHARS]
+            attachment_candidates, scan = wrap_external_with_scan(
+                bounded, source="问题说明附件")
+            if scan.suspicious:
+                rejected_attachments.extend(["scan:" + flag for flag in scan.flags])
+    policy = str(getattr(req, "source_policy", "") or "user_kb").strip()
+    allowed_policies = {p.value for p in SourcePolicy}
+    if policy not in allowed_policies:
+        raise HTTPException(400, f"未知的资料授权策略: {policy} (可选: {sorted(allowed_policies)})")
+    # 请求常是整段问题描述: 主题必须是可读短标题, 否则交付物标题会变成一整段
+    # 粘贴文本 (含公式与"请判断…"), 而 project_id 仍用文件系统安全的写法。
+    from src.utils.file_utils import derive_topic
+
+    topic_text = req.topic.strip() or derive_topic(req.request) or req.request.strip()
+    return {
+        "project_id": project_id,
+        "problem_id": req.problem_id or "problem",
+        "topic": topic_text,
+        "request": request_text,
+        "attachment_ids": list(getattr(req, "attachment_ids", None) or []),
+        # R3/R4: 被拒绝的附件 id 与扫描告警; 候选要求 (未确认前的草稿)
+        "attachment_rejected": rejected_attachments,
+        "attachment_candidates": attachment_candidates,
+        # R6: 不可变启动输入快照 —— 续跑与交付清单都基于它, 而不是残缺的 request
+        "input_snapshot": {
+            "request": request_text,
+            "topic": req.topic.strip(),
+            "source_set_id": str(getattr(req, "source_set_id", "") or ""),
+            "source_set_kind": str(getattr(req, "source_set_kind", "") or "kb"),
+            "source_policy": policy,
+            "attachment_ids": list(getattr(req, "attachment_ids", None) or []),
+            "attachments": attachment_hashes,
+            "budget": {"max_actions": req.max_actions, "max_tool_calls": req.max_tool_calls},
+            "created_at": utcnow(),
+        },
+        "mode": "theory",
+        "run_id": run_id,
+        "source_policy": policy,
+        "budget_max_actions": req.max_actions if req.max_actions is not None else 40,
+        "budget_max_tool_calls": req.max_tool_calls if req.max_tool_calls is not None else 60,
+        "step_index": 0,
+        "interactive": True,
+        "current_phase": "theory_start",
+    }
+
+
 class _StdoutBridge:
     """把后台图线程的 print 输出桥接为 SSE 'log' 事件, 同时保留控制台输出。
 
@@ -208,7 +723,7 @@ class _StdoutBridge:
     通过本桥接器逐行转发给前端, 让用户能实时看到子智能体调用过程。
     """
 
-    def __init__(self, session: "Session", orig):
+    def __init__(self, session: Session, orig):
         self.session = session
         self.orig = orig
         self._buf = ""
@@ -259,9 +774,24 @@ def _run_session(session: Session, initial_state: dict | None = None):
                     interrupted = True
                     intr = event["__interrupt__"][0]
                     session.status = "waiting"
-                    session.emit({"type": "interrupt", "payload": intr.value})
+                    # F2: 为每个 interrupt 生成稳定 ID, 供前端回传与幂等去重
+                    try:
+                        from src.research.schemas import hash_payload
+
+                        interrupt_id = "int-" + hash_payload(
+                            {"thread": session.thread_id, "n": len(session.answered_interrupts),
+                             "value": intr.value if isinstance(intr.value, (dict, list, str))
+                             else str(intr.value)})[:12]
+                    except Exception:  # noqa: BLE001
+                        interrupt_id = f"int-{len(session.answered_interrupts)}"
+                    session.pending_interrupt_id = interrupt_id
+                    payload = intr.value if isinstance(intr.value, dict) else {"value": intr.value}
+                    payload = {**payload, "interrupt_id": interrupt_id}
+                    session.emit({"type": "interrupt", "payload": payload})
                     _persist_session(session)
                     response = session.responses.get()  # 阻塞等待用户响应
+                    session.answered_interrupts.append(interrupt_id)
+                    session.pending_interrupt_id = ""
                     if response is _STOP or session.stop_flag.is_set():
                         session.emit({"type": "stopped"})
                         session.status = "stopped"
@@ -273,7 +803,8 @@ def _run_session(session: Session, initial_state: dict | None = None):
                     for node_name, node_state in event.items():
                         # planner 提取出真实主题后回填会话 topic (start 时只有原始 request,
                         # 自然语言入口下 topic 是超长指令而非真实主题), 使历史列表显示真实主题
-                        topic = ((node_state or {}).get("research_topic") or "").strip()
+                        topic = ((node_state or {}).get("research_topic")
+                                 or (node_state or {}).get("topic") or "").strip()
                         if topic and topic != session.topic:
                             session.topic = topic
                             _persist_session(session)
@@ -281,6 +812,7 @@ def _run_session(session: Session, initial_state: dict | None = None):
                             "type": "node",
                             "name": node_name,
                             "text": _describe_node(node_name, node_state),
+                            "research": _research_progress(session, node_name, node_state),
                         })
             if session.stop_flag.is_set():
                 session.emit({"type": "stopped"})
@@ -311,12 +843,107 @@ app = FastAPI(title="AIR智能体研究系统")
 
 @app.get("/")
 def index():
-    if not INDEX_HTML.exists():
+    # P2: 缺构建产物时给**可操作的错误提示**, 不返回未构建的源码模板
+    if not WEB_BUILT_INDEX.is_file() and not _web_dev_mode():
+        return HTMLResponse(_NOT_BUILT_PAGE, status_code=503, headers=_csp_headers())
+    page = _index_page_path()
+    if not page.is_file():
         raise HTTPException(404, "前端页面不存在: src/web/index.html")
-    return HTMLResponse(
-        INDEX_HTML.read_text(encoding="utf-8-sig"),
-        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
-    )
+    # F3: 本地应用的最小 CSP。页面不再从 CDN 取脚本 (marked 已改为本地模块),
+    # 因此脚本只能来自同源; 禁止内联脚本与 object, 限制连接/图片/字体来源。
+    return HTMLResponse(page.read_text(encoding="utf-8-sig"),
+                        headers=_csp_headers())
+
+
+@app.get("/assets/{name:path}")
+def web_asset(name: str):
+    """Vite 构建产物 (计划书 §2 F4): 只从 src/web/assets 提供。"""
+    path = safe_join(WEB_ASSETS, name)
+    if path is None or not path.is_file():
+        raise HTTPException(404, "前端资源不存在")
+    media = ("application/javascript" if path.suffix == ".js"
+             else "text/css" if path.suffix == ".css"
+             else "application/octet-stream")
+    return FileResponse(str(path), media_type=media,
+                        headers={"Cache-Control": "no-cache"})
+
+
+
+def _normalize_request_text(text: str) -> str:
+    return re.sub(r"\s+", "", (text or "").strip())
+
+
+def _existing_spec_conflict(store, problem_id: str, request_text: str,
+                            source_summary=None) -> dict | None:
+    """同一 problem_id 已存在规格时的冲突判定 (F0-4 / P0-2)。
+
+    冲突有两种: 研究请求文本不同, 或同一请求在新资料条件下判定出**不同的研究类型**。
+    返回 None 表示可以沿用; 否则给出选项 (resume / new_problem) 让用户选择,
+    不静默继续旧题。
+    """
+    from src.research.question_planner import formulate
+    from src.research.schemas import ResearchSpec
+    from src.research.store import KIND_SPEC
+
+    existing = store.get(KIND_SPEC, problem_id)
+    if not existing:
+        return None
+    try:
+        spec = ResearchSpec.model_validate(existing)
+    except Exception:  # noqa: BLE001 - 坏规格按冲突处理, 不静默覆盖
+        return {"message": f"已有规格 {problem_id} 无法解析, 请换用新的 problem_id",
+                "problem_id": problem_id, "options": ["new_problem", "resume"]}
+    stored_request = spec.original_request or spec.problem_statement or spec.direction
+    if not _normalize_request_text(request_text):
+        return None
+    if _normalize_request_text(stored_request) == _normalize_request_text(request_text):
+        old_kind = spec.contract.task_kind.value if spec.contract else ""
+        if source_summary is not None and old_kind:
+            new_kind = formulate(request_text, source_summary=source_summary).task_kind.value
+            if new_kind != old_kind:
+                return {
+                    "message": (f"问题 {problem_id} 已有契约 ({old_kind}), "
+                                f"当前输入判定为 {new_kind}: 研究类型变了, 不静默沿用"),
+                    "problem_id": problem_id,
+                    "existing_contract_kind": old_kind,
+                    "requested_contract_kind": new_kind,
+                    "options": ["resume", "new_problem"],
+                    "hint": "沿用原契约请用 resume=true; 按新契约研究请换一个 problem_id",
+                }
+        return None
+    return {
+        "message": (f"问题 {problem_id} 已在研究另一个请求, 不覆盖已有规格"),
+        "problem_id": problem_id,
+        "existing_request": stored_request,
+        "requested": request_text,
+        "options": ["resume", "new_problem"],
+        "hint": "继续原问题请用 resume=true; 研究新问题请换一个 problem_id",
+    }
+
+
+@app.get("/api/sources")
+def list_sources():
+    """资料源清单 (计划书 §3 R0): 每个已建资料库的规模、范围与索引状态。
+
+    只枚举已存在的知识底座, 不创建新目录。
+    """
+    from src.kb.sources import list_source_sets
+
+    return {"sources": [s.to_dict() for s in list_source_sets()]}
+
+
+@app.get("/api/sources/{source_set_id}")
+def describe_source(source_set_id: str):
+    """单个资料源的可读范围与绑定校验结果。"""
+    from src.kb.sources import describe_source_set, validate_binding
+
+    check = validate_binding(source_set_id)
+    return {"source_set_id": source_set_id,
+            "source_set": check["source_set"],
+            "bindable": check["ok"],
+            "reason": check["reason"],
+            "warnings": check["warnings"],
+            "describe": describe_source_set(source_set_id).describe()}
 
 
 @app.post("/api/sessions")
@@ -325,6 +952,7 @@ def start_session(req: StartRequest):
         raise HTTPException(400, "研究主题或自然语言描述至少填写一项")
     thread_id = sanitize_filename((req.topic or req.request).strip()) + "_" + uuid.uuid4().hex[:6]
     session_id = uuid.uuid4().hex
+    mode = (req.mode or "survey").strip().lower()
     checkpointer, conn = _make_checkpointer(session_id)
     session = Session(
         thread_id,
@@ -332,6 +960,7 @@ def start_session(req: StartRequest):
         session_id=session_id,
         checkpointer=checkpointer,
         checkpoint_conn=conn,
+        mode=mode,
     )
     session.request = {
         "topic": req.topic,
@@ -341,32 +970,154 @@ def start_session(req: StartRequest):
         "time_range": req.time_range,
         "max_revisions": req.max_revisions,
         "skip_retrieval": req.skip_retrieval,
+        "mode": mode,
+        "project_id": req.project_id,
+        "problem_id": req.problem_id,
+        "max_actions": req.max_actions,
+        "max_tool_calls": req.max_tool_calls,
+        # R2/R6: 附件 id 必须随会话落盘 —— 否则续跑/历史回看只能看到一句自由请求,
+        # "题面在附件里"这件事就无法复现 (附件本体也无法重新读取)。
+        "attachment_ids": list(req.attachment_ids or []),
+        "source_set_id": req.source_set_id,
+        "source_set_kind": req.source_set_kind,
+        "source_policy": req.source_policy,
     }
+    if mode == "theory":
+        initial_state = build_theory_initial_state(req)
+        # R0: 资料源绑定必须在确认研究之前校验 —— 绑定不可用时要明确告知,
+        # 而不是让研究静默退回"无知识库"
+        if (req.source_set_id or "").strip():
+            from src.kb.sources import validate_binding
+
+            check = validate_binding(req.source_set_id.strip())
+            if not check["ok"]:
+                raise HTTPException(409, {
+                    "message": f"资料源不可用, 请重新选择: {check['reason']}",
+                    "source_set_id": req.source_set_id,
+                    "reason": check["reason"],
+                })
+            initial_state["source_set_id"] = req.source_set_id.strip()
+            initial_state["source_set_warnings"] = check["warnings"]
+        # 落盘 spec 供图节点重建 (自动区分明确问题与研究方向)。
+        try:
+            from src.kb.sources import build_source_summary
+            from src.research.schemas import SourcePolicy
+            from src.research.store import KIND_SPEC, ResearchStore
+
+            request_text = (initial_state.get("request") or initial_state.get("topic") or "")
+            source_summary = build_source_summary(
+                source_set_id=initial_state.get("source_set_id", ""),
+                source_set_kind=req.source_set_kind or "kb",
+                request=request_text,
+            )
+            # 授权自主检索时, 没有预建资料库也算合法输入 (P0-1 场景 ②)
+            source_summary.autonomous_retrieval = (
+                (req.source_policy or "user_kb") in ("autonomous", "both"))
+            store = ResearchStore(initial_state["project_id"])
+            try:
+                conflict = _existing_spec_conflict(
+                    store, initial_state["problem_id"], request_text,
+                    source_summary=source_summary)
+                if conflict is not None and not req.resume:
+                    # 不覆盖已确认的问题: 让用户选择继续还是另建
+                    store.close()
+                    raise HTTPException(409, conflict)
+                if conflict is not None:
+                    initial_state["spec_reused"] = True
+                stored = store.get(KIND_SPEC, initial_state["problem_id"])
+                if stored:
+                    # 已有规格: 契约随之复用, 不重新判定研究类型
+                    initial_state["contract"] = stored.get("contract")
+                else:
+                    from src.research.question_planner import build_spec_from_input
+
+                    spec = build_spec_from_input(
+                        request=initial_state.get("request", ""),
+                        topic=initial_state.get("topic", ""),
+                        project_id=initial_state["project_id"],
+                        problem_id=initial_state["problem_id"],
+                        source_summary=source_summary,
+                    )
+                    # 绑定资料源写进规格: 研究图据此找到用户选定的资料库
+                    if initial_state.get("source_set_id"):
+                        spec.source_set_id = initial_state["source_set_id"]
+                        spec.source_set_kind = req.source_set_kind or "kb"
+                        spec.source_set_note = "; ".join(
+                            initial_state.get("source_set_warnings") or [])
+                    spec.source_policy = SourcePolicy(req.source_policy or "user_kb")
+                    store.put(KIND_SPEC, initial_state["problem_id"],
+                              spec.model_dump(mode="json"))
+                    initial_state["contract"] = spec.contract.model_dump(mode="json")
+            finally:
+                store.close()
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            print(f"  [warning] theory spec 落盘失败: {e}")
+    else:
+        initial_state = build_initial_state(req)
     SESSIONS[thread_id] = session
-    initial_state = build_initial_state(req)
     session.run_id = initial_state.get("run_id", "")
     # 立即落盘一条 running 记录, 保证"未跑到 interrupt 就关闭"的会话也能在历史列表被看到并续跑
     _persist_session(session)
-    threading.Thread(target=_run_session, args=(session, initial_state), daemon=True).start()
-    return {"thread_id": thread_id, "session_id": session_id}
+    worker = threading.Thread(target=_run_session, args=(session, initial_state), daemon=True)
+    # 登记后台线程: shutdown()/delete_session 必须先等它退出再关检查点连接 (见 shutdown)
+    session.worker_thread = worker
+    worker.start()
+    # 回传项目/问题 ID 与问题契约: 前端据此展示研究路径并调用对象级接口
+    return {
+        "thread_id": thread_id,
+        "session_id": session_id,
+        "mode": mode,
+        "run_id": session.run_id,
+        "project_id": initial_state.get("project_id", ""),
+        "problem_id": initial_state.get("problem_id", ""),
+        "contract": initial_state.get("contract"),
+        "spec_reused": bool(initial_state.get("spec_reused")),
+        "resumed": bool(req.resume),
+    }
 
 
 @app.get("/api/sessions/{thread_id}/events")
-async def session_events(thread_id: str):
+async def session_events(thread_id: str, last_event_id: int = 0):
+    """SSE 事件流 (计划书 F2)。
+
+    - 每个事件带 `id:` (递增序号) 与 data 里的 `_seq`;
+    - `last_event_id` 给定时先**回放**缺失事件 (断线重连不丢中断/完成事件);
+    - 事件同时保留在 `session.event_log`, 多标签页各自读日志, 不再争抢同一队列。
+    """
     session = SESSIONS.get(thread_id)
     if not session:
         raise HTTPException(404, "会话不存在")
 
+    def _frame(event: dict, seq: int) -> str:
+        payload = {k: v for k, v in event.items() if k != "_seq"}
+        return (f"id: {seq}\n"
+                f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+
     async def gen():
+        with session.event_lock:
+            replayed = [e for e in session.event_log if e.get("_seq", 0) > last_event_id]
+            current_seq = session.event_seq
+        if replayed:
+            for event in replayed:
+                seq = event.get("_seq", 0)
+                yield _frame(event, seq)
+                if event.get("type") in ("done", "stopped", "error"):
+                    return
         # 会话已结束且客户端 (重)连接 → 立即补发终止事件, 避免空转
         if session.status == "done" and session.final_state is not None:
-            yield f"data: {json.dumps({'type': 'done', 'state': _final_summary(session.final_state)}, ensure_ascii=False)}\n\n"
+            current_seq += 1
+            yield _frame({"type": "done",
+                          "state": _final_summary(session.final_state)}, current_seq)
             return
         if session.status in ("stopped", "error"):
             kind = "stopped" if session.status == "stopped" else "error"
-            yield f"data: {json.dumps({'type': kind, 'message': session.error or ''}, ensure_ascii=False)}\n\n"
+            current_seq += 1
+            yield _frame({"type": kind, "message": session.error or ""}, current_seq)
             return
-        yield f"data: {json.dumps({'type': 'connected'}, ensure_ascii=False)}\n\n"
+        current_seq += 1
+        yield _frame({"type": "connected"}, current_seq)
         while True:
             try:
                 event = await asyncio.to_thread(session.events.get, True, 0.5)
@@ -375,7 +1126,8 @@ async def session_events(thread_id: str):
                 continue
             if event is None:
                 break
-            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            seq = event.get("_seq", 0)
+            yield _frame(event, seq)
             if event.get("type") in ("done", "stopped", "error"):
                 break
 
@@ -386,15 +1138,57 @@ async def session_events(thread_id: str):
     )
 
 
-@app.post("/api/sessions/{thread_id}/respond")
-def respond(thread_id: str, req: RespondRequest):
+@app.get("/api/sessions/{thread_id}/state")
+def session_state(thread_id: str):
+    """会话当前状态 (计划书 F2 状态补偿): 重连后据此校正页面, 不依赖事件是否到齐。"""
     session = SESSIONS.get(thread_id)
     if not session:
         raise HTTPException(404, "会话不存在")
+    return {
+        "thread_id": thread_id,
+        "session_id": session.session_id,
+        "status": session.status,
+        "mode": session.mode,
+        "project_id": session.request.get("project_id", ""),
+        "problem_id": session.request.get("problem_id", ""),
+        "run_id": session.run_id,
+        "event_seq": session.event_seq,
+        "pending_interrupt_id": session.pending_interrupt_id,
+        "answered_interrupts": list(session.answered_interrupts),
+        "error": session.error or "",
+        "final_state": (_final_summary(session.final_state)
+                        if session.final_state else None),
+    }
+
+
+@app.post("/api/sessions/{thread_id}/respond")
+def respond(thread_id: str, req: RespondRequest):
+    """提交暂停点响应 (计划书 F2)。
+
+    约束:
+    - 只接受**等待态**会话: 运行中/已结束的响应会被拒绝 (避免把回答送错对象);
+    - 同一 interrupt 只接受一次 (幂等键 = interrupt_id), 重复提交返回 409 而不是
+      再喂一次响应 —— 否则重试会把同一回答施加两遍。
+    """
+    session = SESSIONS.get(thread_id)
+    if not session:
+        raise HTTPException(404, "会话不存在")
+    if session.status != "waiting":
+        raise HTTPException(409, f"会话当前状态为 {session.status}, 不接受响应")
+    if req.interrupt_id and session.pending_interrupt_id \
+            and req.interrupt_id != session.pending_interrupt_id:
+        raise HTTPException(409, {
+            "message": "响应对应的暂停点已过期",
+            "expected": session.pending_interrupt_id,
+            "received": req.interrupt_id,
+        })
+    if req.interrupt_id and req.interrupt_id in session.answered_interrupts:
+        return {"ok": True, "duplicate": True,
+                "detail": "该暂停点已回答过, 未重复施加"}
     session.messages.append({"role": "user", "text": req.response})
     session.responses.put(req.response)
     _persist_session(session)
-    return {"ok": True}
+    return {"ok": True, "interrupt_id": req.interrupt_id or session.pending_interrupt_id}
 
 
 @app.post("/api/sessions/{thread_id}/stop")
@@ -424,6 +1218,7 @@ def resume_session(session_id: str):
         return {"thread_id": thread_id, "session_id": session_id, "status": existing.status}
 
     checkpointer, conn = _make_checkpointer(session_id)
+    stored_request = dict(record.get("request") or {})
     session = Session(
         thread_id,
         topic=record.get("topic", ""),
@@ -431,8 +1226,9 @@ def resume_session(session_id: str):
         checkpointer=checkpointer,
         checkpoint_conn=conn,
         run_id=record.get("run_id", ""),
+        mode=stored_request.get("mode", "survey"),
     )
-    session.request = dict(record.get("request") or {})
+    session.request = stored_request
     session.created_at = record.get("created_at", session.created_at)
     # 恢复历史对话, 避免续跑落盘时用空 messages 覆盖历史记录
     session.messages = list(record.get("messages", []))
@@ -451,14 +1247,237 @@ def resume_session(session_id: str):
         req = session.request
         if req.get("topic") or req.get("request"):
             try:
-                initial_state = build_initial_state(StartRequest(**req))
+                start_req = StartRequest(**req)
+                initial_state = (build_theory_initial_state(start_req)
+                                 if session.mode == "theory" else build_initial_state(start_req))
             except Exception:
                 initial_state = None
         if initial_state is None:
             raise HTTPException(400, "无 checkpoint 且缺少启动参数, 无法恢复")
 
-    threading.Thread(target=_run_session, args=(session, initial_state), daemon=True).start()
+    worker = threading.Thread(target=_run_session, args=(session, initial_state), daemon=True)
+    session.worker_thread = worker  # 续跑同样要登记, 关闭连接前需等它退出
+    worker.start()
     return {"thread_id": thread_id, "session_id": session_id, "status": session.status}
+
+
+@app.get("/favicon.ico")
+def favicon():
+    """浏览器总会请求 /favicon.ico: 给一个图标而不是刷 404 日志。"""
+    return _favicon_response()
+
+
+@app.get("/favicon.svg")
+def favicon_svg():
+    """页面模板用 `<link rel="icon" href="/favicon.svg">` 引用 svg 图标。
+
+    之前只登记了 `.ico` 路由, 于是每次打开页面都会多一条
+    `GET /favicon.svg 404` 的服务端日志 (图标其实就在构建产物里)。
+    """
+    return _favicon_response()
+
+
+def _favicon_response():
+    """图标来源: 优先构建产物, 再退回源码 public 目录 (未构建时也能显示)。"""
+    for icon in (WEB_DIST / "favicon.svg", WEB_DIR / "public" / "favicon.svg"):
+        if icon.is_file():
+            return FileResponse(str(icon), media_type="image/svg+xml",
+                                headers={"Cache-Control": "no-cache"})
+    return Response(status_code=204)
+
+
+@app.post("/api/uploads")
+def upload_attachments(
+    kind: str = Form("literature"),
+    project_id: str = Form(""),
+    problem_id: str = Form(""),
+    topic: str = Form(""),
+    files: list[UploadFile] = File(default=[]),
+):
+    """上传附件: kind=problem 补充问题说明, kind=literature 人工补充文献。
+
+    逐文件返回结果: 单个文件失败不影响其它文件; 解析失败保留原件并如实报错。
+    """
+    from src.utils import uploads
+
+    if kind not in ("problem", "literature"):
+        raise HTTPException(400, f"未知的上传用途: {kind}")
+    if not files:
+        raise HTTPException(400, "没有收到文件")
+    if kind == "literature" and not topic.strip():
+        raise HTTPException(400, "补充文献需要指定资料库主题")
+
+    results = []
+    # R7: 用上传声明的大小在**读取之前**拒绝, 并限制文件数与单请求总量
+    declared = [uploads.declared_size(item) for item in files]
+    declared_total = sum(size for size in declared if size)
+    batch_error = uploads.check_batch(len(files), declared_total)
+    if batch_error:
+        raise HTTPException(413, batch_error)
+    # 声明大小可以撒谎 (缺失/OA 客户端不填), 因此请求级总量还要按**实际**字节数再记一次
+    budget = uploads.ByteBudget(limit=uploads.MAX_REQUEST_BYTES)
+    for index, (item, size) in enumerate(zip(files, declared)):
+        name = item.filename or "upload"
+        # 声明大小缺失 (None) 不能当成 0: 那是"空文件", 而缺失只能交给流式上限兜底
+        if size is not None:
+            early = uploads.check(name, size)
+            if early:
+                results.append({"ok": False, "filename": name, "error": early})
+                continue
+        if budget.remaining() <= 0:
+            # 预算已用尽: 不再逐个"再拒一次", 剩下的文件一次性如实告知
+            results.append({"ok": False, "filename": name,
+                            "error": str(uploads.UploadRequestTooLarge(
+                                budget.limit, budget.used))})
+            skipped = [f.filename or "upload" for f in files[index + 1:]]
+            if skipped:
+                results.append({"ok": False, "filename": "(其余文件)",
+                                "error": "本次请求已达到总量上限, 未处理剩余文件: "
+                                         + ", ".join(skipped)})
+            break
+        try:
+            # R7: 分块流式落盘, 暂存路径随后交给保存逻辑接管
+            with uploads.staged_upload(item, declared_size=size, budget=budget) as staged:
+                if kind == "problem":
+                    results.append(uploads.save_problem_attachment(
+                        project_id.strip(), problem_id.strip(), name, staged.path))
+                else:
+                    results.append(uploads.save_literature(topic.strip(), name, staged.path))
+        except uploads.UploadRequestTooLarge as e:
+            # 请求级超限: 其余文件不再尝试, 明确告知本次上传被拒
+            results.append({"ok": False, "filename": name, "error": str(e)})
+            skipped = [f.filename or "upload" for f in files[index + 1:]]
+            results.append({"ok": False, "filename": "(其余文件)",
+                            "error": "本次请求已达到总量上限, 未处理剩余文件"
+                                     + (f": {', '.join(skipped)}" if skipped else "")})
+            break
+        except uploads.UploadTooLarge as e:
+            results.append({"ok": False, "filename": name, "error": str(e)})
+    ok = sum(1 for r in results if r.get("ok"))
+    return {"kind": kind, "ok": ok, "failed": len(results) - ok, "results": results}
+
+
+@app.get("/api/uploads")
+def list_attachments(project_id: str = "", topic: str = "", kind: str = "",
+                     problem_id: str = ""):
+    """列出附件登记 (R1: 按用途分别过滤后合并, 不做两个互斥字段的交集)。"""
+    from src.utils import uploads
+
+    if kind and kind not in uploads.KINDS:
+        raise HTTPException(400, f"未知的上传用途: {kind}")
+    return {"attachments": uploads.list_for(project_id=project_id, topic=topic,
+                                            kind=kind, problem_id=problem_id)}
+
+
+@app.delete("/api/uploads/{attachment_id}")
+def delete_attachment(attachment_id: str, project_id: str = "", topic: str = ""):
+    from src.utils import uploads
+
+    if not uploads.delete(attachment_id, project_id=project_id, topic=topic,
+                          remove_file=True):
+        raise HTTPException(404, f"附件不存在或不属于该项目/主题: {attachment_id}")
+    return {"deleted": attachment_id}
+
+
+@app.get("/api/research/{project_id}/state")
+def research_state(project_id: str, problem_id: str = ""):
+    """科研工作台数据: 问题/结论状态表/未决义务/证据定位/实验规格/路线/门槛。
+
+    只读接口, 不触发研究动作。同项目多问题时必须显式给出 `problem_id`,
+    否则返回 409 与可选问题清单 (F0-2)。
+    """
+    return _research_state(project_id, problem_id)
+
+
+@app.get("/api/research/{project_id}/problems")
+def research_problems(project_id: str):
+    """项目下的研究问题清单 (供前端切换, 不猜测当前问题)。"""
+    from src.research.store import ResearchStore, default_db_path
+
+    if not default_db_path(project_id).exists():
+        raise HTTPException(404, "该项目不存在")
+    store = ResearchStore(project_id)
+    try:
+        return {"project_id": project_id, "problems": problem_index(store)}
+    finally:
+        store.close()
+
+
+@app.post("/api/research/{project_id}/feedback")
+def research_feedback(project_id: str, req: RespondRequest, problem_id: str = ""):
+    """把自然语言研究意见转成**对象级动作**并施加 (计划书 §5.1)。
+
+    反馈必须落到具体 assumption_id / claim_id / step_id; 无法确定对象时不猜,
+    返回 `needs_clarification` 与澄清问题, 研究状态保持不变。
+    作用对象限定在当前研究问题内 —— 不得改到同项目的另一个问题。
+    """
+    from src.research.loop import ResearchBudget, TheoryEngine
+    from src.research.store import ResearchStore, default_db_path
+
+    if not default_db_path(project_id).exists():
+        raise HTTPException(404, "该项目下没有研究问题规格")
+    store = ResearchStore(project_id)
+    try:
+        try:
+            _, spec = resolve_problem(store, problem_id or req.problem_id)
+        except ProblemNotFound as e:
+            raise HTTPException(404, str(e)) from e
+        except ProblemAmbiguous as e:
+            raise HTTPException(409, {"message": str(e), "problems": e.problems}) from e
+        engine = TheoryEngine(spec, store=store, budget=ResearchBudget())
+        engine.load_runtime()
+        outcome = engine.submit_feedback(req.response, target_object_id=req.object_id)
+    finally:
+        store.close()
+    status = 200 if outcome.get("ok") else 400
+    return JSONResponse(content=outcome, status_code=status)
+
+
+@app.post("/api/research/fork")
+def fork_research(req: ForkRequest):
+    """fork: 从指定快照派生新的研究问题 (明确哪些结论被导入、哪些需重算)。
+
+    与 resume 的区别: resume 继续**同一**问题的未完成动作; fork 新建问题,
+    只把指定结论作为待重验前提导入, **不复制**任何验证记录。
+
+    F0-5: 派生必须在同一步里创建新问题的 `ResearchSpec`, 并返回可导航的
+    `problem_id`; 只导入命题而不建规格的话, 新问题在工作台里根本打不开。
+    """
+    project_id = (req.project_id or "").strip()
+    if not project_id:
+        raise HTTPException(400, "缺少 project_id")
+    from src.research.loop import ResearchBudget, TheoryEngine
+    from src.research.store import ResearchStore, default_db_path
+
+    if not default_db_path(project_id).exists():
+        raise HTTPException(404, "该项目下没有研究问题规格")
+    store = ResearchStore(project_id)
+    try:
+        try:
+            spec_id, spec = resolve_problem(store, req.problem_id)
+        except ProblemNotFound as e:
+            raise HTTPException(404, str(e)) from e
+        except ProblemAmbiguous as e:
+            raise HTTPException(409, {"message": str(e), "problems": e.problems}) from e
+        engine = TheoryEngine(spec, store=store, budget=ResearchBudget())
+        # 载入路线与失败档案, 保证派生问题继承失败记忆 (不重复犯错)
+        engine.load_runtime()
+        outcome = engine.fork_from_snapshot(
+            source_snapshot_id=req.snapshot_id, claim_ids=req.claim_ids or None,
+            problem_id=req.new_problem_id)
+    finally:
+        store.close()
+    if not outcome.get("ok"):
+        raise HTTPException(400, outcome.get("reason", "派生失败"))
+    new_problem_id = outcome.get("new_problem_id", "")
+    # 派生后必须能直接打开新问题 (而不是 404)
+    check = ResearchStore(project_id)
+    try:
+        navigable = bool(new_problem_id) and check.get("spec", new_problem_id) is not None
+    finally:
+        check.close()
+    return {"project_id": project_id, "spec_id": spec_id,
+            "problem_id": new_problem_id, "navigable": navigable, **outcome}
 
 
 @app.delete("/api/sessions/{session_id}")
@@ -481,23 +1500,29 @@ def delete_session(session_id: str):
             sess.responses.put(_STOP)
         except Exception:
             pass
+        # 先关检查点连接, 否则第 3 步的 unlink 在 Windows 上会因句柄未释放而失败
+        sess.shutdown()
     # 2. 删除对话记录
     if delete_conversation(session_id):
         removed.append(f"data/conversations/{session_id}.json")
     # 3. 删除检查点 (每会话一个 SQLite, 含 WAL/SHM)
+    closed = True
     try:
         for suffix in ("", "-shm", "-wal"):
             ckpt = CHECKPOINT_DIR / f"{session_id}.sqlite{suffix}"
             if ckpt.exists():
                 ckpt.unlink()
         removed.append(f"data/checkpoints/{session_id}.sqlite")
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001 - 句柄未释放时必须如实报告, 不能假装删掉了
+        closed = False
+        removed.append(f"data/checkpoints/{session_id}.sqlite 删除失败: {e}")
     # 4. 删除产出文件夹 outputs/{run_id}/
     if run_id:
-        out_dir = (OUTPUT_DIR / run_id).resolve()
+        out_dir = safe_join(output_dir(), run_id)
         try:
-            if out_dir.exists() and str(out_dir).startswith(str(OUTPUT_DIR.resolve())):
+            # 只允许删除 outputs/ 之下、且非 outputs/ 本身的目标 (拒绝越界与同前缀兄弟目录)
+            if (out_dir is not None and out_dir.exists()
+                    and out_dir != output_dir().resolve()):
                 shutil.rmtree(out_dir)
                 removed.append(f"outputs/{run_id}")
         except Exception:
@@ -505,7 +1530,7 @@ def delete_session(session_id: str):
     # 5. 删除检索缓存 (data/pipeline_cache/{topic}.json)
     if topic:
         try:
-            from src.utils.pipeline_cache import resolve_cache_topic, CACHE_DIR
+            from src.utils.pipeline_cache import CACHE_DIR, resolve_cache_topic
 
             resolved = resolve_cache_topic(topic)
             if resolved:
@@ -515,10 +1540,50 @@ def delete_session(session_id: str):
                     removed.append(f"data/pipeline_cache/{cache_path.name}")
         except Exception:
             pass
-    # 6. 清空向量库 (RAG 检索数据, 全局共享无法按主题精确删除, 单项目场景下清空)
+    # 6. 共享检索资源 (向量库 / 主题缓存): **只有确认没有其他会话再用**才清。
+    #    早期实现在这里直接清空三个全局 collection —— 多项目共用实例时, 删掉会话 A
+    #    会把会话 B 的检索资料一起毁掉 (计划书 P0-4: 数据损伤)。
+    #    判定依据: 除本会话外, 是否还有会话引用同一 project_id。
+    owning_project = str(record.get("project_id", "")
+                         or (record.get("request") or {}).get("project_id", "") or "")
+    shared_removed, shared_kept = _cleanup_shared_retrieval_resources(
+        session_id, owning_project)
+    removed.extend(shared_removed)
+    return {"ok": True, "removed": removed, "checkpoint_removed": closed,
+            "kept_shared": shared_kept}
+
+
+def _has_other_session_using(project_id: str, exclude_session_id: str) -> bool:
+    """是否还有**其他**会话引用同一 project_id (共享资料的存活判据)。"""
+    if not project_id:
+        return False
     try:
-        from src.rag.vector_store import clear_collection
+        for item in list_conversations():
+            if str(item.get("session_id", "")) == exclude_session_id:
+                continue
+            if str(item.get("project_id", "")) == project_id:
+                return True
+    except Exception:
+        # 读不到会话清单时按"可能还有别人"处理: 宁可少删, 不可误删共享资料
+        return True
+    return False
+
+
+def _cleanup_shared_retrieval_resources(session_id: str, project_id: str):
+    """按所有权清理共享检索资源。返回 `(已删列表, 保留列表)`。
+
+    只删除**属于该会话且无其他会话引用**的资源; 有共享引用时明确记入"保留", 让调用方
+    (与人) 看到"这次没有删掉共享库", 而不是静默清空。
+    """
+    removed: list[str] = []
+    kept: list[str] = []
+    shared = _has_other_session_using(project_id, session_id)
+    if shared:
+        kept.append(f"data/chroma (向量库): 仍有其他会话引用项目 {project_id}, 已保留")
+        return removed, kept
+    try:
         from src.config import CHROMA_CONFIG
+        from src.rag.vector_store import clear_collection
 
         for name in (CHROMA_CONFIG["collection_name"],
                      CHROMA_CONFIG["fulltext_collection"],
@@ -530,7 +1595,30 @@ def delete_session(session_id: str):
         removed.append("data/chroma (向量库)")
     except Exception:
         pass
-    return {"ok": True, "removed": removed}
+    return removed, kept
+
+
+def shutdown_sessions() -> int:
+    """关闭所有活跃会话的检查点连接并清空注册表 (进程退出 / 测试清理用)。
+
+    返回仍然关闭失败的会话数。研究结论已落在 SQLite 研究库里, 关连接不会丢结论;
+    未关闭的句柄只会让检查点文件暂时无法删除 —— 这一点必须如实返回, 不能假装成功。
+
+    先给**所有**会话发停止信号, 再逐个等线程退出: 逐个"发信号→等待"会让线程串行
+    收敛, 多会话时白等多个超时。
+    """
+    sessions = [s for s in (SESSIONS.pop(t, None) for t in list(SESSIONS)) if s is not None]
+    for session in sessions:
+        session.stop_flag.set()
+        try:
+            session.responses.put(_STOP)
+        except Exception:  # noqa: BLE001 - 队列已满/已关闭都不影响关闭连接
+            pass
+    failed = 0
+    for session in sessions:
+        if not session.shutdown():
+            failed += 1
+    return failed
 
 
 @app.get("/api/conversations")
@@ -609,33 +1697,120 @@ def get_context_notes(topic: str):
     }
 
 
+def _artifact_metadata(root: Path) -> dict:
+    """交付目录的归属信息 (project/problem/run + 交付级别)。
+
+    F3: 文件清单必须能按当前 run/问题过滤, 而不是把全部 outputs/ 递归列出。
+    归属来自交付包里的 `manifest.json` / `research_spec.json`。
+    """
+    meta: dict = {}
+    manifest = root / "manifest.json"
+    if manifest.is_file():
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                meta.update({k: data.get(k) for k in
+                             ("project_id", "problem_id", "snapshot_id",
+                              "delivery_level", "gate_passed")})
+                meta["run_id"] = data.get("run_id") or root.name
+        except Exception:  # noqa: BLE001 - 坏 manifest 不应让文件页 500
+            meta["manifest_error"] = True
+    spec = root / "research_spec.json"
+    if spec.is_file() and not meta.get("problem_id"):
+        try:
+            data = json.loads(spec.read_text(encoding="utf-8"))
+            meta.setdefault("project_id", data.get("project_id", ""))
+            meta["problem_id"] = data.get("problem_id", "")
+        except Exception:  # noqa: BLE001
+            pass
+    meta.setdefault("project_id", "")
+    meta.setdefault("problem_id", "")
+    meta.setdefault("run_id", root.name)
+    return meta
+
+
+def _package_roots() -> dict[str, dict]:
+    """outputs/research/<project>/<snapshot>/ 交付包目录 → 归属信息。"""
+    out: dict[str, dict] = {}
+    root = output_dir()
+    research = root / "research"
+    if not research.exists():
+        return out
+    for project_dir in research.iterdir():
+        if not project_dir.is_dir():
+            continue
+        for snapshot_dir in project_dir.iterdir():
+            if not snapshot_dir.is_dir():
+                continue
+            meta = _artifact_metadata(snapshot_dir)
+            meta.setdefault("project_id", project_dir.name)
+            out[snapshot_dir.relative_to(root).as_posix()] = meta
+    return out
+
+
+def _artifact_owner(rel_name: str, roots: dict[str, dict]) -> dict:
+    """按最长前缀匹配把文件归属到交付包 (没有交付包则为空)。"""
+    best = ""
+    for prefix in roots:
+        if rel_name == prefix or rel_name.startswith(prefix + "/"):
+            if len(prefix) > len(best):
+                best = prefix
+    if not best:
+        return {"run_id": rel_name.split("/")[0] if "/" in rel_name else ""}
+    return dict(roots[best], package_dir=best)
+
+
 @app.get("/api/artifacts")
-def list_artifacts():
-    if not OUTPUT_DIR.exists():
-        return {"files": []}
+def list_artifacts(project_id: str = "", problem_id: str = "", run_id: str = "",
+                   bind: bool = True):
+    """输出文件清单 (F3)。
+
+    - 默认给每个文件附上归属 (`project_id/problem_id/run_id/delivery_level`);
+    - 传入 `project_id`/`problem_id`/`run_id` 时只返回**属于该问题/该次运行**的文件,
+      不再把全部 outputs/ 混在一起;
+    - 无法归属的文件 (例如尚未打包的中间产物) 只在未过滤时返回, 并用
+      `unattributed: true` 标出, 不冒充当前问题的交付物。
+    """
+    root = output_dir()
+    if not root.exists():
+        return {"files": [], "roots": {}}
+    roots = _package_roots() if bind else {}
     files = []
-    # 递归列出所有文件, name 用相对 outputs/ 的路径 (含 run_id 子目录), 便于前端按对话分组查看
-    for f in sorted(OUTPUT_DIR.rglob("*"), key=lambda p: p.stat().st_mtime, reverse=True):
-        if f.is_file():
-            rel = f.relative_to(OUTPUT_DIR).as_posix()
-            files.append({"name": rel, "size": f.stat().st_size, "mtime": f.stat().st_mtime})
-    return {"files": files}
+    seen_roots: set[str] = set()
+    for f in sorted(root.rglob("*"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(root).as_posix()
+        owner = _artifact_owner(rel, roots)
+        entry = {"name": rel, "size": f.stat().st_size, "mtime": f.stat().st_mtime,
+                 **owner}
+        if not owner.get("package_dir"):
+            entry["unattributed"] = True
+        if project_id and entry.get("project_id") != project_id:
+            continue
+        if problem_id and entry.get("problem_id") != problem_id:
+            continue
+        if run_id and entry.get("run_id") != run_id:
+            continue
+        # 只统计**被返回文件**所属的交付包, 否则过滤后仍会报告别的问题的包
+        if entry.get("package_dir"):
+            seen_roots.add(entry["package_dir"])
+        files.append(entry)
+    return {"files": files, "roots": {k: roots[k] for k in sorted(seen_roots)}}
 
 
 @app.get("/api/artifacts/download")
 def download_artifact(name: str):
-    root = OUTPUT_DIR.resolve()
-    path = (OUTPUT_DIR / name).resolve()
-    if not str(path).startswith(str(root)) or not path.is_file():
+    path = safe_join(output_dir(), name)
+    if path is None or not path.is_file():
         raise HTTPException(404, "文件不存在")
     return FileResponse(str(path))
 
 
 @app.get("/api/artifacts/{name:path}")
 def get_artifact(name: str):
-    root = OUTPUT_DIR.resolve()
-    path = (OUTPUT_DIR / name).resolve()
-    if not str(path).startswith(str(root)) or not path.is_file():
+    path = safe_join(output_dir(), name)
+    if path is None or not path.is_file():
         raise HTTPException(404, "文件不存在")
     if path.suffix.lower() in (".md", ".txt", ".tex", ".log", ".json"):
         try:

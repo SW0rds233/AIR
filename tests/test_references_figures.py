@@ -11,19 +11,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
+from src.rag.figure_llm import _extract_review_issues, check_png_quality
 from src.rag.reference_formatter import (
-    format_gbt7714_entry,
-    build_references_section,
-    strip_references_section,
-    strip_evidence_markers,
     attach_references_section,
-    renumber_citations,
     find_citation_numbers,
+    format_gbt7714_entry,
     is_published_ref,
+    renumber_citations,
+    strip_evidence_markers,
+    strip_references_section,
 )
-from src.rag.figure_llm import check_png_quality, _extract_review_issues
 from src.tools.citation_verifier import (
     _parse_ref_content,
     extract_references_from_draft,
@@ -33,7 +32,6 @@ from src.tools.venue_resolver import (
     looks_like_real_venue,
     resolve_venue,
 )
-
 
 # ---------- 出处解析 ----------
 
@@ -76,10 +74,17 @@ def test_resolve_venue_skips_existing(mock_get):
 
 @patch("src.tools.venue_resolver.get_with_retry")
 def test_resolve_venue_arxiv_journal_ref(mock_get):
-    """arXiv journal_ref 元素 → 期刊名"""
+    """arXiv journal_ref 元素 → 期刊名
+
+    注意: 这里的 `<id>` 不能省。解析器按 arXiv 返回的 `<entry><id>` 与请求的
+    id_list 对齐 (真实 API 一定带 `<id>`), 缺了它整条 entry 会被当作"无该记录"。
+    此前该用例依赖仓库里 `data/venue_cache.json` 恰好缓存过 2105.04492 才"通过",
+    测试隔离后暴露: 这正是"用真实运行缓存冒充离线测试"的典型伪通过。
+    """
     xml = """<?xml version="1.0"?>
 <feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
   <entry>
+    <id>http://arxiv.org/abs/2105.04492</id>
     <arxiv:journal_ref>IEEE Transactions on Information Forensics and Security</arxiv:journal_ref>
     <arxiv:doi>10.1000/abc</arxiv:doi>
   </entry>
@@ -397,7 +402,6 @@ def test_extract_from_deterministic_refs():
 # ---------- PNG 质量检测 ----------
 
 def test_png_quality_blank_rejected(tmp_path=None):
-    import os
     from PIL import Image
 
     d = Path(sys._getframe(0).f_globals.get("__file__")).resolve().parent

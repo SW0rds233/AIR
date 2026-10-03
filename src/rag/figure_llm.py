@@ -7,15 +7,13 @@ import os
 import re
 import subprocess
 import sys
-import textwrap
 from pathlib import Path
 
-from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.config import LLM_CONFIG, build_llm
-from src.rag.figure_style import style_guide_prompt, PALETTE, ACCENT, CN_FONT_CANDIDATES, EN_FONT
-from src.utils.cost_tracker import tracker, extract_usage_metadata
+from src.rag.figure_style import ACCENT, CN_FONT_CANDIDATES, EN_FONT, PALETTE, style_guide_prompt
+from src.utils.cost_tracker import extract_usage_metadata, tracker
 
 logger = logging.getLogger(__name__)
 
@@ -336,8 +334,8 @@ def check_png_quality(path: str) -> tuple[bool, str]:
     Returns: (通过?, 失败原因)
     """
     try:
-        from PIL import Image, ImageStat
         import numpy as _np
+        from PIL import Image, ImageStat
     except ImportError:
         return True, ""  # 无 PIL/numpy 时跳过检测
 
@@ -405,8 +403,8 @@ def _png_density_score(path: str) -> float:
     用于在多个"都通过 check_png_quality"的候选中选最优者。
     """
     try:
-        from PIL import Image
         import numpy as _np
+        from PIL import Image
 
         with Image.open(path) as img:
             rgb = _np.asarray(img.convert("RGB"))

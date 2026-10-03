@@ -1,25 +1,24 @@
 from __future__ import annotations
 
-import json
-from typing import Literal, Optional
 from pathlib import Path
+from typing import Literal
 
-from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, StateGraph
 from langgraph.types import interrupt
 
-from src.graph.state import PipelineState
-from src.agents.literature_reviewer import run_literature_review
-from src.agents.paper_writer import run_paper_writing
-from src.agents.paper_reviewer import run_paper_review
-from src.agents.pdf_ingestor import run_pdf_ingestion
 from src.agents.citation_checker import run_citation_check
 from src.agents.citation_prechecker import run_citation_precheck
+from src.agents.literature_reviewer import run_literature_review
 from src.agents.outline_generator import run_outline_generation
+from src.agents.paper_reviewer import run_paper_review
+from src.agents.paper_writer import run_paper_writing
+from src.agents.pdf_ingestor import run_pdf_ingestion
+from src.config import MAX_REVISIONS, REVIEW_ACCEPT_THRESHOLD, STAGNATION_LIMIT
+from src.graph.state import PipelineState
 from src.rag.format_validator import format_check_report
-from src.config import MAX_REVISIONS, REVIEW_ACCEPT_THRESHOLD, STAGNATION_LIMIT, OUTPUT_DIR, LANGFUSE_CONFIG
 from src.utils.console import ensure_utf8_console
-from src.utils.file_utils import save_file, sanitize_filename, get_timestamp
+from src.utils.file_utils import get_timestamp, sanitize_filename, save_file
 
 
 def _get_langfuse_handler():
@@ -31,8 +30,8 @@ def _get_langfuse_handler():
     - 旧版: LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY
     - host: LANGFUSE_HOST 或 LANGFUSE_BASE_URL
     """
-    import os
     import logging as _logging
+    import os
 
     # langfuse 4.x 装饰器在 client 未初始化时打印
     # "No Langfuse client ... has been initialized" 噪音 (不影响追踪),
@@ -252,8 +251,8 @@ def _extract_research_plan(request: str, topic_hint: str = "") -> dict:
     关键词必须包含用户给出的英文检索形式与缩写 (用于英文学术库检索)。
     LLM 返回无效/失败时, 用规则回退提取主题与任务范围 (避免把整段描述当主题)。
     """
-    import re
     import json
+    import re
 
     def _to_text(result) -> str:
         content = getattr(result, "content", None)
@@ -282,8 +281,9 @@ def _extract_research_plan(request: str, topic_hint: str = "") -> dict:
     topic, keywords, sub_topics, time_range, stages = "", [], [], "", []
     reuse_previous, needs_clarification = False, False
     try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
         from src.config import build_llm
-        from langchain_core.messages import SystemMessage, HumanMessage
 
         llm = build_llm("cheap")
         prompt = (
@@ -340,7 +340,7 @@ def _extract_research_plan(request: str, topic_hint: str = "") -> dict:
     elif not topic or topic == request.strip() or len(topic) > 50:
         # LLM 未提取到有效主题 (空/等于整段输入/过长) → 规则兜底
         if raw_text:
-            print(f"  [planner] LLM 未提取到有效主题, 回退规则提取")
+            print("  [planner] LLM 未提取到有效主题, 回退规则提取")
         topic = _guess_topic(request) or topic_hint or request
     if not stages:
         stages = _guess_stages(request)
@@ -405,8 +405,8 @@ def research_planner_node(state: PipelineState) -> dict:
     # 而非指令本身 (指令如「结合收集到的信息撰写」不含真实主题, LLM 提取的常是垃圾主题)
     if reuse_previous and not explicit_topic:
         try:
-            from src.utils.session_memory import load_session_memory
             from src.utils.pipeline_cache import latest_cache_topic
+            from src.utils.session_memory import load_session_memory
 
             mem = load_session_memory()
             mem_topic = (mem or {}).get("topic", "") if mem else ""
@@ -868,7 +868,7 @@ def latex_render_node(state: PipelineState) -> dict:
         # 编译 PDF (xelatex 双遍, 每遍上限 180s; 打印进度避免静默等待)
         pdf_ok = False
         try:
-            from src.rag.latex_compiler import compile_latex, cleanup_aux_files
+            from src.rag.latex_compiler import cleanup_aux_files, compile_latex
 
             print("  [latex_render] 编译 PDF (xelatex 双遍, 最多约 6 分钟)...")
             pdf_ok, log = compile_latex(str(tex_path))
@@ -1129,7 +1129,7 @@ def paper_review_node(state: PipelineState) -> dict:
 # 对话式协作: 用户在各暂停点的输入分类 (集中定义, CLI 前端与节点共用)
 _CONFIRM_WORDS = {"", "y", "yes", "ok", "okay", "c", "continue", "确认", "继续", "好", "可以", "同意", "是"}
 _QUIT_WORDS = {"q", "quit", "exit", "stop", "n", "no", "abort", "取消", "停止", "退出", "放弃"}
-_FINALIZE_WORDS = {"f", "finalize", "finish", "done", "end", "accept", "accept", "定稿", "接受", "结束", "直接定稿", "就这样"}
+_FINALIZE_WORDS = {"f", "finalize", "finish", "done", "end", "accept", "定稿", "接受", "结束", "直接定稿", "就这样"}
 
 # 大纲反馈重生成的最大次数 (防止"改了又改"死循环)
 MAX_OUTLINE_ITERATIONS = 3
@@ -1171,8 +1171,9 @@ def _extract_scope(feedback: str) -> dict:
         return [p.strip() for p in parts if p.strip()]
 
     try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
         from src.config import build_llm
-        from langchain_core.messages import SystemMessage, HumanMessage
 
         llm = build_llm("cheap")
         prompt = (
@@ -1481,10 +1482,14 @@ def _resolve_review_suggestions(
     if not suggestions:
         return [], [], []
 
-    from src.tools.search_tools import search_all_sources
-    from src.tools.citation_verifier import CitationRecord
     from src.rag.reference_formatter import is_published_ref
-    from src.rag.relevance_filter import has_domain_signal
+    from src.rag.relevance_filter import domain_terms, has_domain_signal, is_off_domain
+    from src.tools.citation_verifier import CitationRecord
+    from src.tools.search_tools import search_all_sources
+
+    # 领域词表来自数据文件 (evals/cases/<用例>/retrieval_terms.md): 判不出领域时为空,
+    # 下面的两道门自动失效 —— 不为任何具体领域写死词表
+    terms = domain_terms(topic)
 
     search_fn = search_all_sources.func if hasattr(search_all_sources, "func") else search_all_sources
     existing_titles = {_norm_title(r.get("title", "")) for r in existing_refs}
@@ -1575,19 +1580,17 @@ def _resolve_review_suggestions(
             blocked.append({"title": suggestion, "reason": "仅为预印本, 无正式发表出处"})
             continue
 
-        # 主题相关性门: 审稿建议补录的论文标题必须含无线/RF 领域特征词,
+        # 主题相关性门: 审稿建议补录的论文标题必须含该领域词表里的特征词,
         # 否则 (审稿人提及的架构名/方向名检索到的无关论文) 不进入清单
-        if not has_domain_signal(best.get("title", "") or ""):
+        if not has_domain_signal(best.get("title", "") or "", terms):
             print(f"  [引用扩充] 跳过无关论文 (无领域信号): {best.get('title','')[:60]}")
             blocked.append({"title": suggestion, "reason": "与主题领域不相关"})
             continue
 
-        # 跨域负向门: 音频/图像/多媒体等领域论文不得进入清单
-        from src.rag.relevance_filter import has_off_domain_signal
-
-        if has_off_domain_signal(best.get("title", "") or ""):
-            print(f"  [引用扩充] 跳过跨域论文 (音频/多媒体等): {best.get('title','')[:60]}")
-            blocked.append({"title": suggestion, "reason": "跨域论文 (非射频/无线领域)"})
+        # 跨域负向门: 与本领域**同词异域**的论文 (如音频/多媒体借用同一关键词) 不得进入清单
+        if is_off_domain(best.get("title", "") or "", terms):
+            print(f"  [引用扩充] 跳过跨域论文 (同词异域): {best.get('title','')[:60]}")
+            blocked.append({"title": suggestion, "reason": "跨域论文 (与主题领域同词异域)"})
             continue
 
         # 用 CrossRef 补全/修正出处、卷期页码、年份 (审稿人常报"年份错误/卷期页缺失")
@@ -1643,8 +1646,9 @@ def _extract_paper_suggestions(review_report: str) -> list[str]:
         return line.strip("* ").strip()
 
     try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
         from src.config import build_llm
-        from langchain_core.messages import SystemMessage, HumanMessage
 
         llm = build_llm("cheap")
         prompt = (
@@ -1856,7 +1860,7 @@ def increment_revision(state: PipelineState) -> dict:
     score = state.get("review_score", 0)
     verified_refs = list(state.get("verified_references", []))
 
-    from src.utils.context_budget import budget_text, budget_sections
+    from src.utils.context_budget import budget_sections, budget_text
 
     def _strip_refs(s: str) -> str:
         """移除参考文献章节 (修订时 Writer 已单独收到 ref_sheet, 无需重复)"""
@@ -2004,19 +2008,19 @@ def increment_revision(state: PipelineState) -> dict:
         )
 
     revision_prompt += (
-        f"\n## 修订要求\n\n"
-        f"1. 逐条完成「本轮修订契约」，修改后应能按每条验收标准定位证据\n"
-        f"2. 历史问题只做回归检查；不要把已解决问题重新改写，也不要处理契约外的低优先级意见\n"
-        f"3. 删除或替换引文核查报告中标记为 NOT_FOUND 的虚构引用\n"
-        f"4. 审稿意见未提及问题的章节保持原样，不要重写\n"
-        f"5. 输出完整修订版论文（标题 + 摘要 + 6 章结构），不要只输出修改部分\n"
-        f"6. 只能引用「可信参考文献清单」和「新增可信引用」中的文献；"
-        f"审稿意见中提到的但未出现在上述清单里的论文，一律删除相关正文描述，不得写入\n"
-        f"7. 修订后全文（不含参考文献）必须不超过 20000 字；如已超限，优先删减而非扩写\n"
-        f"8. 保持未涉及章节的标题、关键论点和有效引用不变，避免修好一处又破坏另一处\n"
-        f"9. 先在上一版中定位契约所指的章节、段落或引用号，再做最小编辑；不要凭审稿意见另起炉灶\n"
-        f"10. 仅修改契约中标为‘仅改正文’的问题；‘仅记录，禁止改正文’的参考文献元数据问题，不要改写作者归属、引用句或新增引用，避免制造正文—参考文献错配\n"
-        f"11. 输出前逐项复核契约目标、契约外章节和原有有效引用；不要输出修订说明或检查清单\n"
+        "\n## 修订要求\n\n"
+        "1. 逐条完成「本轮修订契约」，修改后应能按每条验收标准定位证据\n"
+        "2. 历史问题只做回归检查；不要把已解决问题重新改写，也不要处理契约外的低优先级意见\n"
+        "3. 删除或替换引文核查报告中标记为 NOT_FOUND 的虚构引用\n"
+        "4. 审稿意见未提及问题的章节保持原样，不要重写\n"
+        "5. 输出完整修订版论文（标题 + 摘要 + 6 章结构），不要只输出修改部分\n"
+        "6. 只能引用「可信参考文献清单」和「新增可信引用」中的文献；"
+        "审稿意见中提到的但未出现在上述清单里的论文，一律删除相关正文描述，不得写入\n"
+        "7. 修订后全文（不含参考文献）必须不超过 20000 字；如已超限，优先删减而非扩写\n"
+        "8. 保持未涉及章节的标题、关键论点和有效引用不变，避免修好一处又破坏另一处\n"
+        "9. 先在上一版中定位契约所指的章节、段落或引用号，再做最小编辑；不要凭审稿意见另起炉灶\n"
+        "10. 仅修改契约中标为‘仅改正文’的问题；‘仅记录，禁止改正文’的参考文献元数据问题，不要改写作者归属、引用句或新增引用，避免制造正文—参考文献错配\n"
+        "11. 输出前逐项复核契约目标、契约外章节和原有有效引用；不要输出修订说明或检查清单\n"
     )
 
     return {
@@ -2186,6 +2190,7 @@ def _get_persistent_checkpointer():
     """SQLite 持久化 checkpointer (断点续跑用)"""
     try:
         from langgraph.checkpoint.sqlite import SqliteSaver
+
         from src.config import DATA_DIR
 
         db_path = DATA_DIR / "pipeline_checkpoints.sqlite"
@@ -2326,6 +2331,14 @@ def _describe_node(node_name: str, node_state: dict) -> str:
     elif node_name == "latex_render":
         ok = node_state.get("tex_compiled", False)
         return f"[{node_name}] LaTeX: {'✅ PDF 已生成' if ok else '⚠ 仅 .tex (编译失败/跳过)'}"
+    elif node_name == "theory_bootstrap":
+        return f"[theory] 问题形式化: {'完成' if node_state.get('bootstrapped') else '需要澄清'}"
+    elif node_name == "theory_step":
+        action = (node_state.get("action") or {}).get("action", "")
+        return f"[theory] 第 {node_state.get('step_index', '?')} 步: {action}"
+    elif node_name == "theory_finalize":
+        gate = "通过" if node_state.get("gate_passed") else "未通过"
+        return f"[theory] 交付门槛: {gate} (研究包: {node_state.get('package_dir', '')})"
     else:
         return f"[{node_name}] 完成"
 
@@ -2348,9 +2361,9 @@ def run_retrieval_module(
     """
     ensure_utf8_console()
 
+    from src.agents.citation_prechecker import run_citation_precheck
     from src.agents.literature_reviewer import run_retrieval
     from src.agents.pdf_ingestor import run_pdf_ingestion
-    from src.agents.citation_prechecker import run_citation_precheck
     from src.utils.pipeline_cache import update_retrieval_cache
 
     print("=" * 60)

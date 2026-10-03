@@ -15,7 +15,6 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Optional
 
 from src.config import DATA_DIR
 
@@ -128,7 +127,7 @@ def _enrich_from_title_search(title: str) -> dict:
     if not title:
         return {}
     try:
-        from src.tools.citation_verifier import verify_openalex, verify_crossref, CitationRecord
+        from src.tools.citation_verifier import CitationRecord, verify_crossref, verify_openalex
 
         rec = CitationRecord(ref_number=0, title=title)
         for verifier in (verify_openalex, verify_crossref):
@@ -148,9 +147,9 @@ def _enrich_from_title_search(title: str) -> dict:
             # 检索结果通常不含作者, 通过 DOI→CrossRef 补作者
             if data.get("doi") and not out.get("authors"):
                 try:
-                    from src.tools.venue_resolver import _resolve_via_crossref
-                    from src.utils.http_client import get_with_retry
                     from urllib.parse import quote
+
+                    from src.utils.http_client import get_with_retry
 
                     resp = get_with_retry(
                         f"https://api.crossref.org/works/{quote(data['doi'], safe='')}",
@@ -203,8 +202,8 @@ def ingest_manual_pdf(item: dict, chunk_size: int = 500, overlap: int = 100) -> 
 
     Returns: {"title": str, "num_chunks": N} 或 {"title": str, "error": str}
     """
-    from src.rag.paper_parser import extract_text_from_pdf
     from src.rag.chunker import chunk_paper_fulltext
+    from src.rag.paper_parser import extract_text_from_pdf
     from src.rag.vector_store import add_fulltext_chunks, embedding_available
 
     pdf_path = item["path"]

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 """PDF 下载工具：从 arXiv 和 OpenAlex OA 下载论文全文 PDF"""
 
+import logging
 import os
 import re
-import logging
 from pathlib import Path
 from typing import Optional
 
@@ -48,7 +48,15 @@ def academic_filename(paper: dict, max_len: int = 100) -> str:
 
 
 def extract_arxiv_id(url: str) -> Optional[str]:
-    """从 arXiv URL 提取 ID (支持 https://arxiv.org/abs/XXXX.XXXXX 和 abs/XXXX.XXXXXv2 及旧式 cs.CL/0011004)"""
+    """从 URL 提取 arXiv ID; 取不到返回 `None`。
+
+    **全库唯一实现**: 参考文献著录 (`rag/reference_formatter.py`) 与期刊出处解析
+    (`tools/venue_resolver.py`) 曾各有一份逐字相同的私有副本, 且都不支持旧式 ID
+    (`cs.CL/0011004`)。这里统一, 并保留旧式 ID 支持。
+
+    取不到时返回 `None` —— 这是既有契约 (由 `tests/test_pdf_tools.py` 固定); 需要
+    字符串的调用方用 `arxiv_id_or_empty()` 归一化。
+    """
     if not url:
         return None
     m = re.search(r"arxiv\.org/(?:abs|pdf)/([a-zA-Z\-]+\.?\d{4,5}(?:v\d+)?)", url)
@@ -61,6 +69,11 @@ def extract_arxiv_id(url: str) -> Optional[str]:
     if m:
         return m.group(1)
     return None
+
+
+def arxiv_id_or_empty(url: str) -> str:
+    """`extract_arxiv_id` 的字符串版 (取不到返回空串), 供按字符串处理的调用方使用。"""
+    return extract_arxiv_id(url) or ""
 
 
 def download_arxiv_pdf(url: str, save_dir: Optional[Path] = None, nice_name: Optional[str] = None) -> Optional[str]:

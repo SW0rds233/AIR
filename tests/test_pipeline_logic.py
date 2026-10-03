@@ -11,18 +11,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.agents.paper_reviewer import (
+    _extract_dimension_scores,
+    _extract_issue_ledger,
+    _extract_score,
+    _normalize_report_total,
+)
 from src.graph.pipeline import (
     _build_revision_contract,
     _review_quality_key,
     _synchronize_figure_placeholders,
     increment_revision,
     should_continue_review,
-)
-from src.agents.paper_reviewer import (
-    _extract_dimension_scores,
-    _extract_issue_ledger,
-    _extract_score,
-    _normalize_report_total,
 )
 
 
@@ -436,7 +436,7 @@ def test_word_count_excludes_references_section():
     """字数只统计正文: Writer 自行输出参考文献列表时不得误判超长。
     实测案例: 正文 11.7k 字连同参考文献被计为 20.5k 字, 触发不必要的
     删减重生成, 导致该轮质量下降 (37→32→29 的诱因之一)"""
-    from src.agents.paper_writer import _shrink_draft_if_needed, MAX_DRAFT_CHARS
+    from src.agents.paper_writer import MAX_DRAFT_CHARS, _shrink_draft_if_needed
 
     body = "# 标题\n\n## 摘要\n" + "正文内容。" * 100  # 短正文
     refs = "\n\n## 参考文献\n\n" + "\n".join(

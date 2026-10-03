@@ -1,0 +1,21 @@
+{
+  "name": "air-web",
+  "private": true,
+  "version": "1.0.0",
+  "description": "AIR 前端 (计划书 §2 F4): Vite + TypeScript 组织, 构建产物由 src/server.py 提供",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.1",
+    "playwright": "^1.63.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vitest": "^2.1.4"
+  }
+}

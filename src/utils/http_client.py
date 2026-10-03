@@ -7,14 +7,14 @@ from typing import Optional
 import httpx
 
 from src.config import (
+    HTTP_429_BACKOFF_BASE,
+    HTTP_BACKOFF_BASE,
+    HTTP_CIRCUIT_BREAKER_COOLDOWN,
+    HTTP_CIRCUIT_BREAKER_THRESHOLD,
     HTTP_CONNECT_TIMEOUT,
+    HTTP_MAX_RETRIES,
     HTTP_READ_TIMEOUT,
     HTTP_WRITE_TIMEOUT,
-    HTTP_MAX_RETRIES,
-    HTTP_CIRCUIT_BREAKER_THRESHOLD,
-    HTTP_CIRCUIT_BREAKER_COOLDOWN,
-    HTTP_BACKOFF_BASE,
-    HTTP_429_BACKOFF_BASE,
 )
 
 logger = logging.getLogger(__name__)
@@ -223,7 +223,7 @@ def get_with_retry(
             raise
         except CircuitBreakerOpenError:
             raise
-        except Exception as e:
+        except Exception:
             _breaker.failure(host, "其他错误")
             if attempt < retries - 1:
                 wait = HTTP_BACKOFF_BASE * (2 ** attempt)

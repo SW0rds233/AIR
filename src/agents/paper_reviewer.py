@@ -1,11 +1,9 @@
-from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.config import LLM_CONFIG, REVIEWER_CONFIG, build_llm
 from src.graph.state import PipelineState
-from src.utils.cost_tracker import tracker, extract_usage_metadata
 from src.utils.context_budget import budget_sections
-
+from src.utils.cost_tracker import extract_usage_metadata, tracker
 
 REVIEW_DIMENSIONS = (
     "标题",
@@ -57,13 +55,13 @@ PAPER_REVIEWER_SYSTEM = """你是"论文审阅智能体"，一名严格、挑剔
 - **学位论文 [D] 是合法来源**：中文综述引用博士学位论文是常见做法，只要数量不多（≤3 篇）且格式正确（城市: 学校, 年），不应扣分
 - **引用真实性必须逐条核对**：正文中「作者/系统名/期刊名」与对应编号文献的标题/作者/出处不一致，属于引用错配，参考文献维度扣分并列入 Critical
 - **引用编号每轮重新排序**：系统每轮按正文首次出现顺序把引用重排为 1..N，**同一编号 [n] 在不同轮次指向不同的文献**。判断任何引用类问题（错配/不当引用/缺失）时，必须以当前稿「参考文献」章节中该编号的**实际条目**为准重新核实；严禁沿用旧台账里对 [n] 的主题描述或结论。若当前稿中 [n] 的实际条目主题与正文描述相符，即使旧台账声称该编号有问题，也应判「已解决」
-- **引用主题错配必须登记台账**：正文引用的文献主题与射频指纹领域明显无关（如把音频录音设备识别、图像/文本领域工作以「借鉴意义」为由引入），属于不当引用，必须登记进「问题追踪」台账（至少中优先级）并要求删除或改写，不得只放在「细节问题」里（台账外的问题不会进入修订契约，永远得不到修复）
+- **引用主题错配必须登记台账**：正文引用的文献主题与**本次输入给出的研究主题**明显无关（如把另一领域的设备识别、图像/文本领域工作以「借鉴意义」为由引入），属于不当引用，必须登记进「问题追踪」台账（至少中优先级）并要求删除或改写，不得只放在「细节问题」里（台账外的问题不会进入修订契约，永远得不到修复）。判断"是否主题相关"只依据输入里的研究主题与文献标题本身，提示词中的任何领域词表都不是判据
 - **参考文献章节是系统程序化生成的**：其格式（GB/T 7714-2015）由系统保证，Writer 无权修改。「在线优先出版[引用日期]」是拥有 DOI 但暂无卷期页码的正式期刊文献的合法著录形式，**不是格式错误，不得登记为问题台账条目或 Critical**；此类元数据问题只在「总体评价」中提示即可
 - **CrossRef 元数据是权威出处**：参考文献的卷期页码、年份来自 CrossRef 官方解析。严禁以「DOI 年份与出版年存在时间差」「卷期页码过于完整」等启发式理由质疑文献出版状态、推测「可能实为在线优先出版」并据此扣分或登记问题；有完整卷期页码即视为已正式出版
 - **不得索要系统无法提供的论文**：输入中「系统无法提供的论文」清单里的文献已经验证确认无法进入参考文献清单，不得在「缺失内容」「补充推荐论文」或问题台账中再次要求引用；若正文存在依赖它们的描述，应建议用清单内文献改写或删除
 - **被阻论文的闭环判定**：若某问题的唯一解法是引用上述无法提供的论文，则当正文已删除依赖该论文的描述、或改用清单内文献改写（包括以「现有研究多在闭集假设下开展」等限定表述保留方向）时，必须判「已解决」；不得以「缺乏正式文献支撑 / 悬空阐述」为由维持未解决，也不得换 ID 登记同源的替代问题
 - **分类子类均衡要求必须让位于被阻现实**：若某分类子类因相关文献被系统阻断而只有 0-1 篇参考文献，且 Writer 已删除/合并该子类、或已将其明确标注为「开放问题」并给出限定表述，必须判「已解决」；不得以「每类≥3篇」为由继续要求补充被阻文献或维持未解决
-- **稀疏子类的处置**：若某分类子类文献数量不足（低于≥3篇要求）是因为该方向文献客观稀缺（非系统阻断），且 Writer 已将其合并入相邻子类、或已在该小节明确说明稀缺原因/并入趋势（如「该方向基本并入…」「射频域内相关研究仍较少」），必须判「已解决」；不得以「未执行合并」「说明不充分」为由维持未解决，也不得反复登记「内容单薄 / 不满足≥3篇」类问题。此类方向的正确终态是合并或如实说明，而非凑数
+- **稀疏子类的处置**：若某分类子类文献数量不足（低于≥3篇要求）是因为该方向文献客观稀缺（非系统阻断），且 Writer 已将其合并入相邻子类、或已在该小节明确说明稀缺原因/并入趋势（如「该方向基本并入…」「本领域内相关研究仍较少」），必须判「已解决」；不得以「未执行合并」「说明不充分」为由维持未解决，也不得反复登记「内容单薄 / 不满足≥3篇」类问题。此类方向的正确终态是合并或如实说明，而非凑数
 - **未改动章节不新登记高优先级问题**：「本轮修订差异」列出的未改动章节是上一版原文，同样的文字上一轮已被评分；确有遗漏的问题只可登记为低优先级，不得作为本轮逐维评分的扣分依据，也不得登记为 Critical（引用真实性错误除外）
 - **已解决问题不得重新打开**：除非「本轮修订差异」显示对应章节本轮又被改动且改动重新引入了该问题，否则已标记「已解决」的问题在后续轮次一律保持已解决
 - **标注「⚠️引文未在当前稿找到」的台账条目**：说明其引用的正文文字已不存在于当前稿（Writer 很可能已删除或改写）。必须在当前稿中重新搜索核实；若问题确实已不存在，判「已解决」；严禁原样复制旧引文维持「未解决」或升级优先级
@@ -340,8 +338,8 @@ def _build_objective_audit(state: PipelineState, draft: str) -> str:
     """生成确定性质量事实，给跨轮评分提供不随模型波动的锚点。"""
     import re
 
-    from src.rag.reference_formatter import find_citation_numbers, strip_references_section
     from src.rag.format_validator import format_check_report
+    from src.rag.reference_formatter import find_citation_numbers, strip_references_section
 
     body = strip_references_section(draft)
     body_chars = len(re.sub(r"\s+", "", body))
@@ -364,7 +362,7 @@ def _build_objective_audit(state: PipelineState, draft: str) -> str:
             "## 客观质量检查（程序生成，不得凭主观判断改写这些事实）",
             f"- 正文字符数（去空白、不含参考文献）：{body_chars}",
             f"- 可信参考文献清单：{len(refs)} 条；正文实际使用不同编号：{len(citations)} 个",
-            f"- 必填部分：" + "；".join(f"{name}={'存在' if ok else '缺失'}" for name, ok in required.items()),
+            "- 必填部分：" + "；".join(f"{name}={'存在' if ok else '缺失'}" for name, ok in required.items()),
             f"- 本轮写作产生、随后被引用守门修复的问题数：{state.get('guard_invalid_count', 0) or 0}",
             f"- 引文核查 NOT_FOUND/结构缺失计数：{state.get('citation_not_found_count', 0) or 0}",
             f"- 格式检查：{'通过' if not fmt_issues else f'发现 {len(fmt_issues)} 项'}",
@@ -394,7 +392,7 @@ def _build_change_summary(previous: str, current: str) -> str:
         out: dict[str, str] = {}
         # 含 #### 四级标题: 修订稿常用 H4 小节 (如 3.6.4), 漏掉会让审稿人
         # 看不到小节级改动 → 误判"未解决"
-        for m in re.finditer(r"(?m)^(#{1,4}\s+[^\n]+)\n?(.*?)(?=^#{1,4}\s|\Z)", text, re.S):
+        for m in re.finditer(r"(?m)^(#{1,4}\s+[^\n]+)\n?(.*?)(?=^#{1,4}\s|\Z)", text, re.DOTALL):
             out[m.group(1).strip()] = m.group(2)
         return out
 

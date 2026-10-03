@@ -112,13 +112,9 @@ def _format_authors(authors: str, max_authors: int = 3) -> str:
     return result
 
 
-def _arxiv_id_from_url(url: str) -> str:
-    m = re.search(r"arxiv\.org/(?:abs|pdf)/([a-zA-Z\-]+\.?\d{4,5}(?:v\d+)?)", url or "")
-    if m:
-        return m.group(1)
-    m = re.search(r"(?:abs|pdf)/([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)", url or "")
-    return m.group(1) if m else ""
-
+# arXiv ID 提取统一在 `src/tools/pdf_fetcher.py` (此处与 venue_resolver.py 曾是逐字重复的
+# 两份私有副本, 且都不支持旧式 ID)。保留本模块内的别名以固定引用点。
+from src.tools.pdf_fetcher import arxiv_id_or_empty as _arxiv_id_from_url  # noqa: E402
 
 # 期刊特征词: 命中则标 [J]
 JOURNAL_HINTS = (
@@ -344,7 +340,7 @@ def strip_references_section(draft: str) -> str:
     """从初稿中移除已有参考文献章节（防 LLM 重复/混入垃圾条目）"""
     if not draft:
         return draft
-    m = re.search(r"^#{1,3}\s*参考文献\s*$|^#{1,3}\s*References\s*$", draft, re.M | re.I)
+    m = re.search(r"^#{1,3}\s*参考文献\s*$|^#{1,3}\s*References\s*$", draft, re.MULTILINE | re.IGNORECASE)
     if m:
         return draft[: m.start()].rstrip() + "\n"
     return draft
@@ -402,6 +398,16 @@ def sort_and_merge_citation_groups(text: str) -> str:
     return run_re.sub(_sort_run, text)
 
 
+def _rewrite_citation_group(match: re.Match, mapping: dict[int, int]) -> str:
+    """把 `[2,7]` 这类多编号引用按 `mapping` 逐号重写。
+
+    模块级纯函数: 原先 `renumber_citations` 与 `renumber_draft_and_refs` 各自内嵌一份
+    **逐字相同**的 `_rewrite` 闭包, 两处各改一次容易漏。这里只留一份。
+    """
+    nums = [int(x) for x in re.findall(r"\d+", match.group(1))]
+    return "[" + ",".join(str(mapping.get(n, n)) for n in nums) + "]"
+
+
 def renumber_citations(draft: str) -> str:
     """按正文首次出现顺序重排引用编号 (1..N 连续)
 
@@ -431,11 +437,7 @@ def renumber_citations(draft: str) -> str:
     mapping = {old: new for new, old in enumerate(order, 1)}
 
     # 2. 重写正文引用 (多编号引用 [2,7] → [1,2], 逐号映射)
-    def _rewrite(m: re.Match) -> str:
-        nums = [int(x) for x in re.findall(r"\d+", m.group(1))]
-        return "[" + ",".join(str(mapping.get(n, n)) for n in nums) + "]"
-
-    new_body = CITE_GROUP_RE.sub(_rewrite, body)
+    new_body = CITE_GROUP_RE.sub(lambda m: _rewrite_citation_group(m, mapping), body)
     # 映射可能引入新的乱序 (如旧 [3,5] 分别映射为 [2,1]), 重映射后再排序一次
     new_body = sort_and_merge_citation_groups(new_body)
 
@@ -485,11 +487,7 @@ def renumber_draft_and_refs(draft: str, verified_refs: list[dict]) -> tuple[str,
     mapping = {old: new for new, old in enumerate(order, 1)}
 
     # 重写正文 (多编号引用 [2,7] → [1,2], 逐号映射)
-    def _rewrite(m: re.Match) -> str:
-        nums = [int(x) for x in re.findall(r"\d+", m.group(1))]
-        return "[" + ",".join(str(mapping.get(n, n)) for n in nums) + "]"
-
-    new_body = CITE_GROUP_RE.sub(_rewrite, body)
+    new_body = CITE_GROUP_RE.sub(lambda m: _rewrite_citation_group(m, mapping), body)
     # 映射可能引入新的乱序, 重映射后再排序一次
     new_body = sort_and_merge_citation_groups(new_body)
 
@@ -535,7 +533,7 @@ def renumber_draft_and_refs(draft: str, verified_refs: list[dict]) -> tuple[str,
 
 def _split_body_and_refs(draft: str) -> tuple[str, str]:
     """拆分正文与参考文献章节"""
-    m = re.search(r"^#{1,3}\s*(?:参考文献|References)\s*$", draft, re.M | re.I)
+    m = re.search(r"^#{1,3}\s*(?:参考文献|References)\s*$", draft, re.MULTILINE | re.IGNORECASE)
     if m:
         return draft[: m.start()], draft[m.end():]
     return draft, ""

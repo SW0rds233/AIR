@@ -1,0 +1,5 @@
+/*! 全局滚动条与版面细节 (计划书 §4) */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #a8b8cc; }
+  ::-webkit-scrollbar-track { background: transparent; }

@@ -199,20 +199,23 @@ def load_retrieval_cache(topic: str) -> dict | None:
     except Exception:
         pass
 
-    # 跨域论文兜底过滤 (历史缓存可能含音频/多媒体等异域论文,
+    # 跨域论文兜底过滤 (历史缓存可能含与主题**同词异域**的论文,
     # 如 "End-to-end Recording Device Identification", 被引用后审稿人
-    # 连续判 Critical 主题错配): 与 rule_filter 同一判定标准
+    # 连续判 Critical 主题错配): 与 rule_filter 使用同一份数据驱动的领域词表,
+    # 没有该主题的词表时不做任何领域假设。
     try:
-        from src.rag.relevance_filter import has_off_domain_signal
+        from src.rag.relevance_filter import domain_terms, is_off_domain
 
+        terms = domain_terms(str(payload.get("topic", "") or ""))
         before = len(refs)
         refs = [
             r for r in refs
-            if not has_off_domain_signal(r.get("title", "") or "")
+            if not is_off_domain(r.get("title", "") or "", terms)
             or (r.get("api_source") or "") == "人工导入"
         ]
         if len(refs) < before:
-            logger.info(f"检索缓存跨域论文过滤: {before} → {len(refs)} 篇")
+            logger.info(f"检索缓存跨域论文过滤: {before} → {len(refs)} 篇 "
+                        f"(领域词表: {terms.domain or '无'})")
         payload["verified_references"] = refs
     except Exception:
         pass

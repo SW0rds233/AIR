@@ -11,23 +11,23 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, StateGraph
 from langgraph.types import Command
 
 from src.graph.pipeline import (
-    human_outline_node,
-    human_draft_node,
-    human_review_node,
-    should_continue_review,
-    route_after_human_outline,
-    parse_human_intent,
-    _parse_config_change,
     _human_feedback_to_contract,
-    increment_revision,
     _is_confirm,
-    _is_quit,
     _is_finalize,
+    _is_quit,
+    _parse_config_change,
+    human_draft_node,
+    human_outline_node,
+    human_review_node,
+    increment_revision,
+    parse_human_intent,
+    route_after_human_outline,
+    should_continue_review,
 )
 from src.graph.state import PipelineState
 

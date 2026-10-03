@@ -22,8 +22,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
 
-from src.rag.figure_style import apply_style, PALETTE, ACCENT
-from src.config import build_llm
+from src.rag.figure_style import ACCENT, PALETTE, apply_style
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +41,17 @@ if _CN_FONT:
 
 
 def _ensure_figure_dir() -> Path:
-    d = Path(__file__).resolve().parent.parent.parent / "outputs" / "figures"
+    """图表输出目录 (**调用时**读取配置)。
+
+    早先这里写死 `Path(__file__).../outputs/figures`: 模块只按项目根拼路径,
+    于是 `config.OUTPUT_DIR` 改了也不生效 —— 测试隔离失效(测试图直接写进仓库
+    outputs/figures/), 部署到别的产物根时也会写错地方。与 server.py 的
+    `output_dir()` 保持一致, 统一按调用时的配置取值。
+    """
+    from src import config
+
+    d = Path(getattr(config, "OUTPUT_DIR", Path(__file__).resolve().parent.parent.parent
+                                         / "outputs")) / "figures"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -668,7 +677,8 @@ def _generate_comparison_from_notes(topic: str, lit_notes: str, idx: int) -> str
     try:
         import json
 
-        from langchain_core.messages import SystemMessage, HumanMessage
+        from langchain_core.messages import HumanMessage, SystemMessage
+
         from src.config import build_llm
 
         llm = build_llm("cheap")
@@ -688,6 +698,8 @@ def _generate_comparison_from_notes(topic: str, lit_notes: str, idx: int) -> str
         )
 
         data = None
+        # 提前初始化: 首次进入 attempt==1 前的异常路径若无此变量会 NameError
+        last_reason = "（上一次尝试未产生可校验数据）"
         for attempt in range(2):
             prompt = base_prompt
             if attempt == 1:

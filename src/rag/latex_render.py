@@ -13,9 +13,6 @@ from __future__ import annotations
 
 import logging
 import re as _re
-from pathlib import Path
-
-from src.utils.file_utils import get_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -91,8 +88,6 @@ def _md_to_latex_body(md_text: str, fig_paths: list[str] | None = None) -> str:
 
     fig_paths: outputs/figures/ 下的 PNG 路径列表（[图N] → 第 N-1 个文件）
     """
-    figs = fig_paths or []
-
     lines = md_text.split("\n")
     output = []
     in_table = False
@@ -277,12 +272,13 @@ def render_latex(draft_md: str, topic: str, verified_refs: list[dict],
     参考文献以 \begin{thebibliography} 确定性嵌入 .tex 本身——
     不依赖 bibtex 和 .bib 外部文件（消除 bibtex 文件名/样式兼容性）。
     """
-    from src.rag.reference_formatter import (
-        strip_references_section,
-        strip_evidence_markers,
-        _strip_writer_statistics,
-    )
     from datetime import datetime
+
+    from src.rag.reference_formatter import (
+        _strip_writer_statistics,
+        strip_evidence_markers,
+        strip_references_section,
+    )
 
     # 参考文献必须从草稿自身的参考文献章节构建: 该章节与正文引用编号
     # 严格一致 (renumber_citations 保证)。若改用 state 的 verified_refs,
@@ -318,7 +314,7 @@ def _build_thebibliography_from_draft(draft_md: str) -> str:
     草稿正文引用 [n] 与该章节条目 [n] 由 renumber_citations 保证一一对应,
     据此构建 \bibitem{refn} 可确保 \cite 与 \bibitem 永远匹配。
     """
-    m = _re.search(r"^#{1,3}\s*(?:参考文献|References)\s*$", draft_md or "", _re.M | _re.I)
+    m = _re.search(r"^#{1,3}\s*(?:参考文献|References)\s*$", draft_md or "", _re.MULTILINE | _re.IGNORECASE)
     if not m:
         return ""
     entries: list[tuple[int, str]] = []

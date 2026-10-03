@@ -11,15 +11,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from src.utils.cost_tracker import estimate_cost, UsageTracker
 from src.agents.citation_checker import build_evidence_ledger
-from src.agents.citation_prechecker import (
-    verify_reference_list,
-    build_verified_reference_sheet,
-)
 from src.agents.citation_guard import check_citation_semantics
+from src.agents.citation_prechecker import (
+    build_verified_reference_sheet,
+    verify_reference_list,
+)
+from src.utils.cost_tracker import UsageTracker, estimate_cost
 
 
 def test_estimate_cost_deepseek():

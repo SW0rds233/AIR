@@ -21,16 +21,16 @@ import sys
 
 from langgraph.types import Command
 
-from src.utils.console import ensure_utf8_console
-from src.utils.file_utils import sanitize_filename
 from src.config import MAX_REVISIONS
 from src.graph.pipeline import (
-    build_pipeline,
-    _get_persistent_checkpointer,
     _get_langfuse_handler,
-    _print_node_progress,
+    _get_persistent_checkpointer,
     _is_quit,
+    _print_node_progress,
+    build_pipeline,
 )
+from src.utils.console import ensure_utf8_console
+from src.utils.file_utils import sanitize_filename
 
 PREVIEW_LIMIT = 3000
 

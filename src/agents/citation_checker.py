@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import logging
 
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.config import build_llm
 from src.graph.state import PipelineState
-from src.tools.citation_verifier import verify_draft_citations, extract_references_from_draft
-from src.utils.cost_tracker import tracker, extract_usage_metadata
+from src.tools.citation_verifier import verify_draft_citations
 from src.utils.context_budget import budget_text
+from src.utils.cost_tracker import extract_usage_metadata, tracker
 
 logger = logging.getLogger(__name__)
 

@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import re as _re
 
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.config import LLM_CONFIG, build_llm
 from src.graph.state import PipelineState
-from src.utils.cost_tracker import tracker, extract_usage_metadata
 from src.utils.context_budget import budget_text, list_to_budgeted
+from src.utils.cost_tracker import extract_usage_metadata, tracker
 
 PAPER_WRITER_SYSTEM = """你是"论文初稿撰写智能体"，一名经验丰富的学术论文撰写专家。
 
@@ -47,7 +47,7 @@ PAPER_WRITER_SYSTEM = """你是"论文初稿撰写智能体"，一名经验丰�
 - **摘要需含量化/具体发现**：至少一句体现核心结论或数据（如性能对比、瓶颈程度），不要全是背景描述
 - **不要声称具体文献数量**：摘要/正文中不得写「基于XX篇文献」这类具体数字（你无法准确统计），改用「系统梳理了该领域正式发表的核心文献」等概括表述
 - **摘要严格控制在 150-250 词**：中文约 200-350 字，超出会被审稿人扣分
-- **术语全文统一**：首次定义后全文使用同一术语（如统一用「射频指纹识别」，不要与「射频指纹」「RF指纹」混用）
+- **术语全文统一**：首次定义后全文使用同一术语（同一概念不要在中英文写法/缩写之间来回切换）
 - **「已有综述」对比只能列主题直接相关的专门综述**：不要把 IoT 安全通用综述等宽泛领域综述当作本主题的专门综述来对比
 
 ## 参考文献章节（系统自动生成）
@@ -103,7 +103,7 @@ PAPER_REVISION_SYSTEM = """你是"论文修订智能体"，你正在对一篇已
 
 - 看到「补充某论文」→ 找到清单中对应的 [n]，在相应位置加入（若清单中无此论文则忽略该建议）
 - 看到「删除虚构引用」→ 删除该引用或替换为清单中的有效引用
-- 看到「引用主题错配/不当引用/与主题无关」→ 删除该句，或替换为清单中主题直接相关的论文；替换时必须选择标题明确含 RF fingerprint/radio/wireless/emitter/SEI/射频/无线/辐射源 的文献，严禁选用标题含 recording/audio/multimedia/image/video/speech 等字样的论文（实测教训：用录音设备/多媒体识别论文支撑射频指纹论述会被审稿人连续判 Critical）
+- 看到「引用主题错配/不当引用/与主题无关」→ 删除该句，或替换为清单中主题直接相关的论文；**判断"是否主题相关"的唯一依据是本次输入里的研究主题与该文献标题本身**：标题落在该主题的领域内的才可选用，明显属于另一领域（典型如 recording/audio/multimedia/image/video/speech 类）的严禁选用（实测教训：用录音设备/多媒体识别论文支撑另一领域的论述会被审稿人连续判 Critical）。提示词里任何领域词表都不是判据，不得据它增删文献
 - 看到「格式问题」→ 按要求修正表格、标题、引用格式
 - 看到「内容不足」→ 用清单中的论文补充，同时按审稿人建议精简冗余段落，控制总字数
 - 看到「逻辑问题」→ 调整段落顺序或重写过渡句
@@ -226,7 +226,7 @@ def _draft_sections(draft: str) -> list[tuple[str, str]]:
     body = strip_references_section(draft or "")
     return [
         (m.group(1).strip(), m.group(2))
-        for m in _re.finditer(r"(?m)^(#{1,4}\s+[^\n]+)\n?(.*?)(?=^#{1,4}\s|\Z)", body, _re.S)
+        for m in _re.finditer(r"(?m)^(#{1,4}\s+[^\n]+)\n?(.*?)(?=^#{1,4}\s|\Z)", body, _re.DOTALL)
     ]
 
 

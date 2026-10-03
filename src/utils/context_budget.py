@@ -68,10 +68,10 @@ def budget_sections(
 
     def _find_header(name: str) -> int:
         # 精确匹配 "## 参考文献"(无编号, 实际引用列表) 优先; 否则回退到含该词的任意标题
-        m = _re.search(rf"^#{{1,3}}\s*{_re.escape(name)}\s*$", text, _re.M)
+        m = _re.search(rf"^#{{1,3}}\s*{_re.escape(name)}\s*$", text, _re.MULTILINE)
         if m is not None:
             return m.start()
-        m = _re.search(rf"^#{{1,3}}\s*[^\n]*{_re.escape(name)}[^\n]*$", text, _re.M)
+        m = _re.search(rf"^#{{1,3}}\s*[^\n]*{_re.escape(name)}[^\n]*$", text, _re.MULTILINE)
         return m.start() if m is not None else -1
 
     ref_pos = _find_header("参考文献")
@@ -141,7 +141,7 @@ def _trim_reference_list(refs: str, budget: int, label: str) -> str:
     # 统计总条数 (参考文献条目行以 [数字] 开头)
     import re as _re
 
-    total = len(_re.findall(r"^\[\d+\]", refs, _re.M))
+    total = len(_re.findall(r"^\[\d+\]", refs, _re.MULTILINE))
 
     if len(refs) <= budget:
         return refs

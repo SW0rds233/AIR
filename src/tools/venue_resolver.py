@@ -13,7 +13,6 @@ import json
 import logging
 import re
 import time
-from pathlib import Path
 from typing import Optional
 
 from src.config import DATA_DIR
@@ -82,12 +81,9 @@ def looks_like_real_venue(source: str) -> bool:
     return len(s) >= 3
 
 
-def _arxiv_id_from_url(url: str) -> str:
-    m = re.search(r"arxiv\.org/(?:abs|pdf)/([a-zA-Z\-]+\.?\d{4,5}(?:v\d+)?)", url or "")
-    if m:
-        return m.group(1)
-    m = re.search(r"(?:abs|pdf)/([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)", url or "")
-    return m.group(1) if m else ""
+# arXiv ID 提取统一在 `src/tools/pdf_fetcher.py` (此处与 reference_formatter.py 曾是逐字
+# 重复的两份私有副本, 且都不支持旧式 ID)。保留本模块内的别名以固定引用点。
+from src.tools.pdf_fetcher import arxiv_id_or_empty as _arxiv_id_from_url  # noqa: E402
 
 
 def _resolve_via_crossref(doi: str) -> Optional[dict]:
@@ -223,7 +219,7 @@ def _resolve_published_via_title(title: str) -> Optional[dict]:
     """
     if not title:
         return None
-    from src.tools.citation_verifier import verify_crossref, CitationRecord
+    from src.tools.citation_verifier import CitationRecord, verify_crossref
 
     cache = _load_cache()
     key = f"title:{re.sub(r'[^a-z0-9]', '', title.lower())[:120]}"

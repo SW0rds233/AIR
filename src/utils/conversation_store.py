@@ -45,6 +45,9 @@ def list_conversations() -> list[dict]:
             "session_id": data.get("session_id", f.stem),
             "thread_id": data.get("thread_id", ""),
             "topic": data.get("topic", ""),
+            # `project_id` 是**共享资料的所有权判据**: 删除会话前要据此确认没有其他
+            # 会话引用同一项目的向量库/缓存 (计划书 P0-4), 否则会误删别人的检索资料。
+            "project_id": data.get("project_id", "") or (data.get("request") or {}).get("project_id", ""),
             "created_at": data.get("created_at", ""),
             "updated_at": data.get("updated_at", ""),
             "status": data.get("status", ""),

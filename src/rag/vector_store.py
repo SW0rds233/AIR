@@ -1,10 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
-from langchain_openai import OpenAIEmbeddings
 from langchain_core.documents import Document
+from langchain_openai import OpenAIEmbeddings
 
 # 优先使用 langchain_chroma (新包, 无弃用警告), 回退 langchain_community
 try:
@@ -12,7 +13,7 @@ try:
 except ImportError:
     from langchain_community.vectorstores import Chroma
 
-from src.config import LLM_CONFIG, CHROMA_CONFIG
+from src.config import CHROMA_CONFIG, DATA_DIR, LLM_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -90,13 +91,29 @@ def embedding_available() -> bool:
     return _EMBEDDING_OK
 
 
+def persist_directory() -> str:
+    """向量库落盘目录 (**调用时**读取配置)。
+
+    `config.CHROMA_CONFIG` 在导入期就把 `DATA_DIR` 拼成了字符串, 之后改
+    `config.DATA_DIR`(测试隔离) 对它无效 —— 表现为测试仍在往仓库
+    `data/chroma/` 写。这里按调用时的配置重算, 与 server.py 的 `output_dir()`
+    同一原则; `.env` 的 `CHROMA_PERSIST_REL` 仍然生效。
+    """
+    import os
+
+    from src import config
+
+    rel = os.getenv("CHROMA_PERSIST_REL", "chroma")
+    return str(Path(getattr(config, "DATA_DIR", DATA_DIR)) / rel)
+
+
 def get_vector_store(collection_name: str = None) -> Chroma:
     embeddings = get_embeddings()
     name = collection_name or CHROMA_CONFIG["collection_name"]
     return Chroma(
         collection_name=name,
         embedding_function=embeddings,
-        persist_directory=CHROMA_CONFIG["persist_directory"],
+        persist_directory=persist_directory(),
     )
 
 

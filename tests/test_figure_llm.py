@@ -11,9 +11,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.rag.figure_llm import _extract_code, _execute_code, _sanitize_code
-from src.rag.figure_style import apply_style, style_guide_prompt, PALETTE
 from src.rag.figure_generator import parse_taxonomy_from_text, parse_timeline_from_text
+from src.rag.figure_llm import _execute_code, _extract_code, _sanitize_code
+from src.rag.figure_style import PALETTE, apply_style, style_guide_prompt
 
 
 def test_sanitize_windows_path_assignment():
@@ -106,15 +106,16 @@ def test_extract_code_with_preamble():
     assert "```" not in code
 
 
-def test_execute_code_ok():
+def test_execute_code_ok(tmp_path):
     code = "import matplotlib.pyplot as plt\nimport numpy as np\nfig, ax = plt.subplots()\nax.plot([1,2,3])\n"
-    ok, out = _execute_code(code, str(Path(".") / "test_output.png"))
+    # 写到 tmp_path: 不再往仓库根目录丢测试产物
+    ok, out = _execute_code(code, str(tmp_path / "test_output.png"))
     assert ok is True
 
 
-def test_execute_code_error():
+def test_execute_code_error(tmp_path):
     code = "import matplotlib.pyplot as plt\nraise ValueError('boom')\n"
-    ok, out = _execute_code(code, str(Path(".") / "test_output.png"))
+    ok, out = _execute_code(code, str(tmp_path / "test_output.png"))
     assert ok is False
     assert "boom" in out
 

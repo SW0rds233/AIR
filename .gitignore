@@ -31,6 +31,16 @@ data/pipeline_cache/
 data/conversations/
 data/session_memory.json
 
+# 用户上传的附件 (含题面文件与原始资料, 属用户数据, 不得入库)
+data/uploads/
+
+# 主题文献知识底座 (原始资料 + 索引, 含用户导入文献)
+data/kb/
+
+# 理论研究状态库与执行账本
+data/research/
+data/theory_checkpoints.sqlite
+
 # 输出文件
 outputs/
 
@@ -54,7 +64,21 @@ data/pipeline_checkpoints.sqlite-wal
 
 # 缓存
 .pytest_cache/
+.pytest_tmp/
+.tmp/
+.ruff_cache/
+.mypy_cache/
 *.sqlite3-journal
+# 测试临时目录: 任何以 .pt_ 开头的隔离目录都不得入库
+# (实测 `git add -A` 会把 `pytest --basetemp=...` 留下的目录一起暂存,
+#  里面有 sqlite/向量库/上传附件等运行时数据)
+.pt_*/
+
+# 前端依赖与临时构建目录 (计划书 §2 F4)
+# 构建产物 (src/web/assets/) 要提交, 因为服务端直接提供它;
+# node_modules 与 Vite 的临时输出目录不入库。
+node_modules/
+src/web/dist/
 
 # 开发文档
 TESTING_RESOURCES.md

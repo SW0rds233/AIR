@@ -9,11 +9,7 @@ from __future__ import annotations
 参考: papercast (arXiv + GROBID 流水线), scipdf_parser
 """
 
-import os
-import tempfile
 import warnings
-from pathlib import Path
-from typing import Optional
 
 from src.config import GROBID_BASE_URL
 
@@ -89,15 +85,3 @@ def extract_text_from_pdf(pdf_path: str, max_chars: int = 50000) -> str:
     return "\n\n".join(text_parts)[:max_chars]
 
 
-def extract_text_from_bytes(pdf_bytes: bytes, max_chars: int = 50000) -> str:
-    if not (HAS_PYMUPDF or HAS_SCIPDF):
-        raise ImportError("No PDF parser available.")
-
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-        tmp.write(pdf_bytes)
-        tmp_path = tmp.name
-
-    try:
-        return extract_text_from_pdf(tmp_path, max_chars)
-    finally:
-        os.unlink(tmp_path)

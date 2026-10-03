@@ -13,14 +13,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 from src.tools.citation_verifier import (
     CitationRecord,
-    extract_references_from_draft,
-    check_inline_citation_coverage,
-    verify_single_citation,
     _title_similarity,
+    check_inline_citation_coverage,
+    extract_references_from_draft,
     verify_draft_citations,
+    verify_single_citation,
 )
 
 

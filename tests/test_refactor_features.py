@@ -11,14 +11,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from src.utils.context_budget import budget_text, list_to_budgeted
-from src.tools.search_tools import _norm_title, _dedup_key, merge_papers
 from src.agents.citation_guard import auto_fix_citations, validate_draft_citations
 from src.agents.citation_prechecker import verify_reference_list
 from src.tools.citation_verifier import _doi_exists_via_crossref
-
+from src.tools.search_tools import _dedup_key, _norm_title, merge_papers
+from src.utils.context_budget import budget_text, list_to_budgeted
 
 # ---------- context_budget ----------
 
@@ -206,7 +205,7 @@ def test_format_papers_for_tool():
 
 def test_agent_loop_executes_tools_and_finishes():
     """LLM 第一轮返回 1 个工具调用，第二轮返回最终文本 → notes 应为最终文本"""
-    from src.agents.literature_reviewer import _run_agent_loop, _TOOL_MAP
+    from src.agents.literature_reviewer import _TOOL_MAP, _run_agent_loop
 
     first = MagicMock()
     first.content = ""
@@ -243,8 +242,9 @@ def test_agent_loop_executes_tools_and_finishes():
 
 def test_agent_loop_feeds_error_back():
     """工具抛异常 → 以 [Tool Call Error] 文本作为 tool 消息回喂"""
-    from src.agents.literature_reviewer import _run_agent_loop, _TOOL_MAP
     from langchain_core.messages import ToolMessage
+
+    from src.agents.literature_reviewer import _TOOL_MAP, _run_agent_loop
 
     first = MagicMock()
     first.content = ""
@@ -305,8 +305,9 @@ def test_chunk_text_english_unchanged():
 
 def test_add_documents_resilient_batch_split():
     """批量入库失败 → 对半拆; 单条超长 → 截断重试"""
-    from src.rag.vector_store import _add_documents_resilient
     from langchain_core.documents import Document
+
+    from src.rag.vector_store import _add_documents_resilient
 
     class FlakyStore:
         def __init__(self):
@@ -331,8 +332,9 @@ def test_add_documents_resilient_batch_split():
 
 def test_add_documents_resilient_single_short_failure():
     """单条短块仍失败 → 计入失败, 不抛异常"""
-    from src.rag.vector_store import _add_documents_resilient
     from langchain_core.documents import Document
+
+    from src.rag.vector_store import _add_documents_resilient
 
     class AlwaysFail:
         def add_documents(self, docs):

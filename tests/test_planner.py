@@ -11,8 +11,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, StateGraph
 from langgraph.types import Command
 
 import src.graph.pipeline as pl
@@ -148,7 +148,6 @@ def test_guess_stages_negation():
 
 def test_guess_topic_strips_quotes():
     """LLM 失败回退时, 主题不带引号"""
-    from types import SimpleNamespace
 
     import src.config as cfg
 
@@ -194,7 +193,7 @@ def test_research_planner_continuation_skips_research():
         "verified_references": [{"ref_number": i} for i in range(25)],
         "retrieved_papers": [], "unfiltered_papers": [],
     }
-    pl.save_file = lambda content, name: name
+    pl.save_file = lambda content, name, **kwargs: name
     try:
         out = pl.research_planner_node({"research_request": "结合已有的数据和报告，撰写综述", "skip_retrieval": False})
         assert out["stages"] == ["write"]
@@ -249,7 +248,7 @@ def test_research_planner_detects_use_cache_and_loads():
         "verified_references": [{"ref_number": i} for i in range(25)],
         "retrieved_papers": [], "unfiltered_papers": [],
     }
-    pl.save_file = lambda content, name: name
+    pl.save_file = lambda content, name, **kwargs: name
     try:
         state = {"research_request": "检索已完成，查看缓存生成报告", "skip_retrieval": False}
         out = pl.research_planner_node(state)
@@ -361,7 +360,7 @@ def test_research_planner_uses_session_memory_for_continuation():
         "verified_references": [{"ref_number": i} for i in range(25)],
         "retrieved_papers": [], "unfiltered_papers": [],
     }
-    pl.save_file = lambda content, name: name
+    pl.save_file = lambda content, name, **kwargs: name
     try:
         out = pl.research_planner_node({"research_request": "结合已有的数据和报告，撰写综述", "skip_retrieval": False})
         assert out["research_topic"] == "射频指纹识别技术研究"
@@ -409,8 +408,8 @@ def test_extract_research_plan_needs_clarification_keeps_topic_empty():
 
 def test_research_planner_clarification_roundtrip():
     """主题无法确定时反问澄清: interrupt → 用户输入主题 → 主题被采用"""
-    from langgraph.graph import StateGraph, END
     from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.graph import END, StateGraph
     from langgraph.types import Command
 
     import src.utils.pipeline_cache as pc
@@ -537,7 +536,7 @@ def test_citation_precheck_saves_cache_with_result_refs():
                 "verified_references": [{"ref_number": 1, "title": "T", "doi": "10.1/x"}]}
 
     pl.run_citation_precheck = fake_precheck
-    pl.save_file = lambda content, name: name
+    pl.save_file = lambda content, name, **kwargs: name
 
     def fake_save_cache(**kwargs):
         captured.update(kwargs)
@@ -592,7 +591,7 @@ def test_research_planner_figures_reuses_context():
         "verified_references": [{"ref_number": i} for i in range(25)],
         "retrieved_papers": [], "unfiltered_papers": [],
     }
-    pl.save_file = lambda content, name: name
+    pl.save_file = lambda content, name, **kwargs: name
     try:
         out = pl.research_planner_node({"research_request": "重新生成图片", "interactive": False, "skip_retrieval": False})
         assert out["stages"] == ["figures"]
@@ -713,7 +712,7 @@ def test_extract_research_plan_falls_back_on_invalid_llm():
 
 def test_supervisor_loop_end_to_end_order():
     """监督者循环端到端: start→supervisor→planner→confirm→supervisor→research→supervisor→write→supervisor→end"""
-    from langgraph.graph import StateGraph, END
+    from langgraph.graph import END, StateGraph
 
     visited = []
 
@@ -764,7 +763,7 @@ def test_supervisor_loop_end_to_end_order():
 
 def test_supervisor_loop_partial_task_stops_after_research():
     """局部任务: 只跑 research, 不写论文"""
-    from langgraph.graph import StateGraph, END
+    from langgraph.graph import END, StateGraph
 
     visited = []
 

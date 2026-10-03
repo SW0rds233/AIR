@@ -8,13 +8,12 @@ from __future__ import annotations
 
 import logging
 
+from src.config import build_llm
 from src.graph.state import PipelineState
 from src.tools.citation_verifier import (
     CitationRecord,
     verify_single_citation,
 )
-from src.config import build_llm
-from src.utils.cost_tracker import tracker, extract_usage_metadata
 
 logger = logging.getLogger(__name__)
 

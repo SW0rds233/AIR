@@ -13,8 +13,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.tools.pdf_fetcher import extract_arxiv_id, download_arxiv_pdf, _is_downloadable_oa_url
-from src.rag.chunker import chunk_text, chunk_paper_fulltext
+from src.rag.chunker import chunk_paper_fulltext, chunk_text
+from src.tools.pdf_fetcher import _is_downloadable_oa_url, extract_arxiv_id
 
 
 def test_extract_arxiv_id_abs():
@@ -84,8 +84,8 @@ def test_chunk_paper_fulltext():
 
 def test_download_throttles_progress_output():
     """高重复下载提示降噪: 每 5 篇一次进度 + 结束跳过汇总, 而非逐篇打印"""
-    import io
     import contextlib
+    import io
     import time
 
     import src.tools.pdf_fetcher as pf

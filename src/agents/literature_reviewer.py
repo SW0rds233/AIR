@@ -4,19 +4,19 @@ from __future__ import annotations
 
 import logging
 
-from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
-from src.config import build_llm, LLM_CONFIG
+from src.config import LLM_CONFIG, build_llm
 from src.graph.state import PipelineState
 from src.tools.search_tools import (
-    search_all_sources,
     arxiv_search,
-    semantic_scholar_search,
-    openalex_search,
     merge_papers,
+    openalex_search,
+    search_all_sources,
+    semantic_scholar_search,
 )
-from src.utils.cost_tracker import tracker, extract_usage_metadata
 from src.utils.context_budget import list_to_budgeted
+from src.utils.cost_tracker import extract_usage_metadata, tracker
 
 logger = logging.getLogger(__name__)
 
@@ -309,7 +309,7 @@ def run_retrieval(state: PipelineState) -> dict:
     print(f"  [文献检索] 子查询追加后共 {len(all_papers)} 篇（未过滤）")
 
     # ===== 阶段 3: 相关性过滤 (规则 + LLM 打分, 廉价模型) =====
-    from src.rag.relevance_filter import rule_filter, llm_score_filter
+    from src.rag.relevance_filter import llm_score_filter, rule_filter
 
     rule_kept = len(all_papers)
     all_papers = rule_filter(all_papers, topic, user_kw)

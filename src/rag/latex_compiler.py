@@ -110,7 +110,7 @@ def compile_latex(tex_path: str, workdir: str | None = None, engine: str = "xela
 def extract_latex_errors(log: str) -> list[str]:
     """从编译日志提取可读错误列表（供 LLM 修复参考）"""
     errors = []
-    for m in re.finditer(r"^!(.*?)$", log, re.M):
+    for m in re.finditer(r"^!(.*?)$", log, re.MULTILINE):
         msg = m.group(1).strip()
         # 跳过 Undefined control sequence 里含 endless loop 检测的噪音
         if "Undefined control sequence" in msg:

@@ -21,6 +21,8 @@ dependencies = [
     "bibtexparser>=1.4.0",
     "tiktoken>=0.7.0",
     "matplotlib>=3.8.0",
+    "sympy>=1.12",
+    "z3-solver>=4.12",
 ]
 
 [project.optional-dependencies]
@@ -41,3 +43,5 @@ target-version = "py310"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# 测试临时目录固定在仓库内: 部分受限环境无法在系统 TEMP 建目录
+addopts = "--basetemp=.pytest_tmp"

@@ -6,10 +6,10 @@
 
 from __future__ import annotations
 
-import re
 import logging
+import re
 
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from src.config import LLM_CONFIG
@@ -24,8 +24,8 @@ SUBQUERY_SYSTEM = """你是检索查询规划专家。根据研究主题和关�
 3. 每个子查询是独立的搜索词组合（不用引号、不用布尔操作符）
 4. 涵盖: 核心概念、具体方法、应用场景、相关术语变体
 
-只输出 JSON 数组, 如:
-["射频指纹 设备识别", "RF fingerprinting device identification", "wireless device authentication", "physical layer fingerprint deep learning"]
+只输出 JSON 数组, 例如主题为「某具体研究主题」时:
+["主题 核心概念", "topic core concept", "topic method", "topic application"]
 """
 
 

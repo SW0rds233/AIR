@@ -12,7 +12,7 @@ echo   AIR 智能体研究系统 - 一键环境搭建
 echo ============================================
 echo.
 
-REM ---------- [1/5] 检测 Python (需要 3.10+) ----------
+REM ---------- [1/6] 检测 Python (需要 3.10+) ----------
 set "PYTHON="
 where python >nul 2>nul
 if not errorlevel 1 (
@@ -34,13 +34,13 @@ if not defined PYTHON (
     exit /b 1
 )
 for /f "delims=" %%v in ('%PYTHON% --version 2^>^&1') do set "PYVER=%%v"
-echo [1/5] 检测到 !PYVER!
+echo [1/6] 检测到 !PYVER!
 
-REM ---------- [2/5] 创建虚拟环境 .venv ----------
+REM ---------- [2/6] 创建虚拟环境 .venv ----------
 if exist ".venv\Scripts\python.exe" (
-    echo [2/5] 已存在虚拟环境 .venv，跳过创建
+    echo [2/6] 已存在虚拟环境 .venv，跳过创建
 ) else (
-    echo [2/5] 正在创建虚拟环境 .venv ...
+    echo [2/6] 正在创建虚拟环境 .venv ...
     %PYTHON% -m venv .venv
     if errorlevel 1 (
         echo [错误] 虚拟环境创建失败
@@ -53,8 +53,8 @@ if exist ".venv\Scripts\python.exe" (
 
 set "VPY=.venv\Scripts\python.exe"
 
-REM ---------- [3/5] 安装依赖 ----------
-echo [3/5] 安装 requirements.txt 依赖 (首次约 3-10 分钟) ...
+REM ---------- [3/6] 安装依赖 ----------
+echo [3/6] 安装 requirements.txt 依赖 (首次约 3-10 分钟) ...
 "%VPY%" -m pip install -r requirements.txt %PIP_ARGS%
 if errorlevel 1 (
     echo.
@@ -66,26 +66,48 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM ---------- [4/5] 生成 .env ----------
+REM ---------- [4/6] 生成 .env ----------
 if exist ".env" (
-    echo [4/5] 已存在 .env，跳过生成
+    echo [4/6] 已存在 .env，跳过生成
 ) else (
     copy /y ".env.example" ".env" >nul
     if errorlevel 1 (
         echo [警告] .env 生成失败，请手动复制 .env.example 为 .env
     ) else (
-        echo [4/5] 已根据 .env.example 生成 .env，请填写其中的 API Key
+        echo [4/6] 已根据 .env.example 生成 .env，请填写其中的 API Key
     )
 )
 
-REM ---------- [5/5] 验证关键依赖 ----------
-echo [5/5] 验证关键依赖 ...
+REM ---------- [5/6] 验证关键依赖 ----------
+echo [5/6] 验证关键依赖 ...
 "%VPY%" -c "import langgraph, fastapi, uvicorn, chromadb, pymupdf, matplotlib; print('       OK: langgraph / fastapi / uvicorn / chromadb / pymupdf / matplotlib')"
 if errorlevel 1 (
     echo [错误] 关键依赖导入失败，请检查上方报错
     pause
     exit /b 1
 )
+
+REM ---------- [6/6] 构建前端 (计划书 §2 F4) ----------
+REM 服务端只服务构建产物 (src\web\dist\ + src\web\assets\)。dist\ 不入库, 缺产物时
+REM 首页返回 503 与构建指引 (不再把引用 /src/main.ts 的源码模板当页面返回)。
+where npm >nul 2>nul
+if errorlevel 1 (
+    echo [6/6] 未检测到 npm, 跳过前端构建。
+    echo        页面必须先构建才能正常使用。安装 Node.js 后执行:
+    echo            cd src\web ^&^& npm install ^&^& npm run build
+) else (
+    echo [6/6] 构建前端 (首次会 npm install, 可能较慢) ...
+    pushd "src\web"
+    if not exist "node_modules" call npm install
+    call npm run build
+    popd
+    if exist "src\web\dist\index.html" (
+        echo       前端构建完成: src\web\dist\index.html
+    ) else (
+        echo [警告] 前端构建失败, 请手动执行: cd src\web ^&^& npm run build
+    )
+)
+
 
 echo.
 echo ============================================

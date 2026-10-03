@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import logging
 
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.config import LLM_CONFIG, build_llm
 from src.graph.state import PipelineState
-from src.utils.cost_tracker import tracker, extract_usage_metadata
 from src.utils.context_budget import budget_text
+from src.utils.cost_tracker import extract_usage_metadata, tracker
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,7 @@ def run_outline_generation(state: PipelineState) -> dict:
             f"{human_feedback}\n"
             f"---意见结束---\n"
         )
-    prompt += f"请按上述格式输出完整大纲。"
+    prompt += "请按上述格式输出完整大纲。"
 
     messages = [SystemMessage(content=OUTLINE_GENERATOR_SYSTEM), HumanMessage(content=prompt)]
     result = llm.invoke(messages)

@@ -15,8 +15,8 @@ from __future__ import annotations
 4. 确保 citation_check 阶段验证的是真实论文
 """
 
-import re
 import logging
+import re
 
 from src.graph.state import PipelineState
 
@@ -148,7 +148,7 @@ _TECH_TERM_BLOCKLIST = {
     "lstm", "gru", "svm", "rf", "rfid", "nfc", "iot", "ai", "ml", "dl", "dnn", "gnn",
     "bert", "resnet", "vgg", "gpu", "cpu", "fpga", "asic", "adc", "dac", "mimo",
     "ofdm", "csi", "rssi", "sei", "dctf", "uav", "gnss", "sdn", "mec", "noma",
-    "autoencoder", "vae", "rl", "drl", "ppo", "awgn", "snr", "svm", "knn", "pso",
+    "autoencoder", "vae", "rl", "drl", "ppo", "awgn", "snr", "knn", "pso",
 }
 
 

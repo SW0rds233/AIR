@@ -6,30 +6,74 @@
 
 from __future__ import annotations
 
-import json
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.rag.relevance_filter import has_off_domain_signal, rule_filter
+from src.rag.relevance_filter import load_terms, rule_filter  # noqa: E402
+
+# 领域词表来自数据文件 (不含任何代码内领域常量); 生产路径按主题解析取得
+TERMS = load_terms("rf-fingerprint")
 
 
 def test_off_domain_detection():
     """实测案例: 录音设备识别论文借 'device identification' 关键词混入,
     被引用后审稿人连续 4 轮判 Critical 主题错配, 评分卡在 36 无法突破"""
+    from src.rag.relevance_filter import has_off_domain_signal
+
     # 音频/多媒体等跨域论文 → 拦截
-    assert has_off_domain_signal("End-to-end Recording Device Identification Based on Deep Representation Learning")
-    assert has_off_domain_signal("Audio Fingerprint Recognition Using Neural Networks")
-    assert has_off_domain_signal("Video-based Device Identification System")
-    assert has_off_domain_signal("Image Fingerprint for Multimedia Content")
+    assert has_off_domain_signal("End-to-end Recording Device Identification Based on Deep Representation Learning", TERMS)
+    assert has_off_domain_signal("Audio Fingerprint Recognition Using Neural Networks", TERMS)
+    assert has_off_domain_signal("Video-based Device Identification System", TERMS)
+    assert has_off_domain_signal("Image Fingerprint for Multimedia Content", TERMS)
     # 含强 RF 信号的边缘论文 → 保留 (如 Wireless Multimedia Device Identification)
-    assert not has_off_domain_signal("An Ensemble Learning Method for Wireless Multimedia Device Identification")
+    assert not has_off_domain_signal("An Ensemble Learning Method for Wireless Multimedia Device Identification", TERMS)
     # 正常 RF 指纹论文 → 保留
-    assert not has_off_domain_signal("A Robust RF Fingerprinting Approach Using Multisampling CNN")
-    assert not has_off_domain_signal("射频指纹识别的研究现状及趋势")
-    assert not has_off_domain_signal("Specific Emitter Identification via Convolutional Neural Networks")
+    assert not has_off_domain_signal("A Robust RF Fingerprinting Approach Using Multisampling CNN", TERMS)
+    assert not has_off_domain_signal("射频指纹识别的研究现状及趋势", TERMS)
+    assert not has_off_domain_signal("Specific Emitter Identification via Convolutional Neural Networks", TERMS)
+
+
+def test_domain_vocabulary_is_data_not_code():
+    """领域知识必须来自数据文件: 换一份词表就换一套判定, 代码里不含领域词表。"""
+    import ast
+
+    from src.rag.relevance_filter import is_off_domain, parse_terms, rule_filter
+
+    assert TERMS.domain == "rf-fingerprint" and len(TERMS.in_domain) > 10
+    # 只检查**代码里的词汇字面量**: 注释与文档字符串里的举例不算领域硬编码
+    source = (Path(__file__).resolve().parents[1] / "src/rag/relevance_filter.py").read_text(
+        encoding="utf-8")
+    tree = ast.parse(source)
+    docstrings = {id(node.body[0].value) for node in ast.walk(tree)
+                  if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                       ast.AsyncFunctionDef))
+                  and node.body and isinstance(node.body[0], ast.Expr)
+                  and isinstance(node.body[0].value, ast.Constant)
+                  and isinstance(node.body[0].value.value, str)}
+    literals = [node.value for node in ast.walk(tree)
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in docstrings]
+    blob = " ".join(literals).lower()
+    for leaked in ("website fingerprinting", "tor traffic", "辐射源", "电子对抗",
+                   "wireless", "射频", "发射机"):
+        assert leaked not in blob, f"领域词泄漏进代码字面量: {leaked}"
+
+    # 换一套词表 → 同一标题的判定随之改变 (证明判定不是代码写死的)
+    other = parse_terms(
+        "domain: demo\nin_domain: quantum; qubit\n"
+        "strong_in_domain: quantum\noff_domain_confusables: video; audio\n", domain="demo")
+    assert is_off_domain("Quantum Video Analysis", other) is False   # 锚点就近 → 领域内
+    assert is_off_domain("Video Streaming Study", other) is True
+    # 空词表 (判不出领域) → 不做任何领域假设
+    from src.rag.relevance_filter import DomainTerms
+
+    assert is_off_domain("Video Streaming Study", DomainTerms()) is False
+    # 空词表时只走与领域无关的关键词命中过滤 (且不做领域假设)
+    papers = [{"title": "Video Streaming Study", "year": "2020"}]
+    assert rule_filter(papers, "Video Streaming", "", terms=DomainTerms()) == papers
 
 
 def test_rule_filter_excludes_off_domain_papers():
@@ -135,6 +179,21 @@ def test_writer_prompt_has_off_domain_replacement_rule():
 
     assert "引用主题错配" in PAPER_REVISION_SYSTEM
     assert "recording/audio/multimedia" in PAPER_REVISION_SYSTEM
+    # 判据只能是"本次输入的研究主题 + 文献标题", 不得让提示词里的领域词表当判据
+    assert "任何领域词表都不是判据" in PAPER_REVISION_SYSTEM
+
+
+def test_agent_prompts_carry_no_hardcoded_domain_vocabulary():
+    """提示词不得把某一个领域的词表写死 (跨领域时会把模型带偏)。"""
+    from src.agents.paper_reviewer import PAPER_REVIEWER_SYSTEM
+    from src.agents.paper_writer import PAPER_REVISION_SYSTEM
+    from src.rag.subquery_generator import SUBQUERY_SYSTEM
+
+    for name, prompt in (("paper_writer", PAPER_REVISION_SYSTEM),
+                         ("paper_reviewer", PAPER_REVIEWER_SYSTEM),
+                         ("subquery_generator", SUBQUERY_SYSTEM)):
+        for leaked in ("射频", "RF fingerprint", "wireless", "emitter", "RFFI"):
+            assert leaked not in prompt, f"{name} 提示词含领域硬编码: {leaked}"
 
 
 if __name__ == "__main__":

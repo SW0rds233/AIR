@@ -11,16 +11,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.rag.format_validator import (
-    check_markdown_tables,
-    check_figure_numbering,
-    check_citation_format,
-    format_check_report,
-)
 from src.rag.figure_generator import (
+    generate_taxonomy_tree,
     parse_taxonomy_from_text,
     parse_timeline_from_text,
-    generate_taxonomy_tree,
+)
+from src.rag.format_validator import (
+    check_citation_format,
+    check_figure_numbering,
+    check_markdown_tables,
+    format_check_report,
 )
 
 

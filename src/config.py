@@ -1,6 +1,7 @@
-from pathlib import Path
-from dotenv import load_dotenv
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -58,7 +59,7 @@ KIMI_NO_THINKING_TEMPERATURE = 0.6
 def _is_kimi_reasoning_model(model: str) -> bool:
     """判断是否为 kimi-k2 系推理模型 (可用 thinking 参数)"""
     m = (model or "").lower()
-    return m.startswith("kimi") or m.startswith("moonshot")
+    return m.startswith(("kimi", "moonshot"))
 
 
 def _apply_temperature_restriction(model: str, temperature: float) -> float:
@@ -95,14 +96,42 @@ def _model_extra_body(model: str) -> dict | None:
     return None
 
 
+def _role_config(prefix: str) -> dict:
+    """理论研究角色模型配置: 未单独设置时回退主模型 (方案 §10)。"""
+    model = os.getenv(f"{prefix}_MODEL", LLM_CONFIG["model"])
+    return {
+        "model": model,
+        "api_key": os.getenv(f"{prefix}_API_KEY", LLM_CONFIG["api_key"]),
+        "base_url": os.getenv(f"{prefix}_BASE_URL", LLM_CONFIG["base_url"]),
+        "temperature": _apply_temperature_restriction(
+            model, float(os.getenv(f"{prefix}_TEMPERATURE", str(LLM_CONFIG["temperature"])))
+        ),
+    }
+
+
+# 理论研究角色 (协调者/理论研究者/验证者), 默认回退主模型
+COORDINATOR_CONFIG = _role_config("COORDINATOR")
+THEORIST_CONFIG = _role_config("THEORIST")
+VERIFIER_CONFIG = _role_config("VERIFIER")
+
+_LLM_CONFIGS = {
+    "main": LLM_CONFIG,
+    "reviewer": REVIEWER_CONFIG,
+    "cheap": CHEAP_CONFIG,
+    "coordinator": COORDINATOR_CONFIG,
+    "theorist": THEORIST_CONFIG,
+    "verifier": VERIFIER_CONFIG,
+}
+
+
 def build_llm(config_key: str = "main"):
     """统一构建 ChatOpenAI 实例
 
-    config_key: "main" (主模型) / "reviewer" (跨模型审阅) / "cheap" (廉价模型)
+    config_key: "main" / "reviewer" / "cheap" / "coordinator" / "theorist" / "verifier"
     """
     from langchain_openai import ChatOpenAI
 
-    cfg = {"main": LLM_CONFIG, "reviewer": REVIEWER_CONFIG, "cheap": CHEAP_CONFIG}[config_key]
+    cfg = _LLM_CONFIGS[config_key]
     extra = _model_extra_body(cfg["model"])
     # Moonshot (Kimi) 官方 API 要求请求头 Kimi-Api-Version,
     # 视觉/多模态请求缺失时会报 400 "missing required header Kimi-Api-Version"
@@ -124,6 +153,11 @@ def build_llm(config_key: str = "main"):
 MODEL_PRICES = {
     "deepseek-chat": {"input": 0.27, "output": 1.10},
     "deepseek-reasoner": {"input": 0.55, "output": 2.19},
+    # DeepSeek V4 系列 (官方定价页: flash 峰时 0.30/1.20, 闲时为半价 0.15/0.60;
+    # v4-pro 峰时 1.32/3.96)。取峰时价作上界, 与 usage 的 token 数相乘即为保守估计。
+    "deepseek-flash": {"input": 0.30, "output": 1.20},
+    "deepseek-v4-flash": {"input": 0.30, "output": 1.20},
+    "deepseek-v4-pro": {"input": 1.32, "output": 3.96},
     "gpt-4o": {"input": 2.5, "output": 10.0},
     "gpt-4o-mini": {"input": 0.15, "output": 0.6},
     "gpt-5": {"input": 1.25, "output": 10.0},
@@ -133,7 +167,11 @@ MODEL_PRICES = {
     "qwen-plus": {"input": 0.4, "output": 1.2},
     "glm-4-plus": {"input": 0.5, "output": 1.5},
 }
+# 价格表未覆盖的模型 (如服务商自有型号) 只能按这个保守值估算;
+# 实际账单以服务商为准, 费用报告必须写明"用了兜底单价"而不是当成精确值。
 DEFAULT_MODEL_PRICE = {"input": 0.5, "output": 1.5}
+# 兜底单价的标记, 供费用报告区分"按价目表"与"按兜底"两种估算来源
+FALLBACK_MODEL_PRICE_NOTE = "价格表未收录该模型, 按兜底单价估算 (实际以服务商账单为准)"
 
 # GROBID 结构化解析（可选，需要本地/远程 GROBID 服务）
 # 去掉尾部斜杠: scipdf 拼接 /api/processFulltextDocument 时双斜杠会导致 400
@@ -186,3 +224,10 @@ HTTP_429_BACKOFF_BASE = float(os.getenv("HTTP_429_BACKOFF_BASE", "4"))
 # LLM 调用超时: 推理模型 (kimi-k2.6 等) 审稿/写作耗时长, 需要更宽容的超时
 LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "900"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
+
+# ===== 理论研究模式的资源预算 (计划书 §9.3) =====
+# 除动作/工具调用次数外, 还要限制模型 token、费用与墙钟时间; 任一超限即**停止并导出
+# 部分报告**, 而不是继续跑到失败。三者都为上限, 0 表示不限制。
+RESEARCH_MAX_TOKENS = int(os.getenv("RESEARCH_MAX_TOKENS", "0"))
+RESEARCH_MAX_COST_USD = float(os.getenv("RESEARCH_MAX_COST_USD", "0"))
+RESEARCH_MAX_WALL_SECONDS = float(os.getenv("RESEARCH_MAX_WALL_SECONDS", "0"))

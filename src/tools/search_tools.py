@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import re as _re
-
-from langchain_core.tools import tool
 import os
-import urllib.parse
+import re as _re
 import xml.etree.ElementTree as ET
 
+from langchain_core.tools import tool
+
 from src.config import ARXIV_MAX_RESULTS, SEMANTIC_SCHOLAR_MAX_RESULTS
-from src.utils.http_client import get_with_retry, CircuitBreakerOpenError
+from src.utils.http_client import get_with_retry
 
 ARXIV_API_URL = "https://export.arxiv.org/api/query"
 SEMANTIC_SCHOLAR_SEARCH_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
@@ -236,6 +235,25 @@ def semantic_scholar_search(query: str, max_results: int = 20) -> list[dict]:
     return papers
 
 
+def _openalex_abstract(inverted_index) -> str:
+    r"""OpenAlex 的摘要倒排索引 -> 可读文本。
+
+    形态是 `{"word": [位置, …], …}` (OpenAlex 出于版权只给倒排形式)。
+    还原方式: 把 (位置, 词) 全部摊平后按位置排序拼回。
+    拿不到就返回空串 —— 调用方据此判断"命中只有标题"。
+    """
+    if not isinstance(inverted_index, dict) or not inverted_index:
+        return ""
+    positions: dict[int, str] = {}
+    for word, index_list in inverted_index.items():
+        for index in (index_list or []):
+            if isinstance(index, int):
+                positions[index] = word
+    if not positions:
+        return ""
+    return " ".join(positions[key] for key in sorted(positions))
+
+
 @tool
 def openalex_search(query: str, max_results: int = 20) -> list[dict]:
     """Search OpenAlex for papers. 支持中英文查询，覆盖部分中文期刊文献。
@@ -247,7 +265,12 @@ def openalex_search(query: str, max_results: int = 20) -> list[dict]:
     params = {
         "search": query,
         "per-page": min(max_results, 50),
-        "select": "title,authorships,publication_year,doi,primary_location,cited_by_count",
+        # `abstract_inverted_index`: OpenAlex 的摘要以"词 -> 位置列表"倒排形式给出。
+        # 必须取它, 否则命中只有标题 —— 而引用守门要求"可定位引文"
+        # (`quote_is_locatable`), 没有摘要就永远判不成可引用 (实测: 检索到了却一条
+        # 也引不了)。摘要里通常就写着定理名与定理陈述, 是核对该定理最直接的依据。
+        "select": ("id,title,authorships,publication_year,doi,primary_location,"
+                   "cited_by_count,abstract_inverted_index"),
     }
     if OPENALEX_API_KEY:
         params["api_key"] = OPENALEX_API_KEY
@@ -276,6 +299,10 @@ def openalex_search(query: str, max_results: int = 20) -> list[dict]:
         from src.tools.pdf_fetcher import extract_arxiv_id
 
         arxiv_id = extract_arxiv_id(loc.get("landing_page_url", "") or "")
+        # OpenAlex work ID (`https://openalex.org/W123` -> `W123`): 与 DOI 并列的稳定
+        # 身份。此前没写这个字段, 而 `src/kb/identity.py` 把 OpenAlex ID 当作去重键之一
+        # (DOI > hash > OpenAlex ID > 标题+首作者+年份), 于是 S2 限流时去重能力打折。
+        openalex_id = (item.get("id", "") or "").rstrip("/").rsplit("/", 1)[-1]
         papers.append({
             "title": item.get("title", ""),
             "authors": authors,
@@ -283,11 +310,12 @@ def openalex_search(query: str, max_results: int = 20) -> list[dict]:
             "source": venue or "OpenAlex",
             "venue": venue,
             "api_source": "OpenAlex",
-            "abstract": "",
+            "abstract": _openalex_abstract(item.get("abstract_inverted_index")),
             "citations": item.get("cited_by_count", 0),
-            "url": item.get("doi", "") or f"https://openalex.org/works/{item.get('id', '').split('/')[-1]}",
+            "url": item.get("doi", "") or f"https://openalex.org/works/{openalex_id}",
             "arxiv_id": arxiv_id,  # 独立保存, 供 PDF 下载节点构造 arXiv 链接
             "doi": item.get("doi", "") or "",
+            "openalex_id": openalex_id,
             "bibtex": "",
             "published": bool(venue),
         })

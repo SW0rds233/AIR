@@ -3,13 +3,12 @@ from __future__ import annotations
 """PDF 全文摄入节点：下载 PDF → 解析全文 → 分块 → 向量入库"""
 
 import logging
-from typing import Optional
 
 from src.graph.state import PipelineState
-from src.tools.pdf_fetcher import download_pdfs_for_papers, download_arxiv_pdf
-from src.rag.paper_parser import extract_text_from_pdf
 from src.rag.chunker import chunk_paper_fulltext
+from src.rag.paper_parser import extract_text_from_pdf
 from src.rag.vector_store import add_fulltext_chunks
+from src.tools.pdf_fetcher import download_pdfs_for_papers
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +71,6 @@ def run_pdf_ingestion(state: PipelineState) -> dict:
     优先级排序: 标题含主题关键词 → arXiv 论文 → 其他。
     确保与主题最相关的论文优先入库，避免被泛领域热门论文挤占配额。
     """
-    import re as _re
 
     filtered = state.get("retrieved_papers", [])
     unfiltered = state.get("unfiltered_papers", [])
@@ -83,9 +81,9 @@ def run_pdf_ingestion(state: PipelineState) -> dict:
     # 补充论文要求 ≥2 个关键词命中 (强主题信号), 防止弱相关论文挤占下载配额
     try:
         from src.rag.relevance_filter import (
-            rule_filter,
-            extract_keywords,
             _normalize_keyword,
+            extract_keywords,
+            rule_filter,
         )
 
         user_kw = ", ".join(state.get("topic_keywords", []))
@@ -122,7 +120,7 @@ def run_pdf_ingestion(state: PipelineState) -> dict:
 
     # 关键词匹配用完整短语 (逗号分隔, 不拆散复合词), 与规则过滤保持一致
     try:
-        from src.rag.relevance_filter import extract_keywords, _normalize_keyword
+        from src.rag.relevance_filter import _normalize_keyword, extract_keywords
 
         user_kw = ", ".join(state.get("topic_keywords", []))
         score_words = [_normalize_keyword(k) for k in extract_keywords(topic, user_kw)]

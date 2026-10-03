@@ -2,13 +2,13 @@ from __future__ import annotations
 
 """引文真实性核查工具 — CrossRef / OpenAlex / arXiv 三源交叉验证"""
 
-import os
-import re
 import difflib
 import logging
+import os
+import re
 from typing import Optional
 
-from src.utils.http_client import get_with_retry, head_with_retry, CircuitBreakerOpenError
+from src.utils.http_client import get_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -647,7 +647,7 @@ def verify_draft_citations(draft: str, verified_refs: list[dict] = None) -> dict
         "# 引文核查报告",
         "",
         f"**核查时间**: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        f"**核查源**: CrossRef / OpenAlex / arXiv",
+        "**核查源**: CrossRef / OpenAlex / arXiv",
         f"**引用总数**: {len(records)} | "
         f"**已验证**: {verified} | "
         f"**存疑**: {ambiguous} | "

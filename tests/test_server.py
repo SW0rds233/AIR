@@ -17,8 +17,8 @@ from src.utils.console import ensure_utf8_console
 
 ensure_utf8_console()
 
-import src.server as server
-from src.server import StartRequest, build_initial_state, _final_summary, Session, _run_session
+from src import server
+from src.server import Session, StartRequest, _final_summary, _run_session, build_initial_state
 
 
 class _S(TypedDict, total=False):
@@ -27,7 +27,7 @@ class _S(TypedDict, total=False):
 
 
 def _mock_graph(checkpointer=None):
-    from langgraph.graph import StateGraph, END
+    from langgraph.graph import END, StateGraph
     from langgraph.types import interrupt
 
     g = StateGraph(_S)
@@ -146,7 +146,7 @@ def test_session_stop_unblocks_interrupt():
 
 def test_session_streams_stdout_as_log_events():
     """子智能体的 print 输出桥接为 SSE 'log' 事件"""
-    from langgraph.graph import StateGraph, END
+    from langgraph.graph import END, StateGraph
 
     def _mock_graph(checkpointer=None):
         g = StateGraph(_S)
@@ -388,8 +388,12 @@ def test_delete_session_removes_record_checkpoint_and_outputs():
     store.CONVERSATIONS_DIR = tmp / "conversations"
     orig_ckpt = server.CHECKPOINT_DIR
     server.CHECKPOINT_DIR = tmp / "checkpoints"
-    orig_out = server.OUTPUT_DIR
-    server.OUTPUT_DIR = tmp / "outputs"
+    # 产物根目录是配置项 (`server.output_dir()` 调用时读取): 必须 patch config,
+    # 否则写文件的位置与接口读取的位置会不一致
+    from src import config as config_mod
+
+    orig_out = config_mod.OUTPUT_DIR
+    config_mod.OUTPUT_DIR = tmp / "outputs"
     orig_cache = pc.CACHE_DIR
     pc.CACHE_DIR = tmp / "pipeline_cache"
     try:
@@ -402,7 +406,7 @@ def test_delete_session_removes_record_checkpoint_and_outputs():
         })
         server.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
         (server.CHECKPOINT_DIR / "sess-del.sqlite").write_text("", encoding="utf-8")
-        out_dir = server.OUTPUT_DIR / run_id
+        out_dir = config_mod.OUTPUT_DIR / run_id
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "draft.md").write_text("x", encoding="utf-8")
         # 检索缓存 (按 topic 存)
@@ -421,8 +425,59 @@ def test_delete_session_removes_record_checkpoint_and_outputs():
     finally:
         store.CONVERSATIONS_DIR = orig_dir
         server.CHECKPOINT_DIR = orig_ckpt
-        server.OUTPUT_DIR = orig_out
+        config_mod.OUTPUT_DIR = orig_out
         pc.CACHE_DIR = orig_cache
+
+
+def test_delete_session_keeps_shared_vector_store_for_other_sessions(monkeypatch):
+    """P0-4 数据损伤回归: 删会话 A 不得清空**其他会话仍在用**的共享向量库。
+
+    原始缺陷: `delete_session()` 无条件清空三个**全局** Chroma collection。多项目共用
+    一个实例时, 删掉 A 会把 B 的检索资料一起毁掉。判定依据是 project_id 所有权:
+    还有别的会话引用同一项目 -> 共享库必须保留, 并在响应里明说"保留了"。
+    """
+    import tempfile
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    import src.utils.conversation_store as store
+
+    tmp = Path(tempfile.mkdtemp())
+    orig_dir = store.CONVERSATIONS_DIR
+    store.CONVERSATIONS_DIR = tmp / "conversations"
+
+    cleared: list[str] = []
+
+    def fake_clear(name):
+        cleared.append(name)
+
+    monkeypatch.setattr("src.rag.vector_store.clear_collection", fake_clear)
+    try:
+        # 两个会话共用同一个项目 -> 共享检索资料
+        for sid in ("sess-a", "sess-b"):
+            store.save_conversation(sid, {
+                "session_id": sid, "thread_id": f"t-{sid}", "topic": "共享主题",
+                "status": "done", "messages": [], "request": {"project_id": "shared-proj"},
+            })
+        client = TestClient(server.app)
+
+        removed_a = client.delete("/api/sessions/sess-a").json()
+        assert removed_a["ok"] is True
+        assert cleared == [], "还有其他会话引用同一项目时, 不得清空共享向量库"
+        assert removed_a["kept_shared"], "必须明确告知共享资源被保留"
+        message = " ".join(removed_a["kept_shared"])
+        assert "保留" in message and "引用" in message, message
+        # B 的记录与资源仍在, 可继续使用
+        assert store.load_conversation("sess-b") is not None
+
+        # 删掉最后一个引用者时才允许清空
+        removed_b = client.delete("/api/sessions/sess-b").json()
+        assert removed_b["ok"] is True
+        assert cleared, "没有其他引用者时应正常清理"
+        assert not removed_b["kept_shared"]
+    finally:
+        store.CONVERSATIONS_DIR = orig_dir
 
 
 def test_delete_session_missing_returns_404():
