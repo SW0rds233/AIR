@@ -1,5 +1,7 @@
 import { defineConfig } from 'vite';
-import { existsSync, readdirSync, copyFileSync, mkdirSync, unlinkSync } from 'node:fs';
+import {
+  existsSync, readdirSync, readFileSync, copyFileSync, mkdirSync, renameSync, unlinkSync,
+} from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join, resolve } from 'node:path';
 
@@ -42,6 +44,18 @@ export default defineConfig({
   plugins: [
     {
       name: 'air-publish-assets',
+      /**
+       * 产物发布必须是**原子**的 (合并计划 §9.5 "构建发布")。
+       *
+       * 为什么不能"先删旧的再拷新的": 服务端在发布过程中随时可能响应用户 ——
+       * 旧哈希文件一旦被删、新文件还没拷全, 页面拿到的 `index.html` 会引用一个
+       * 不存在的脚本/CSS (表现为"样式没了/按钮全不响应")。
+       *
+       * 这里的做法利用一个事实: 产物名带内容哈希, **新旧文件名必然不同**, 因此
+       * 可以让两代产物同时存在 —— 先把新文件全部拷进去 (此时旧文件仍在, 页面
+       * 无论引用哪一代都能加载), 再删掉本代不再被引用的旧文件。任何时刻磁盘上
+       * 都有一份完整可用的产物。
+       */
       writeBundle() {
         const assets = resolve(here, 'dist', 'assets');
         const target = resolve(here, 'assets');
@@ -49,17 +63,26 @@ export default defineConfig({
           throw new Error('构建未生成 dist/assets');
         }
         mkdirSync(target, { recursive: true });
-        // 复制**全部**产物 (JS 与 CSS): 只复制 .js 会让样式产物留在 dist/ 里,
-        // 而服务端只提交/提供 src/web/assets/ —— 拆分样式后页面会突然没有样式。
-        const stale = existsSync(target) ? readdirSync(target) : [];
-        stale.forEach((name) => {
-          if (name.endsWith('.js') || name.endsWith('.css')) {
-            // 旧哈希产物不再被引用, 先清掉避免仓库里堆死文件
+        // 1) 先写入本代全部产物 (不删任何东西; 同名文件是同一份内容)
+        const fresh = readdirSync(assets).filter((name) => !name.startsWith('.'));
+        fresh.forEach((name) => {
+          // 先写临时名再改名: 对**同名**文件也保证读者不会看到半个文件
+          const staging = join(target, `.${basename(name)}.tmp`);
+          copyFileSync(join(assets, name), staging);
+          renameSync(staging, join(target, basename(name)));
+        });
+        // 2) 再清理不再被本代页面引用的旧产物 (此时代替品已经就位)
+        const freshSet = new Set(fresh.map((name) => basename(name)));
+        const builtIndex = resolve(here, 'dist', 'index.html');
+        const referenced = existsSync(builtIndex)
+          ? readFileSync(builtIndex, 'utf-8')
+          : '';
+        readdirSync(target).forEach((name) => {
+          if (!/\.(js|css)$/.test(name)) return;
+          const stillReferenced = referenced.includes(basename(name));
+          if (!freshSet.has(name) && !stillReferenced) {
             try { unlinkSync(join(target, name)); } catch { /* 忽略 */ }
           }
-        });
-        readdirSync(assets).forEach((name) => {
-          copyFileSync(join(assets, name), join(target, basename(name)));
         });
       },
     },

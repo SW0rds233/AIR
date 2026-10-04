@@ -46,13 +46,11 @@ async function main() {
 
   await page.goto(`${base}/`, { waitUntil: 'networkidle' });
 
-  // 1) 切到理论模式但不填项目 ID: 页面应生成草稿身份
-  await page.click('details.adv > summary');
-  await page.selectOption('#runmode', 'theory');
+  // 1) 统一入口: 页面打开即落实草稿身份 (不再需要"先切到理论模式")
   await page.waitForTimeout(300);
 
   const draft = ((await page.inputValue('#projid')) || '').trim();
-  if (!draft) problems.push('切到理论模式后没有生成草稿项目 ID');
+  if (!draft) problems.push('页面打开后没有生成草稿项目 ID');
   else if (!draft.startsWith('proj-')) problems.push(`草稿项目 ID 形态异常: ${draft}`);
   else steps.push(`草稿身份已生成: ${draft}`);
 
@@ -87,6 +85,9 @@ async function main() {
   // 6) 反向保护: 换成**手动输入的项目 id** 后必须照常查询 (别把这条路堵死)
   if (process.argv[3]) {
     stateCalls.length = 0;
+    // 项目/问题字段在「高级选项」里 (折叠的 details): 必须先展开才能填写。
+    // 统一入口后页面不再自动展开它, 因此脚本显式打开。
+    await page.click('details.adv > summary');
     await page.fill('#projid', process.argv[3]);
     await page.fill('#probid', 'p1');
     await page.evaluate(() => {

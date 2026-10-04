@@ -4,10 +4,12 @@
  *     node tests/e2e/web_upload.mjs http://127.0.0.1:PORT /绝对路径/合成.pdf
  *
  * 验证的诚实边界 (计划书 R1/R2/R3/R7 的现场口径):
- * - 入口只在**理论研究模式**下出现, 且位于折叠的「高级选项」里 —— 这是"看起来没有入口"
- *   的主要原因, 因此脚本显式断言: 综述模式下隐藏、切到理论模式后可见;
+ * - 入口**始终可见**且位于主界面 (统一入口后不再按"综述/理论模式"隐藏 ——
+ *   那套模式选择器已删除), 因此脚本断言: 未选择任何模式时附件行就可见, 且不在
+ *   折叠的「高级选项」里;
  * - 上传成功后必须出现在附件列表, 且被并入**启动请求**的 attachment_ids
  *   (只显示在列表里不算接上: 那正是 R1 的原始缺陷);
+ * - 启动请求**不得携带 mode** (统一入口契约);
  * - 服务端解析状态必须如实显示 (解析失败不得看起来"已成功")。
  */
 import { chromium } from 'playwright';
@@ -39,18 +41,16 @@ async function main() {
   });
 
   await page.goto(`${base}/`, { waitUntil: 'networkidle' });
-  await page.click('details.adv > summary');
 
-  // 1) 综述模式下不显示附件行 (理论模式的输入链路才有附件语义)
-  const surveyVisible = await page.isVisible('#attachrow');
-  if (surveyVisible) problems.push('综述模式下不应显示附件行');
-  else steps.push('综述模式下附件行隐藏');
+  // 1) 统一入口: 打开页面附件行就**可见** (不需要先选模式)
+  if (!(await page.isVisible('#attachrow'))) {
+    problems.push('附件行应始终可见 (统一入口下不再按模式隐藏)');
+  } else {
+    steps.push('附件行始终可见 (无需选择模式)');
+  }
 
-  // 2) 切到理论模式: 附件行出现, 且文件类型/用途控件齐全
-  await page.selectOption('#runmode', 'theory');
-  await page.waitForSelector('#attachrow', { state: 'visible', timeout: 10000 });
-  steps.push('切到理论模式后附件行可见');
-  // 入口必须在**主界面**(聊天输入区), 不得又退回折叠的「高级选项」里
+  // 2) 文件类型/用途控件齐全, 且入口在**主界面**(聊天输入区),
+  //    不得又退回折叠的「高级选项」里
   const inAdvanced = await page.evaluate(
     () => Boolean(document.querySelector('#attachrow')?.closest('details.adv')));
   if (inAdvanced) problems.push('附件入口又回到了折叠的高级选项里');
@@ -61,11 +61,14 @@ async function main() {
 
   // 3) 项目身份必须先落实 (R2: 否则附件会落到与运行无关的目录)
   const pid = (await page.inputValue('#projid')).trim();
-  if (!pid) problems.push('理论模式下没有先落实项目 ID (R2)');
+  if (!pid) problems.push('页面打开后没有先落实项目 ID (R2)');
   else steps.push(`草稿项目身份已落实: ${pid}`);
 
   // 3b) 显式固定项目/问题 id 后再上传: 上传与启动必须用**同一个**身份,
   //     否则附件会被归属校验拒绝 (启动时 project_id 变了 -> 附件不生效)。
+  //     项目/问题字段在「高级选项」里 (折叠的 details): 统一入口后页面不再自动展开,
+  //     因此这里显式打开再填写。
+  await page.click('details.adv > summary');
   await page.fill('#projid', pid || 'browser-upload');
   await page.fill('#probid', 'p1');
 
@@ -133,6 +136,10 @@ async function main() {
   if (payload && payload.project_id !== pid) {
     problems.push(`启动请求的项目 id (${payload.project_id}) 与上传时不一致 (${pid})`);
   }
+  // 统一入口契约: 启动请求**不得**带 mode (由服务端决定引擎)
+  const anyMode = startPayloads.find((p) => 'mode' in p);
+  if (anyMode) problems.push('启动请求仍携带 mode (统一入口要求前端不再发送该字段)');
+  else steps.push('启动请求未携带 mode (统一入口)');
 
   // 7) 反向用例: 上传后改动项目 ID 必须在启动前**如实拦下** (R3 归属校验的用户可见面)。
   //    否则附件会被服务端静默拒绝, 用户以为传了而研究其实没读 —— 这正是本用例要防的坑。

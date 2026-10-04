@@ -77,8 +77,10 @@ export function fmtTime(iso: unknown): string {
 /** 历史列表里的一个会话条目。 */
 export function historyItemHtml(summary: ConversationSummary): string {
   const status = String(summary.status || 'unknown');
-  const modeTag = ((summary.request || {}).mode === 'theory')
-    ? '<span class="tag t-neutral">理论</span> ' : '';
+  // 引擎标识只做**显示**: 有就如实标出 (服务端返回什么就显示什么), 不据它分支行为。
+  const engine = String(((summary.request || {}) as { mode?: unknown }).mode || '').trim();
+  const modeTag = engine
+    ? '<span class="tag t-neutral">' + esc(engine) + '</span> ' : '';
   let actions = modeTag +
     '<span class="hist-status st-' + esc(status) + '">' + esc(statusLabel(status)) + '</span>';
   if (isResumable(status)) {

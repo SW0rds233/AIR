@@ -121,12 +121,15 @@ describe('会话历史', () => {
     expect(running).toContain('运行中');
   });
 
-  it('理论会话带模式标记; 未归属字段回退到 session_id', () => {
+  it('引擎标识只做显示 (如实标出服务端返回值); 未归属字段回退到 session_id', () => {
     const html = historyItemHtml({session_id: 's9', status: 'running',
                                   request: {mode: 'theory'}});
-    expect(html).toContain('理论');
+    // 统一入口: 不再把 mode 翻译成"模式", 只如实显示引擎标识
+    expect(html).toContain('theory');
     expect(html).toContain('s9');
     expect(conversationTitle({session_id: 's9'})).toBe('s9');
+    // 没有引擎标识时不编造标签
+    expect(historyItemHtml({session_id: 's10', status: 'running'})).not.toContain('t-neutral');
   });
 
   it('主题里的 HTML 被转义', () => {

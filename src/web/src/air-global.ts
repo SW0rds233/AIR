@@ -18,26 +18,23 @@ import {
   label,
   loadConversation,
   resetForNewSession,
-  topicForRequest,
   type CurrentResearch,
   type ResearchPatch,
-  type RunMode,
   type RunStatus,
 } from './current-research';
 import {
   buildUrl,
-  createResearchApi,
+  client as researchClient,
   readJson,
-  requestWithRetry,
-  type ResearchApi,
-} from './research-api';
+  type ResearchClient,
+} from './api/research-client';
 import { AIRMarkdown } from './markdown';
 
 declare global {
   interface Window {
     AIR: {
       research: CurrentResearch;
-      api: ResearchApi;
+      api: ResearchClient;
       markdown: unknown;
       statusLabel: Record<RunStatus, string>;
       apply(patch: ResearchPatch): CurrentResearch;
@@ -45,11 +42,9 @@ declare global {
       load(request: Record<string, unknown>, sessionId: string): CurrentResearch;
       hasProblem(): boolean;
       label(): string;
-      topicForRequest(request: string, formTopic: string): string;
       buildUrl: typeof buildUrl;
       readJson: typeof readJson;
-      requestWithRetry: typeof requestWithRetry;
-      empty(mode: RunMode): CurrentResearch;
+      empty(): CurrentResearch;
     };
     AIRMarkdown?: {
       render(text: string, options: { className: string }): Node;
@@ -62,7 +57,7 @@ const research = emptyResearch();
 
 const air = {
   research,
-  api: createResearchApi(),
+  api: researchClient(),
   markdown: AIRMarkdown,
   statusLabel: STATUS_LABEL,
   apply(patch: ResearchPatch): CurrentResearch {
@@ -83,12 +78,8 @@ const air = {
   label(): string {
     return label(air.research);
   },
-  topicForRequest(request: string, formTopic: string): string {
-    return topicForRequest(air.research, request, formTopic);
-  },
   buildUrl,
   readJson,
-  requestWithRetry,
   empty: emptyResearch,
 };
 
@@ -98,3 +89,4 @@ if (typeof window !== 'undefined') {
 
 export { air };
 export default air;
+

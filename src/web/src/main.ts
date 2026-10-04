@@ -14,6 +14,8 @@ import { air } from './air-global';
 import './styles/base.css';
 import './styles/workbench.css';
 import './styles/layout.css';
+// 合并计划 §9.2: 团队状态条 / 角色卡片 / 任务表 (含窄屏响应式)
+import './styles/team.css';
 import './app';
 
 export default air;

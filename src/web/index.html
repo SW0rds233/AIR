@@ -24,7 +24,7 @@
     <span class="logo">AIR</span>
     <h1>AIR智能体研究系统</h1>
   </div>
-  <span class="badge" id="modebadge">综述论文 · 多智能体 · 对话式协作</span>
+  <span class="badge" id="modebadge">统一研究入口 · 多智能体 · 对话式协作</span>
   <div class="header-controls">
     <label class="sel-label" for="hist">会话</label>
     <select id="hist" title="切换到历史会话并继续工作">
@@ -40,15 +40,13 @@
 </header>
 
 <details class="adv">
-  <summary>高级选项（运行模式 / 精确主题 / 理论项目 · 可选）</summary>
-  <div class="adv-row" id="surveyrow">
-    <label>模式
-      <select id="runmode"
-              title="survey=综述写作；theory=理论研究（对象级反馈、交付门槛）">
-        <option value="survey">综述写作 (survey)</option>
-        <option value="theory">理论研究 (theory)</option>
-      </select>
-    </label>
+  <summary>高级选项（精确主题 / 项目与预算 / 资料范围 · 可选）</summary>
+  <!--
+    统一入口 (本轮迁移): 这里**不再有运行模式选择器**。
+    用户只描述研究, 由服务端决定用什么研究引擎; `mode` 只作为后端返回值用于显示。
+    因此资料库、检索范围、附件、本机路径等入口**始终可见**, 不再按模式隐藏。
+  -->
+  <div class="adv-row" id="topicrow">
     <input type="text" id="topic" placeholder="精确主题（可选）">
     <input type="text" id="keywords" placeholder="关键词，逗号分隔（可选）">
     <input type="text" id="subtopics" placeholder="子主题，逗号分隔（可选）">
@@ -56,8 +54,8 @@
     <label>轮次</label>
     <label><input type="checkbox" id="skipret"> 跳过检索(复用缓存)</label>
   </div>
-  <div class="adv-row" id="theoryrow" style="display:none">
-    <label>理论项目
+  <div class="adv-row" id="projectrow">
+    <label>研究项目
       <input type="text" id="projid" placeholder="项目 ID（留空自动生成）">
     </label>
     <label>问题
@@ -65,14 +63,14 @@
     </label>
     <label>动作上限
       <input type="number" id="maxactions" value="40" min="1" max="500" style="width:90px"
-             title="理论模式最大研究动作数">
+             title="最大研究动作数">
     </label>
     <label>工具调用上限
       <input type="number" id="maxtools" value="60" min="1" max="500" style="width:90px">
     </label>
     <button class="ghost" id="btn-copy-projid">复制项目 ID</button>
   </div>
-  <div class="adv-row" id="sourcerow" style="display:none">
+  <div class="adv-row" id="sourcerow">
     <label>资料库（研究将只使用它）
       <select id="sourceset">
         <option value="">（不绑定，按主题名匹配）</option>
@@ -81,7 +79,7 @@
     <button class="ghost" id="btn-refresh-sources">刷新资料库</button>
     <span class="wb-note" id="sourceinfo"></span>
   </div>
-  <div class="adv-row" id="policyrow" style="display:none">
+  <div class="adv-row" id="policyrow">
     <label>检索范围
       <select id="sourcepolicy"
               title="只用指定资料=仅授权库；自主检索=按方向到外部库检索；两者结合">
@@ -107,9 +105,9 @@
       <button id="btn-send">启动</button>
       <button id="btn-stop" class="danger" disabled>停止</button>
     </div>
-    <!-- 附件入口放在主界面 (理论研究模式才显示): 之前藏在折叠的「高级选项」里,
-         用户找不到入口。用途/列表/上传与原来完全一致, 只是位置提前。 -->
-    <div id="attachrow" style="display:none">
+    <!-- 附件入口始终可见 (统一入口: 不再按模式隐藏)。
+         用途/列表/上传与原来完全一致。 -->
+    <div id="attachrow">
       <label class="attach-pick" title="支持 pdf / txt / md / docx，单文件 ≤ 50 MB">
         <input type="file" id="attachfiles" multiple
                accept=".pdf,.txt,.md,.markdown,.docx">
@@ -126,6 +124,25 @@
       <span class="wb-note" id="attachhint">pdf / txt / md / docx，单文件 ≤ 50 MB</span>
       <div class="wb-note" id="attachlist"></div>
     </div>
+    <!-- 合并计划 §13.4: 从本机路径添加资料 —— 多行文本框 + 先预览再确认。
+         统一入口下**始终可见**, 且语义独立于附件上传: 这里登记的是**引用**,
+         不复制用户文件。
+         注意: 这里**不能**再套一层折叠 `<details>` —— 嵌套折叠在默认收起时,
+         子控件对用户和浏览器用例都不可见 (表现为"入口在但控件用不了")。 -->
+    <div id="pathrow" class="path-import">
+      <div class="path-import-head">从本机路径添加资料（只登记引用，不复制文件）</div>
+      <textarea id="libpaths" rows="3"
+        placeholder="每行一条：D:\papers\brc1949.pdf 或 D:\papers\（可含多个路径）"></textarea>
+      <div class="adv-row">
+        <label>库名
+          <input type="text" id="liblabel" placeholder="资料库名（必填，用于检索绑定）">
+        </label>
+        <button class="ghost" id="btn-lib-scan">扫描预览</button>
+        <button class="ghost" id="btn-lib-import" disabled>确认导入</button>
+        <span class="wb-note">只登记引用 + hash，不复制、不改名你的文件</span>
+      </div>
+      <div id="libpreview" class="lib-preview"></div>
+    </div>
   </div>
 
   <div class="panel output">
@@ -134,6 +151,8 @@
       <div class="tabs" role="tablist">
         <button class="tab active" data-tab="preview" role="tab" aria-selected="true">当前内容</button>
         <button class="tab" data-tab="workbench" role="tab" aria-selected="false">科研工作台</button>
+        <button class="tab" data-tab="library" role="tab" aria-selected="false">资料库</button>
+        <button class="tab" data-tab="paper" role="tab" aria-selected="false">论文与追溯</button>
         <button class="tab" data-tab="files" role="tab" aria-selected="false">outputs/ 文件</button>
       </div>
     </div>
@@ -141,10 +160,17 @@
       <div class="empty">在左侧描述你的研究，回车启动。大纲 / 初稿 / 审稿报告会显示在这里</div>
     </div>
     <div id="workbench" style="display:none" role="tabpanel">
-      <div class="empty">科研工作台：切换「模式」为理论研究并启动后，这里显示问题规格、结论状态表、
+      <div class="empty">科研工作台：启动一次研究后，这里显示问题规格、结论状态表、
         未决义务、证据定位、实验规格、研究路线与交付门槛。<br><br>
         也可以点「加载工作台」查看已有项目。</div>
     </div>
+    <div id="library" role="tabpanel" style="display:none">
+      <!-- 资料工作区 (合并计划 §9.2): 按来源类型 / 授权根 / 文件状态分组。
+           已导入的本机库会在这里显示失效文件; 这里不显示系统绝对路径。 -->
+      <div class="lib-summary" id="libworkspace-head">资料工作区</div>
+      <div id="libworkspace"></div>
+    </div>
+    <div id="paper" role="tabpanel" style="display:none"></div>
     <div id="files" role="tabpanel">
       <div class="wb-note" id="filebinding"></div>
     </div>

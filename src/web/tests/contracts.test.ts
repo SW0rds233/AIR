@@ -7,19 +7,19 @@
  */
 import { describe, expect, it } from 'vitest';
 
+// 契约按域分文件 (§9.5): 会话 / 研究 / 交付物。公共入口仍是 `contracts/index.ts`,
+// 这里**直接按域导入** —— 那样"某个类型属于哪个域"在测试里也是显式的。
+import type { SessionEvent, SessionState, StartSessionResponse } from '../src/contracts/session';
 import type {
   ClaimRow,
-  DeliveryManifest,
   EvidenceRow,
   ExperimentRow,
   FeedbackResponse,
   ProblemContract,
   RetrievalCoverage,
-  SessionEvent,
-  SessionState,
-  StartSessionResponse,
   WorkbenchState,
-} from '../src/contracts';
+} from '../src/contracts/research';
+import type { DeliveryManifest } from '../src/contracts/publication';
 
 const contract: ProblemContract = {
   goal: '分析信道变化对射频指纹可分性的影响',

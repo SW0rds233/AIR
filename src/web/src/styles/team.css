@@ -1,0 +1,224 @@
+/* 团队工作台样式 (合并计划 §9.2 / §9.6)。
+ *
+ * 要求: 状态不能只靠颜色区分 —— 每处状态都同时给文字与图标 (见 team-board.ts);
+ * 这里只做视觉分组与响应式, 不承担语义。
+ */
+
+.team-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.team-statusbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.role-status {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 132px;
+  padding: 6px 10px;
+  border: 1px solid var(--border, #d8d8d8);
+  border-radius: 8px;
+  background: var(--panel, #fafafa);
+  font-size: 12px;
+}
+
+.role-status .name {
+  font-weight: 600;
+}
+
+.role-status .state {
+  color: var(--text);
+}
+
+.role-status .count,
+.role-status .detail {
+  color: var(--muted, #666);
+  font-size: 11px;
+}
+
+.role-status.blocked {
+  border-color: var(--warn, #b45309);
+  border-width: 2px;
+}
+
+.team-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0;
+  font-size: 12px;
+}
+
+.team-filters select {
+  margin-left: 4px;
+}
+
+.team-status .icon {
+  margin-right: 4px;
+}
+
+.team-status-failed .txt,
+.team-status-cancelled .txt {
+  font-weight: 600;
+}
+
+.role-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 8px;
+}
+
+.role-card {
+  padding: 8px 10px;
+  border: 1px solid var(--border, #d8d8d8);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.role-card .role-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.role-card .role-objective {
+  color: var(--muted, #666);
+  margin: 4px 0;
+}
+
+.role-card .role-line {
+  margin-top: 2px;
+}
+
+.role-card .tag {
+  font-size: 11px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.row-failed td {
+  background: rgba(180, 83, 9, 0.06);
+}
+
+.wb table.kv th {
+  width: 34%;
+  text-align: left;
+}
+
+/* 资料接入 (合并计划 §13.4): 预览清单与资料工作区。
+ * 拒绝/截断必须视觉上"显眼但可读" —— 不用纯红色单独承担语义, 同时有图标与文字。 */
+.path-import {
+  border-top: 1px solid var(--border, #d8d8d8);
+  padding-top: 6px;
+  font-size: 13px;
+}
+
+.path-import-head {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.path-import textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.lib-preview,
+#libworkspace {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.lib-summary {
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.lib-group {
+  border: 1px solid var(--border, #d8d8d8);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.lib-group-denied {
+  border-color: rgba(180, 83, 9, 0.5);
+}
+
+.lib-group-head {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.lib-item {
+  padding: 2px 0;
+  border-top: 1px dashed var(--border, #e4e4e4);
+  font-size: 12px;
+}
+
+.lib-item:first-of-type {
+  border-top: none;
+}
+
+.lib-reason,
+.lib-title,
+.lib-notes {
+  color: var(--muted, #666);
+  font-size: 12px;
+}
+
+.lib-warn {
+  border-left: 3px solid rgba(180, 83, 9, 0.7);
+  padding: 4px 8px;
+  background: rgba(180, 83, 9, 0.06);
+  font-size: 12px;
+}
+
+.lib-ok {
+  border-left: 3px solid rgba(21, 128, 61, 0.7);
+  padding: 4px 8px;
+  background: rgba(21, 128, 61, 0.06);
+  font-size: 12px;
+}
+
+.lib-status .icon {
+  margin-right: 2px;
+}
+
+.lib-lib {
+  padding: 6px 0;
+  border-top: 1px dashed var(--border, #e4e4e4);
+  font-size: 12px;
+}
+
+.lib-lib:first-of-type {
+  border-top: none;
+}
+
+/* 窄屏: 团队状态条纵向堆叠, 不把多列挤成不可读的表格 */
+@media (max-width: 720px) {
+  .team-statusbar {
+    flex-direction: column;
+  }
+
+  .role-status {
+    min-width: 0;
+  }
+
+  .role-grid {
+    grid-template-columns: 1fr;
+  }
+}

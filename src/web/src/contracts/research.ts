@@ -1,38 +1,9 @@
 /**
- * 前后端契约类型 (计划书 P2): 会话事件 / 研究状态 / 反馈 / 交付清单只在这里定义一次。
+ * 研究契约: 问题形式化、研究对象与工作台读取的行。
  *
- * 页面逻辑 (`app.ts`) 仍是从内联脚本迁出的遗留代码, 尚未逐段类型化; 但**边界**
- * (window.AIR / 工作台 / 安全渲染 / 交付清单) 从这里取类型, 视图层不再各自
- * 声明结构相同的匿名对象。
+ * 这些字段的权威在 `research/schemas.py`; 前端只声明**自己真正读取**的部分
+ * (多声明一个字段就等于多一处会漂移的假设)。
  */
-
-export type RunMode = 'survey' | 'theory';
-export type RunStatus = 'idle' | 'running' | 'waiting' | 'done' | 'stopped' | 'error';
-
-/** SSE 事件 (后端 `/api/sessions/{id}/events`)。 */
-export interface SessionEvent {
-  type: 'connected' | 'node' | 'log' | 'interrupt' | 'done' | 'stopped' | 'error' | string;
-  text?: string;
-  name?: string;
-  message?: string;
-  state?: Record<string, unknown>;
-  payload?: Record<string, unknown>;
-  _seq?: number;
-}
-
-/** 会话状态补偿接口的返回。 */
-export interface SessionState {
-  thread_id: string;
-  session_id: string;
-  status: RunStatus;
-  mode: RunMode;
-  run_id: string;
-  project_id: string;
-  problem_id: string;
-  event_seq: number;
-  pending_interrupt_id?: string;
-  final_state?: Record<string, unknown> | null;
-}
 
 /** 问题契约 (P0-2): 研究类型决定允许的方法与结论强度。 */
 export type TaskKind = 'mechanism' | 'formal_proof' | 'empirical_causal' | 'scenario';
@@ -78,19 +49,6 @@ export interface RetrievalCoverage {
   uncovered: string[];
   failures: string[];
   scope_note: string;
-}
-
-/** 启动会话的返回。 */
-export interface StartSessionResponse {
-  thread_id: string;
-  session_id: string;
-  mode: RunMode;
-  run_id: string;
-  project_id: string;
-  problem_id: string;
-  contract: ProblemContract | null;
-  spec_reused: boolean;
-  resumed: boolean;
 }
 
 /** 工作台单行对象 (只列前端真正读取的字段)。 */
@@ -172,42 +130,4 @@ export interface FeedbackResponse {
   needs_clarification?: boolean;
   clarify?: string[];
   actions?: Array<Record<string, unknown>>;
-}
-
-/** 交付清单 (manifest.json)。 */
-export interface DeliveryManifest {
-  project_id: string;
-  problem_id: string;
-  run_id: string;
-  branch_id?: string;
-  snapshot_id: string;
-  delivery_level: string;
-  delivery_gate_passed?: boolean | null;
-  writing_map: Record<string, string>;
-  source_set: {
-    source_set_id: string;
-    source_policy: string;
-    queries: string[];
-    uncovered: string[];
-    documents: Array<{ source_id: string; title: string; file_hash: string; locator: string }>;
-    note: string;
-  };
-  model_config: Record<string, string>;
-  budget_limits: Record<string, number>;
-  usage: Record<string, unknown>;
-  manuscript_traceability: {
-    ok: boolean;
-    mapped: Array<{ claim_id: string; anchor: string }>;
-    unmapped_claims: string[];
-    missing_anchors: string[];
-    note: string;
-  };
-}
-
-export interface ArtifactEntry {
-  name: string;
-  size?: number;
-  problem_id?: string;
-  run_id?: string;
-  delivery_level?: string;
 }

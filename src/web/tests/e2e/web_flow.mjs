@@ -1,10 +1,12 @@
 /**
  * P2 真实浏览器验收 (计划书 §5 发布判据 5)。
  *
- * 覆盖: 构建产物能真正跑起来 (无 JS 报错/无 4xx 资源) → 切到理论研究模式 → 提交问题 →
+ * 覆盖: 构建产物能真正跑起来 (无 JS 报错/无 4xx 资源) → 提交问题 →
  * 工作台出现结论对象 → 窄屏布局仍可操作。用法:
  *
  *     node tests/browser/web_flow.mjs http://127.0.0.1:PORT
+ *
+ * 统一入口: 不再有"模式选择"步骤 —— 页面打开即可直接输入研究请求。
  *
  * 退出码 0 表示通过; 失败时把原因打到 stdout 供 pytest 展示。
  */
@@ -40,13 +42,13 @@ async function main() {
   if (!hasAir) problems.push('打包脚本未执行: window.AIR 不存在');
   steps.push('页面加载 + window.AIR 存在');
 
-  // 2) 理论研究模式 + 提交一个可离线判定的问题 (模式选择在"高级选项"里, 先展开)
+  // 2) 统一入口: 直接提交一个可离线判定的问题 (没有模式可选; 项目/问题在
+  //    "高级选项"里显式指定, 便于断言工作台归属)
   await page.click('details.adv > summary');
-  await page.selectOption('#runmode', 'theory');
   await page.fill('#topic', '对所有实数 x: x**2 >= 0');
   await page.fill('#projid', 'browser-e2e');
   await page.fill('#probid', 'p1');
-  steps.push('切到理论模式并填写项目/问题');
+  steps.push('填写项目/问题并提交');
 
   await page.click('#btn-send');
   // 3) 工作台出现命题对象 (结论 id)
@@ -68,7 +70,9 @@ async function main() {
   // 4b) 工作台动作真的能点 (P2 实测缺陷: 内联 onclick 被 CSP 拦掉后按钮是死的)
   const claimToggle = page.locator('[data-action="toggleClaimDetail"]').first();
   if (await claimToggle.count() === 0) {
-    problems.push('工作台没有可点的结论详情按钮 (data-action=toggleClaimDetail)');
+    const dump = ((await page.textContent('#workbench')) || '').slice(0, 700);
+    problems.push(`工作台没有可点的结论详情按钮 (data-action=toggleClaimDetail); ` +
+      `实际内容: ${dump}`);
   } else {
     const before = await page.locator('#workbench').textContent();
     await claimToggle.click();
@@ -81,6 +85,34 @@ async function main() {
     } else {
       steps.push('工作台动作点击生效 (data-action 委托)');
     }
+  }
+
+  // 4c) 论文与追溯面板 (§9.6): 标签可切换, 面板有内容且不是空面板
+  const paperTab = page.locator('[data-tab="paper"]');
+  if (await paperTab.count() === 0) {
+    problems.push('缺少「论文与追溯」标签 (data-tab="paper")');
+  } else {
+    await paperTab.click();
+    const paperVisible = await page.evaluate(() => {
+      const el = document.getElementById('paper');
+      if (!el) return false;
+      return getComputedStyle(el).display !== 'none';
+    });
+    if (!paperVisible) problems.push('切到论文标签后 #paper 面板仍不可见');
+    const paperText = (await page.textContent('#paper')) || '';
+    // 无交付包时也必须说明原因 (空面板冒充成功是不可接受的)
+    if (!/还没有交付包|交付等级|读取/.test(paperText)) {
+      problems.push(`论文面板没有可读内容: ${paperText.slice(0, 200)}`);
+    }
+    if (!/渲染期编号/.test(paperText)) {
+      problems.push('论文面板缺少渲染期编号说明 (§6.3: 页面不自行编号)');
+    }
+    const filesHidden = await page.evaluate(() => {
+      const el = document.getElementById('files');
+      return el ? getComputedStyle(el).display === 'none' : false;
+    });
+    if (!filesHidden) problems.push('切到论文标签后 outputs/ 面板未隐藏 (标签互斥失效)');
+    steps.push('论文与追溯面板可切换且有内容');
   }
 
   // 5) 窄屏: 布局改为纵向且控件仍可点

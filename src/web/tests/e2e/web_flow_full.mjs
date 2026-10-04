@@ -29,7 +29,7 @@ async function main() {
 
   await page.goto(`${base}/`, { waitUntil: 'networkidle' });
   await page.click('details.adv > summary');
-  await page.selectOption('#runmode', 'theory');
+  // 统一入口: 不再有模式选择步骤
 
   // 1) 选资料: 资料库下拉必须列出合成资料集, 选中后需显示其文档数
   await page.waitForFunction(
