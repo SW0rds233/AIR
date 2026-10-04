@@ -17,7 +17,9 @@ from src.agents.protocol import AgentTask, AgentResult, ChangeProposal, grant_fo
 from src.agents.runtime import AgentRuntime  # noqa: E402
 from src.agents.supervisor import SupervisorAgent  # noqa: E402
 from src.graph.research_graph import TeamRun  # noqa: E402
-from src.graph.team_session import _evidence_of, _model_of  # noqa: E402
+# 映射的**唯一定义**在 `research/snapshot.py` (G11 之后从 graph 层移出);
+# 探针必须跟着走, 否则它会在"真实入口没问题"的情况下报 ImportError。
+from src.research.snapshot import _evidence_of, _model_of  # noqa: E402
 from src.research.projection import TeamProjection  # noqa: E402
 from src.research.store import ResearchStore  # noqa: E402
 from src.research.task_store import TaskStore  # noqa: E402
