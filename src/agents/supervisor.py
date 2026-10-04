@@ -42,6 +42,7 @@ from src.agents.protocol import (
     TaskBudget,
     TaskOutcome,
     idempotency_key_for,
+    role_of,
     utcnow,
 )
 from src.research.schemas import (
@@ -78,6 +79,27 @@ SUBQUESTION_KINDS: tuple[str, ...] = (
     "data_availability",        # 数据可用性分析
     "validation_plan",          # 验证方案
 )
+
+#: 不需要外部依据的子问题类型: 纯自足证明 (§3.1 G05 的例外)。
+#:
+#: 只有"证明某个数学对象存在/不存在"这类问题可以在没有文献的情况下启动。其余类型
+#: (文献综合、机理、案例比较、数据可用性…) 都必须先有依据再推理。
+SELF_CONTAINED_SUBQUESTION_KINDS: frozenset[str] = frozenset({"existence_proof"})
+
+
+def _all_reasoning_self_contained(brief: ResearchBrief) -> bool:
+    """主控把推理排在了哪些子问题上, 这些子问题是否全是自足证明。
+
+    保守判据: 只要**有一个**需要依据的子问题交给推理, 推理就必须等证据就绪 ——
+    宁可多一轮检索, 也不要让模型凭记忆引用定理。
+    """
+    reasoning_subs = [sub for sub in brief.subquestions
+                      if role_of(sub.owner) == "reasoning"]
+    if not reasoning_subs:
+        return True
+    return all(sub.kind in SELF_CONTAINED_SUBQUESTION_KINDS
+               for sub in reasoning_subs)
+
 
 #: 交付形态。
 DELIVERABLES: tuple[str, ...] = (
@@ -418,7 +440,11 @@ class SupervisorAgent:
             brief.unknown_fields.append("source_set_ids")
         brief.basis = basis + (f"; 预算说明: {budget_note}" if budget_note else "")
 
-        # 子问题: 由类型展开, 每类一条; "文献清单"不需要综合, 纯综述也不伪造证明义务。
+        # 子问题: **优先让模型提** (§3.1 G04), 规则展开作为降级路径。
+        #
+        # 主控此前"保存了 llm 却从不调用", 于是理解任务退化成关键词分类 ——
+        # 同义改写、否定条件、跨领域说法都会走样。这里把模型提议接上, 并保留规则
+        # 展开作为**离线/失败**时的路径; 用了哪条会如实写进 brief.basis / unknown_fields。
         owner_map = {
             "literature_synthesis": "reasoning",
             "existence_proof": "reasoning",
@@ -428,12 +454,29 @@ class SupervisorAgent:
             "data_availability": "evidence",
             "validation_plan": "validation",
         }
-        for index, kind in enumerate(kinds):
-            brief.add_subquestion(
-                statement=f"{_KIND_LABELS.get(kind, kind)}: {_short(request or attachment_text)}",
-                kind=kind, owner=owner_map.get(kind, "reasoning"), priority=index,
-                needs=["给出可核查的结论或明确的未决说明"],
-            )
+        model_proposed = self._propose_subquestions(
+            request, attachment_text, kinds, owner_map=owner_map)
+        if model_proposed:
+            for index, item in enumerate(model_proposed):
+                brief.add_subquestion(
+                    statement=item["statement"], kind=item["kind"],
+                    owner=item["owner"], priority=index, needs=item["needs"])
+            brief.basis = (brief.basis + "; 子问题由模型提议").strip("; ")
+            substituted = getattr(self, "_last_substitutions", [])
+            if substituted:
+                # 模型的角色名不被认时用了类型默认角色: 让人能看到发生过替换
+                brief.basis += f"; 角色已按类型归位: {', '.join(substituted)}"
+        else:
+            for index, kind in enumerate(kinds):
+                brief.add_subquestion(
+                    statement=f"{_KIND_LABELS.get(kind, kind)}: {_short(request or attachment_text)}",
+                    kind=kind, owner=owner_map.get(kind, "reasoning"), priority=index,
+                    needs=["给出可核查的结论或明确的未决说明"],
+                )
+            if self.llm is not None:
+                # 有模型却没走上模型: 这是**降级**, 必须可见 ——
+                # 不能让"规则跑通"看起来像"模型理解过任务"
+                brief.unknown_fields.append("subquestions_from_model")
         # 资料需求: 只要需要检索就必须有一条独立子问题 (§3.1: 检索覆盖文献/案例/数据)
         if "existence_proof" in kinds or "literature_synthesis" in kinds \
                 or "mechanism" in kinds or autonomous_retrieval:
@@ -454,6 +497,78 @@ class SupervisorAgent:
                 needs=["逐项给出问题、严重度与可核验的验收标准",
                        "科学问题与文字问题分开处理"])
         return brief
+
+    # ---- 理解任务: 模型提议 (规则展开是降级路径) ----
+    #: 主控的规划提示词。要求**只**输出 JSON, 并要求每个子问题说明它回答什么、
+    #: 需要哪些依据 —— 这三样正是后续派工与验收要用的字段。
+    BRIEF_SYSTEM = """你是科研团队的主控。你的工作是把用户的研究请求拆成**有区别、可独立派工**的子问题。
+
+要求:
+1. 每个子问题必须带来新的信息, 不要把一个问题的不同说法拆成多条;
+2. 子问题类型只能取: literature_synthesis / existence_proof / mechanism /
+   model_construction / case_comparison / data_availability / validation_plan;
+3. owner 只能取: evidence / modeling / reasoning / validation / writing / figures / review;
+4. 需要已有定理、数据或案例支撑的子问题, 不得标成 existence_proof (那是给自足证明用的);
+5. 不要臆造用户没说过的约束、数据或结论。
+
+只输出 JSON:
+{"subquestions": [{"statement": "要回答什么", "kind": "mechanism",
+  "owner": "modeling", "needs": ["什么算完成"]}]}"""
+
+    def _propose_subquestions(self, request: str, attachment_text: str,
+                              kinds: list[str],
+                              *, owner_map: dict[str, str]) -> list[dict[str, Any]]:
+        """让模型提出子问题; 不可用/不合规时返回 `[]` (调用方走规则展开)。
+
+        校验放在这里而不是信任模型: 未登记的类型或角色一律**丢弃该条**, 而不是
+        带着非法值进计划 —— 否则 `AgentTask` 的校验会在派工时才炸, 而那时用户
+        已经等了一轮。
+        """
+        if self.llm is None:
+            return []
+        prompt = (f"研究请求:\n{request}\n\n"
+                  f"附件文本节选:\n{(attachment_text or '')[:2000]}\n\n"
+                  f"规则层初判的类型: {', '.join(kinds) or '(未判定)'}\n"
+                  f"请给出子问题清单。")
+        try:
+            response = self.llm.invoke(prompt)
+        except Exception:  # noqa: BLE001 - 模型不可用不能拖垮主控
+            return []
+        from src.agents.base import extract_json
+
+        payload, _reason = extract_json(getattr(response, "content", response))
+        if not isinstance(payload, dict):
+            return []
+        raw = payload.get("subquestions")
+        if not isinstance(raw, list):
+            return []
+        valid: list[dict[str, Any]] = []
+        substituted: list[str] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            statement = str(item.get("statement", "")).strip()
+            kind = str(item.get("kind", "")).strip()
+            if not statement or kind not in SUBQUESTION_KINDS:
+                continue
+            # owner 的解析顺序: 模型给的合法角色 → 该类型的默认角色。
+            # 注意要校验**最终**结果 (早先版本的检查写在兜底之前, 于是"类型已知 +
+            # 角色非法"会带着兜底角色通过 —— 实测 `owner="hacker"` 被放行)。
+            proposed_owner = str(item.get("owner", "")).strip()
+            owner = role_of(proposed_owner) or owner_map.get(kind, "")
+            if not owner or owner == "supervisor":
+                continue
+            if proposed_owner and role_of(proposed_owner) != owner:
+                # 角色是兜底来的: 记下来, 不静默改派 (模型说 hacker 时我们要知道)
+                substituted.append(f"{proposed_owner or '(空)'}→{owner}")
+            needs = [str(n).strip() for n in (item.get("needs") or []) if str(n).strip()]
+            valid.append({"statement": statement, "kind": kind, "owner": owner,
+                          "needs": needs or ["给出可核查的结论或明确的未决说明"]})
+            if len(valid) >= 8:               # 上限: 防止模型把任务拆得过碎
+                break
+        if substituted:
+            self._last_substitutions = substituted
+        return valid
 
     # ---- 组队 ----
     def plan(self, brief: ResearchBrief, *, version: int | None = None,
@@ -503,23 +618,40 @@ class SupervisorAgent:
             plan.add_task(task)
             task_by_sub[sub.subquestion_id] = task.task_id
         # 资料是下游的前提: 让同一子问题内"检索"先于"写作/审阅"由 plan 的依赖表达
-        self._wire_default_dependencies(plan)
+        self._wire_default_dependencies(plan, brief)
         return plan
 
     @staticmethod
-    def _wire_default_dependencies(plan: TeamPlan) -> None:
-        """把"必须先有依据"的默认依赖写进计划 (§5.4 串行条件)。
+    def _wire_default_dependencies(plan: TeamPlan,
+                                   brief: ResearchBrief | None = None) -> None:
+        """把"必须先有依据"的默认依赖写进计划 (§5.4 串行条件 / §3.1 G05)。
 
         只用**已存在**的依赖边做加边, 不改任务本身: 写作依赖推理与检索,
         审阅依赖写作。结论前提变更时的失效传播由判定层处理, 不在这里假装完成。
+
+        **为什么推理也要等证据** (G05): 审计复现的首轮顺序是
+        `reasoning, reasoning, evidence`, 且推理任务的依赖为空 —— 也就是主控先让模型
+        推导, 再去查文献。对"需要已有定理/数据/案例"的问题, 这等于**凭记忆推导**:
+        模型可能引用一个记错的定理, 而检索结果只在最后一轮才出现, 没人回头核对。
+
+        例外 (计划 §3.1 G05 明确允许): **纯自足证明**可以无文献启动 —— 组合设计存在性
+        这类问题本身不需要外部依据, 强行先检索只是浪费预算。判据是子问题类型
+        (`existence_proof`), 不是"要不要省事"。这类情况下 `reference_status` 会留在
+        未核对状态, 交付时必须如实标出, 不能算成"引用已核实"。
         """
         by_role: dict[str, list[str]] = {}
         for record in plan.tasks:
             by_role.setdefault(str(record.get("agent", "")), []).append(
                 str(record.get("task_id", "")))
-        prerequisites = {"writing": ("reasoning", "evidence", "modeling"),
-                         "figures": ("reasoning", "evidence"),
-                         "review": ("writing", "reasoning", "figures")}
+        prerequisites: dict[str, tuple[str, ...]] = {
+            "writing": ("reasoning", "evidence", "modeling"),
+            "figures": ("reasoning", "evidence"),
+            "review": ("writing", "reasoning", "figures"),
+        }
+        # 推理是否需要先读资料: 只有当**所有**推理任务都是自足证明时才豁免
+        if brief is not None and by_role.get("reasoning"):
+            if not _all_reasoning_self_contained(brief):
+                prerequisites["reasoning"] = ("modeling", "evidence")
         for role, needed in prerequisites.items():
             for task_id in by_role.get(role, []):
                 extra = [t for src in needed for t in by_role.get(src, [])]
@@ -987,3 +1119,4 @@ def plan_fingerprint(plan: TeamPlan) -> str:
              str(t.get("subquestion", ""))) for t in plan.tasks]
     return stable_id("planfp", plan.version,
                      json.dumps(body, ensure_ascii=False, sort_keys=True))
+

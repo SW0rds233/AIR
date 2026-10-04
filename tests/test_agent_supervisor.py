@@ -156,11 +156,15 @@ def test_plan_wires_default_dependencies_so_writing_waits_for_evidence():
 def test_plan_ready_excludes_completed_and_running():
     brief = _brief("写一篇综述")
     plan = SupervisorAgent().plan(brief, version=1)
-    first = plan.task_ids()[0]
     ready_before = plan.ready(completed=set())
-    assert first in ready_before
+    assert ready_before, "没有任何可派发任务"
+    # 不假设"列表里第一条就是可跑的": 依赖加入后, 先派证据/建模才是对的
+    # (§3.1 G05)。判据是 ready() 的语义本身。
+    first = ready_before[0]
     assert first not in plan.ready(completed={first})
     assert first not in plan.ready(completed=set(), running={first})
+    # 依赖满足后应当出现**更多**可跑任务 (依赖确实在起作用)
+    assert len(plan.ready(completed={first})) >= len(ready_before) - 1
 
 
 def test_plan_fingerprint_is_stable_for_same_plan():

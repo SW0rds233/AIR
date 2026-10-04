@@ -99,8 +99,17 @@ try:
     supervisor = SupervisorAgent(llm=spy)
     brief = supervisor.brief("证明所有正数 x 满足给定不等式，并参考文献写成论文",
                              project_id="audit")
-    plan = supervisor.plan(brief)
-    decision = supervisor.decide(brief=brief, plan=plan)
+    # 直接调 plan() 时不会带运行身份 —— 身份由**运行时**(TeamRun)注入。为了测到真实
+    # 行为, 这里经 TeamRun 走一遍 (G14 的判据是"计划里有没有 run_id")。
+    from src.graph.research_graph import TeamRun as _TeamRun  # noqa: E402
+
+    team_probe = _TeamRun(project_id="audit", problem_id="p1", run_id="audit-run",
+                          request="证明所有正数 x 满足给定不等式，并参考文献写成论文",
+                          supervisor=supervisor,
+                          task_store=TaskStore("audit", store))
+    team_probe.prepare()
+    plan = team_probe.loop.plan
+    decision = supervisor.decide(brief=team_probe.loop.brief, plan=plan)
     facts["G04_G14_supervisor"] = {
         "llm_calls": spy.calls,
         "first_roles": [t.agent for t in decision.tasks],
@@ -113,16 +122,40 @@ try:
     }
 
     # --- G05: 推理是否先于证据 ---
+    roles_by_id = {str(t.get("task_id", "")): str(t.get("agent", ""))
+                   for t in plan.tasks}
     facts["G05_dispatch_order"] = {
         "first_roles": [t.agent for t in decision.tasks],
-        "evidence_dependencies": [t.get("depends_on") for t in plan.tasks
-                                  if t.get("agent") == "evidence"],
+        "reasoning_depends_on_roles": sorted({
+            roles_by_id.get(str(dep), dep)
+            for t in plan.tasks if t.get("agent") == "reasoning"
+            for dep in (t.get("depends_on") or [])}),
     }
 
-    # --- G02: 默认团队是否有模型 ---
-    team = TeamRun(project_id="audit", run_id="audit-run", request="研究问题",
-                   task_store=TaskStore("audit", store))
-    facts["G02_default_team_llm_available"] = team.runtime.llm_available()
+    # --- G02: **HTTP 装配**出来的团队是否有角色模型 ---
+    # 注意: 裸 `TeamRun(...)` 本来就没有模型 —— 模型由装配层注入 (这是有意的分工)。
+    # 因此判据是"从入口构建出来的团队有没有模型", 不是"直接 new 一个有没有"。
+    from src import server as _server  # noqa: E402
+
+    class _ProbeSession:
+        request = {"project_id": "audit", "problem_id": "p1", "request": "研究问题",
+                   "source_policy": "user_kb"}
+        run_id = "audit-run"
+        session_id = "audit-session"
+        topic = "audit"
+
+        def emit(self, *_a, **_k):
+            pass
+
+    team = _server._build_team_app(_ProbeSession()).session.team
+    facts["G02_team_entry_has_model_factory"] = {
+        "factory_wired": team.runtime._llm_factory is not None,
+        # 本探针在离线约定下运行 (THEORY_LLM=0), 所以能力应为 False; 关键是**工厂已接线**
+        "llm_available_offline": team.runtime.llm_available(),
+        "run_id_wired": team.run_id,
+        "verdict": ("FIXED (entry injects a role model factory)"
+                    if team.runtime._llm_factory is not None else "STILL BROKEN"),
+    }
 finally:
     store.close()
 
