@@ -1,31 +1,40 @@
 /**
- * 当前研究状态 (计划书 §2 F1)。
+ * 当前研究上下文的**只读投影** (G19 / 合并计划 §8.1)。
  *
- * 一次上下文切换必须让**所有**视图跟着走: 项目、问题、运行、状态。
- * 早期实现把这些字段散落在多个全局变量里, 切换历史会话时只恢复线程,
- * 于是项目字段会沿用上一个会话。
+ * 这个模块曾经是一套**可写状态机** (`CurrentResearch` + `applyPatch` /
+ * `resetForNewSession` / `loadConversation`), 并由 `air-global.ts` 保存成
+ * `window.AIR.research`。那份状态与 `state/research-store.ts` 的选择器和
+ * `app.ts` 的 ID 镜像并行存在 —— 于是切换会话时必须靠
+ * `syncSelectionFromLegacy()` 之类的兼容同步来"对表", 任何一条路径漏同步就会串号。
  *
- * 本模块是纯数据 + 纯函数: 不访问 `document`/`window`/网络, 因此可以直接
- * 在测试里驱动 (见 `tests/current-research.test.ts`)。
+ * 现在可写状态只有 `state/research-store.ts` 一份:
  *
- * 统一入口 (本轮迁移): 用户**不再选择"综述/理论"模式**。
- * `mode` 只剩一个用途 —— 保存服务端返回的引擎标识**用于显示**;
- * 前端不得再据它分支任何界面行为, 因此这里不再声明 `RunMode` 字面量联合,
- * 也删掉了 `topicForRequest` (它的全部意义就是按模式挑 topic)。
+ * - 这里**只有纯 selector**, 没有任何 `apply`/`reset`/`load` 之类的写入口;
+ * - `window.AIR.research` 是 `researchView()` 的只读快照 (对象被冻结, 见
+ *   `air-global.ts`), 供迁移期的浏览器用例读取, 不再是第二份真相;
+ * - 用户可见的状态文案 (`STATUS_LABEL`) 由 store 提供, 这里只做纯函数拼装。
+ *
+ * 统一入口 (本轮迁移): 用户**不再选择"综述/理论"模式**。`mode` 只剩一个用途 ——
+ * 保存服务端返回的引擎标识**用于显示**; 前端不得再据它分支任何界面行为。
  */
 
-import type { RunStatus } from './contracts/session';
+import {
+  STATUS_LABEL,
+  type ResearchStore,
+  type RunStatus,
+} from './state/research-store';
 
 export type { RunStatus };
 
-export interface CurrentResearch {
+/** `window.AIR.research` 的形状: 只是 `ResearchStore` 的只读投影, 不是可写状态。 */
+export interface ResearchView {
   threadId: string;
   sessionId: string;
   /**
    * 服务端返回的引擎标识 (`theory` / `survey` / ...), **只用于显示**。
    *
    * 刻意声明为 `string` 而不是字面量联合: 前端不再理解它的取值含义,
-   * 也就不会有人再写 `mode === 'theory'` 这种分支 (那正是本轮要删掉的旧实现)。
+   * 也就不会有人再写 `mode === 'theory'` 这种分支。
    */
   mode: string;
   projectId: string;
@@ -36,75 +45,22 @@ export interface CurrentResearch {
   status: RunStatus;
 }
 
-export type ResearchPatch = Partial<CurrentResearch>;
-
-export const STATUS_LABEL: Record<RunStatus, string> = {
-  idle: '就绪',
-  running: '运行中',
-  waiting: '等待输入',
-  done: '已完成',
-  stopped: '已停止',
-  error: '出错',
-};
-
-export function emptyResearch(): CurrentResearch {
-  return {
-    threadId: '',
-    sessionId: '',
-    mode: '',
-    projectId: '',
-    problemId: '',
-    contextTopic: '',
-    runId: '',
-    status: 'idle',
-  };
-}
-
-/** 合并一次状态变更 (只有显式给出的字段会被改动)。 */
-export function applyPatch(state: CurrentResearch, patch: ResearchPatch): CurrentResearch {
-  const next: CurrentResearch = { ...state };
-  if ('threadId' in patch) next.threadId = patch.threadId || '';
-  if ('sessionId' in patch) next.sessionId = patch.sessionId || '';
-  if ('mode' in patch) next.mode = patch.mode || '';
-  if ('projectId' in patch) next.projectId = patch.projectId || '';
-  if ('problemId' in patch) next.problemId = patch.problemId || '';
-  if ('contextTopic' in patch) next.contextTopic = patch.contextTopic || '';
-  if ('runId' in patch) next.runId = patch.runId || '';
-  if ('status' in patch) next.status = (patch.status as RunStatus) || 'idle';
-  return next;
-}
-
-/** 新会话必须清空旧项目/问题与运行绑定。 */
-export function resetForNewSession(state: CurrentResearch): CurrentResearch {
-  return applyPatch(state, {
-    threadId: '', sessionId: '', projectId: '', problemId: '', runId: '',
-    status: 'idle',
+/** 从唯一状态派生只读投影 (每次调用产生新的冻结快照)。 */
+export function researchView(state: ResearchStore): ResearchView {
+  return Object.freeze({
+    threadId: state.selection.threadId || '',
+    sessionId: state.selection.sessionId || '',
+    mode: state.selection.mode || '',
+    projectId: state.selection.projectId || '',
+    problemId: state.selection.problemId || '',
+    contextTopic: state.ui.contextTopic || '',
+    runId: state.selection.runId || '',
+    status: state.selection.runStatus || 'idle',
   });
 }
 
-/**
- * 切换历史会话时的整体加载: 项目/问题/运行一次到位。
- *
- * `mode` 只从**会话记录**里如实带入 (用于显示); 不在这里做任何取值归一化 ——
- * 归一化就意味着前端还在理解模式语义。
- */
-export function loadConversation(state: CurrentResearch,
-                                 request: Record<string, unknown> | null | undefined,
-                                 sessionId: string): CurrentResearch {
-  const req = request || {};
-  return applyPatch(state, {
-    sessionId,
-    mode: String(req.mode || ''),
-    projectId: String(req.project_id || ''),
-    problemId: String(req.problem_id || ''),
-    runId: String(req.run_id || ''),
-    threadId: '',
-    status: 'idle',
-  });
-}
-
-export function hasProblem(state: CurrentResearch): boolean {
-  return Boolean(state.projectId);
+export function hasProblem(view: ResearchView): boolean {
+  return Boolean(view.projectId);
 }
 
 /** 引擎标识的中文显示名 (纯展示, 不参与任何判断)。 */
@@ -118,18 +74,12 @@ const ENGINE_LABEL: Record<string, string> = {
  *
  * 只是**显示**: 未识别的引擎标识如实显示原文, 不猜测、不据此切换行为。
  */
-export function label(state: CurrentResearch): string {
+export function researchLabel(view: ResearchView): string {
   const bits: string[] = [];
-  const engine = ENGINE_LABEL[state.mode] || state.mode;
+  const engine = ENGINE_LABEL[view.mode] || view.mode;
   if (engine) bits.push(engine);
-  if (state.problemId) bits.push(state.problemId);
-  else if (state.projectId) bits.push(state.projectId);
-  if (state.status !== 'idle') bits.push(STATUS_LABEL[state.status] || state.status);
+  if (view.problemId) bits.push(view.problemId);
+  else if (view.projectId) bits.push(view.projectId);
+  if (view.status !== 'idle') bits.push(STATUS_LABEL[view.status] || view.status);
   return bits.join(' · ');
 }
-
-/** 显式续研与启动分开语义 (计划书 §9.1): 只有续研才带 resume=true。 */
-export function startPayloadOptions(): { resume: boolean } {
-  return { resume: false };
-}
-

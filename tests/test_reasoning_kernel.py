@@ -471,6 +471,11 @@ def test_reasoning_agent_uses_the_kernel(monkeypatch):
     """替换内核函数, 角色产出的成果必须跟着变 —— 证明它真的调了内核。
 
     反向保护: 如果哪天有人把角色改回"自己写一套推导", 这条用例会失败。
+
+    §3.1 G06 之后角色交出的是**完整闭环候选**: 命题 + 义务 + 核验记录。因此这里
+    还固定两件不得回退的事:
+    1. 命题候选**不带**科学等级 (状态只能由判定层重算);
+    2. 候选种类只允许 claim/obligation/verification (§6.2 的能力表)。
     """
     import src.research.reasoning_kernel as kernel
     from src.agents.protocol import AgentTask, ContextPack
@@ -511,9 +516,15 @@ def test_reasoning_agent_uses_the_kernel(monkeypatch):
     assert result.outcome.value == "completed"
     assert result.payload.get("kernel") is True
     assert result.proposed_changes, "必须交出结构化成果"
-    assert all(p.kind == "claim" for p in result.proposed_changes)
-    # 角色仍然只提交候选: 不得声明改变结论
+    kinds = {p.kind for p in result.proposed_changes}
+    assert kinds <= {"claim", "obligation", "verification"}, kinds
+    claims = [p for p in result.proposed_changes if p.kind == "claim"]
+    assert len(claims) == 1, "闭环只应提交一条命题候选"
+    # 角色仍然只提交候选: 不得声明改变结论, 也不得自报科学等级
     assert all(p.may_change_conclusion is False for p in result.proposed_changes)
+    for name in ("status", "assurance", "support_kind", "validation_status", "coverage"):
+        assert name not in claims[0].payload, (
+            f"命题候选自报了 {name} —— 状态只能由判定层重算")
 
 
 def test_reasoning_agent_falls_back_when_no_claim_is_available():

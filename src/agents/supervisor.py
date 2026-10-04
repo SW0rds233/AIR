@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from enum import Enum
 from typing import Any
 
@@ -377,10 +377,36 @@ def _compose_main_question(request: str, attachment_text: str = "") -> str:
 # 主控
 # ----------------------------------------------------------------------
 #: 每种交付形态对主控的"必须完成的角色"要求 (§3.1 的成果归属)。
+#:
+#: §3.2 G12: 交付**必须有正文**。此前 `problem_report` / `theoretical_conclusion` 只要求
+#: `reasoning` —— 于是一次只提出了命题、没有任何正文的运行也会被判成"交付形态所需
+#: 的角色成果齐备", 而交付门槛随后报"研究稿过短或为空"。要求与门槛必须一致:
+#: 需要交东西的形态一律包含唯一正文生产者 (writing)。
+#: 兜底子问题: 交付形态要求的角色在计划里没有对应子问题时补上 (`_ensure_required_roles`)。
+#:
+#: 取值 = (默认措辞, 子问题类型, 验收要什么)。措辞刻意朴素 —— 它是**兜底**, 不是
+#: 替代品: 正常路径由任务分类或模型提议给出更贴合问题的说法。
+_DEFAULT_ROLE_SUBQUESTION: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    "reasoning": ("形式化并核验候选结论", "existence_proof",
+                  ("给出可核验的命题、义务与验证记录",
+                   "无法判定时说明缺什么条件, 不得给未核验的结论")),
+    "modeling": ("为候选结论给出可检验的模型与适用条件", "model_construction",
+                 ("模型假设与适用域写清楚", "给出被舍弃的候选与理由")),
+    "evidence": ("收集支撑或反驳候选结论的可定位来源", "literature_synthesis",
+                 ("逐条给出出处定位", "标注支持/冲突关系, 不靠标题相似声称支持")),
+    "validation": ("给出可执行的验证方案", "validation_plan",
+                   ("写清数据、指标与判定阈值", "说明该方案能否反驳当前结论")),
+    "figures": ("把关键结果画成图并标注数据来源", "mechanism",
+                ("每张图说明数据来源与口径", "图与正文数字一致")),
+    "review": ("从原始任务与证据独立审阅稿件与图表", "literature_synthesis",
+               ("逐项给出问题、严重度与可核验的验收标准",
+                "科学问题与文字问题分开处理")),
+}
+
 _DELIVERABLE_ROLES: dict[str, tuple[str, ...]] = {
-    "source_list": ("evidence",),
-    "problem_report": ("reasoning",),
-    "theoretical_conclusion": ("reasoning",),
+    "source_list": ("evidence", "writing"),
+    "problem_report": ("reasoning", "writing"),
+    "theoretical_conclusion": ("reasoning", "writing"),
     "full_paper": ("reasoning", "writing", "review"),
     "figures": ("figures",),
     "review_report": ("review",),
@@ -485,18 +511,53 @@ class SupervisorAgent:
                 kind="literature_synthesis", owner="evidence", priority=9,
                 needs=["逐条给出出处定位", "标注支持/冲突关系, 不靠标题相似声称支持"],
             )
-        # 交付需要写作时, 写作与审阅各自成为子问题 (而不是藏在某一步里)
-        if "full_paper" in deliverables or "theoretical_conclusion" in deliverables:
+        # 交付需要写作时, 写作与审阅各自成为子问题 (而不是藏在某一步里)。
+        # 判据直接取 `_DELIVERABLE_ROLES` —— 两张表分开写就会出现"要求写作却从不派工"
+        # (实测: 交付形态要求 writing, 计划里却没有写作任务, 运行以"未满足交付形态"收尾)。
+        needs_writing = any("writing" in _DELIVERABLE_ROLES.get(d, ())
+                            for d in deliverables)
+        if needs_writing:
             brief.add_subquestion(
                 statement="把结论与依据写成连贯稿件", kind="mechanism", owner="writing",
                 priority=20, needs=["段落可回溯到来源或推导"])
+        if "full_paper" in deliverables or "theoretical_conclusion" in deliverables:
             # 独立审阅 (§3.1): 论文类交付必须过一遍独立检查, 而不是作者自评
             brief.add_subquestion(
                 statement="从原始任务与证据独立审阅稿件与图表",
                 kind="literature_synthesis", owner="review", priority=30,
                 needs=["逐项给出问题、严重度与可核验的验收标准",
                        "科学问题与文字问题分开处理"])
+        self._ensure_required_roles(brief, deliverables)
         return brief
+
+    @staticmethod
+    def _ensure_required_roles(brief: ResearchBrief,
+                               deliverables: Sequence[str]) -> None:
+        """交付形态要求的**每个角色**都必须有子问题 (与 `needs_writing` 同一判据来源)。
+
+        为什么必须兜这一道: 子问题来自任务分类或模型提议, 而"交付形态需要哪些角色"
+        来自 `_DELIVERABLE_ROLES` —— 两张表一旦对不上, 计划里就没有那个角色的任务,
+        而 `_missing_roles()` 仍然会要求它, 于是主控在"没有可派发的任务, 且交付形态
+        要求未满足"处收尾: **任务全跑完却一条结论都没有** (实测: 带"问题说明附件"的
+        研究请求, 4 个任务跑完, 命题数为 0, 交付等级掉到研究备忘录)。
+
+        这里只补**缺失的角色**, 措辞用各角色的默认说法; 已有子问题 (含模型提议的)
+        一律保留 —— 兜底不得覆盖更好的措辞。
+        """
+        have = {str(sq.owner) for sq in brief.subquestions}
+        priority = 40
+        for deliverable in deliverables:
+            for role in _DELIVERABLE_ROLES.get(str(deliverable), ()):
+                if role in have:
+                    continue
+                spec = _DEFAULT_ROLE_SUBQUESTION.get(role)
+                have.add(role)
+                if spec is None:
+                    continue
+                statement, kind, needs = spec
+                brief.add_subquestion(statement=statement, kind=kind, owner=role,
+                                      priority=priority, needs=list(needs))
+                priority += 10
 
     # ---- 理解任务: 模型提议 (规则展开是降级路径) ----
     #: 主控的规划提示词。要求**只**输出 JSON, 并要求每个子问题说明它回答什么、
@@ -588,6 +649,11 @@ class SupervisorAgent:
         只在任务自己已显式写了该字段时才保留任务的值。
         """
         plan_version = version if version is not None else (brief.version or 1)
+        # 交付形态要求的角色必须在计划里有任务 —— **在这里再兜一次**, 因为交付形态可能
+        # 在画像之后才定下来 (模型提议/调用方覆写), 只在 `brief()` 里兜会漏 (实测:
+        # `problem_report` 之外的形态在计划里缺少 review/validation/figures 角色,
+        # 而交付判定仍要求它们)。这个函数是幂等的: 只补缺失角色, 不动已有措辞。
+        self._ensure_required_roles(brief, list(brief.deliverables))
         plan = TeamPlan(version=plan_version, brief_id=brief.brief_id,
                         rationale=brief.basis)
         # `project_id` / `problem_id` 由下面显式传入, 因此身份里只补**运行身份**;
@@ -780,6 +846,12 @@ class SupervisorAgent:
         # 交付卡死 (实测)。依赖阻塞只针对**还没跑过**的任务。
         settled = completed | {tid for tid, key in plan_keys.items()
                                if key and key in attempted_keys}
+        # **有成果行的任务一定算"已跑过"**: 上面那条按"角色+目标"文本键匹配, 而目标
+        # 文本里可能带会变的内容 (附件正文、计数、措辞微调), 键一旦对不上, 一个**已经
+        # 受阻返回**的前置就永远"未 settled", 下游据此永不就绪 —— 症状是"没有任何可派发
+        # 的任务", 而交付形态还差推理/写作 (实测: 带问题说明附件运行, 4 个任务跑完却一条
+        # 结论都没有)。依赖满足的语义本来就是"前置已经尝试过", 成果行正是这件事的直接证据。
+        settled |= {tid for tid in results if tid in plan_keys}
         ready = [t for t in plan.ready(settled, running_set)
                  if t not in completed
                  and (plan_keys.get(str(t), "") not in attempted_keys
@@ -811,11 +883,15 @@ class SupervisorAgent:
                 decision=DecisionKind.wait,
                 reason=f"{len(running_set)} 个任务运行中, {len(pending_set)} 个待派")
 
-        # 5. 交付判定: 交付形态要求的角色都成功过
+        # 5. 交付判定: 交付形态要求的角色都**交回过**成果 (§3.2 G12)。
+        # 这里只决定"循环可以结束、进入交付评估"; 交付等级由门槛算 (见 _finish)。
         missing = self._missing_roles(brief, results, completed_ids=completed)
         if not missing:
+            partial = self._partial_roles(brief, results, completed_ids=completed)
+            note = (f"以下角色只交回部分成果: {', '.join(partial)}" if partial else "")
             return SupervisorDecision(decision=DecisionKind.deliver,
-                                      reason="交付形态所需的角色成果齐备")
+                                      reason="交付形态所需的角色成果齐备",
+                                      note=note)
         if clarifications_asked >= 1 and all(
                 results.get(t, AgentResult(task_id=t, outcome=TaskOutcome.blocked))
                 .outcome == TaskOutcome.blocked
@@ -858,7 +934,13 @@ class SupervisorAgent:
     @staticmethod
     def _missing_roles(brief: ResearchBrief, results: dict[str, AgentResult],
                        completed_ids: Iterable[str] | None = None) -> list[str]:
-        """交付形态要求哪些角色的成果还没齐。
+        """交付形态要求哪些角色的成果**还没交回**。
+
+        `completed` 与 `partial` 都算"交回过": 这个判据回答的是"还要不要再派人做",
+        不是"能不能交付"。**验收**由交付门槛给出 (`research/delivery.py`: 研究有效性 +
+        论文表达 + 出版完备, 见 §3.2 G12) —— 让两件事共用一把尺子, 就会出现
+        "角色交回部分成果 → 永远判成未满足 → 什么也不交付"或者反过来
+        "角色跑过就算交付"这两种错误。因此这里只管派工完备性, 交付等级另算。
 
         `completed_ids` 是**等价完成**的任务集合 (含"补派任务已成功"的原任务),
         没有它时补派成功也不会让交付判定通过 —— 原任务仍留在 `results` 里是 blocked。
@@ -873,6 +955,18 @@ class SupervisorAgent:
                      if task_id in done_ids and r.outcome in (TaskOutcome.completed,
                                                               TaskOutcome.partial)}
         return sorted(required - satisfied)
+
+    @staticmethod
+    def _partial_roles(brief: ResearchBrief, results: dict[str, AgentResult],
+                       completed_ids: Iterable[str] | None = None) -> list[str]:
+        """交付形态要求、但只交回**部分**成果的角色 (据此降级而不是当成功)。"""
+        required: set[str] = set()
+        for deliverable in brief.deliverables:
+            required.update(_DELIVERABLE_ROLES.get(deliverable, ()))
+        done_ids = set(completed_ids) if completed_ids is not None else set(results)
+        partial = {r.agent for task_id, r in results.items()
+                   if task_id in done_ids and r.outcome == TaskOutcome.partial}
+        return sorted(required & partial)
 
     @staticmethod
     def _equivalent_done(brief: ResearchBrief, plan: TeamPlan,

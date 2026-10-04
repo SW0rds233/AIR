@@ -27,21 +27,35 @@ __all__ = [
     "KIND_MAP",
     "TeamProjection",
     "latest_versions",
+    "object_payload_for",
     "object_rows",
 ]
 
 #: 候选变更的对象种类 -> 存储 kind。**一次迁移中每种对象只有一个权威写入口**:
 #: 这里就是这些种类的唯一写入口 (除判定层自己产出的 verification/claim 状态)。
+#:
+#: §3.1 G06 补齐: `obligation`/`verification`/`gap` 此前**不在这张表里**, 于是角色
+#: 提交的义务与核验记录被登记层当成"未登记的候选种类"整批丢掉 —— 团队形式化路径
+#: 因此永远走不到"义务 → 核验 → 状态归并"。它们的存储 kind 与 `research/store.py`
+#: 的常量同名 (KIND_OBLIGATION/KIND_VERIFICATION/KIND_GAP), 因为这两处必须指向
+#: 同一个存储族, 否则判定层读不到团队写的义务。
 KIND_MAP: dict[str, str] = {
     "evidence": "evidence",
     "source": "evidence",
     "card": "evidence",
     "case": "evidence",
     "dataset": "evidence",
+    # 证据归属 (§6.1): 与材料分开存储, 因为它是"材料 × 命题"的关系而不是材料。
+    "evidence_link": "evidence_link",
+    # 新颖性对照 (§5.4): 交付包/出版层按它决定能否宣称原创
+    "novelty": "novelty",
     "model": "model",
     "assumption": "assumption",
     "definition": "definition",
     "claim": "claim",
+    "obligation": "obligation",
+    "verification": "verification",
+    "gap": "gap",
     "validation_plan": "validation_plan",
     "manuscript": "manuscript",
     "figure": "figure",
@@ -84,30 +98,7 @@ class TeamProjection:
         key = proposal.idempotency_key(task.task_id)
         if self.store.has_event(f"projection:{key}"):
             return None                      # 幂等命中: 不重复登记
-        payload = dict(proposal.payload)
-        object_id = proposal.object_id or _object_id_for(kind, proposal, task)
-        payload.setdefault("id", object_id)
-        payload["_submitted_by"] = result.agent or task.agent
-        payload["_task_id"] = task.task_id
-        payload["_agent_run_id"] = result.agent_run_id
-        payload["_plan_version"] = task.plan_version
-        payload["_proposal_id"] = proposal.proposal_id
-        payload["_input_versions"] = dict(proposal.input_versions)
-        payload["_submitted_at"] = utcnow()
-        payload["_may_change_conclusion"] = proposal.may_change_conclusion
-        payload["_rationale"] = proposal.rationale
-        # 保留**候选自己的种类** (§6.1): `KIND_MAP` 把 source/card/case/dataset 都归到
-        # `evidence` 存储族 (为了让查询与版本化只有一处实现), 但若不额外留一个区分字段,
-        # "这条是原始来源 / 案例卡 / 数据集卡"就在权威记录里彻底消失 —— 计划书明确要求
-        # "不能把 case/dataset 无区别映成 evidence 丢类型"。族用于存储, 这个字段用于语义。
-        payload["_candidate_kind"] = str(proposal.kind)
-        # 对象必须记住自己的**运行身份** (§3.3 G14): 否则查询只能读"项目全部最新对象",
-        # 同项目两次运行的对象会互相串; 有了这三个字段才能按 problem/run 裁剪。
-        payload["_scope"] = {
-            "project_id": str(task.project_id),
-            "problem_id": str(task.problem_id),
-            "run_id": str(task.run_id),
-        }
+        object_id, payload = object_payload_for(task, result, proposal, kind)
         try:
             version = self.store.put(kind, object_id, payload,
                                      expected_revision=proposal.expected_revision)
@@ -153,6 +144,76 @@ class TeamProjection:
 
     def latest_versions(self) -> dict[str, int]:
         return latest_versions(self.store)
+
+
+def object_payload_for(task: AgentTask, result: AgentResult, proposal: ChangeProposal,
+                       kind: str) -> tuple[str, dict[str, Any]]:
+    """候选 → (对象 ID, 待写载荷) 的**纯**映射。
+
+    抽成纯函数是为了让唯一提交口 (`research/commit.py`) 与投影层走同一份字段映射:
+    两处各写一遍, "候选种类 / 运行身份 / 提交者" 这些元数据迟早会在其中一处丢掉
+    (§3.2 G11 就是这么丢掉证据定位与版本的)。
+    """
+    payload = dict(proposal.payload)
+    object_id = proposal.object_id or _object_id_for(kind, proposal, task)
+    payload.setdefault("id", object_id)
+    payload["_submitted_by"] = result.agent or task.agent
+    payload["_task_id"] = task.task_id
+    payload["_agent_run_id"] = result.agent_run_id
+    payload["_plan_version"] = task.plan_version
+    payload["_proposal_id"] = proposal.proposal_id
+    payload["_input_versions"] = dict(proposal.input_versions)
+    payload["_submitted_at"] = utcnow()
+    payload["_may_change_conclusion"] = proposal.may_change_conclusion
+    payload["_rationale"] = proposal.rationale
+    # 保留**候选自己的种类** (§6.1): `KIND_MAP` 把 source/card/case/dataset 都归到
+    # `evidence` 存储族 (为了让查询与版本化只有一处实现), 但若不额外留一个区分字段,
+    # "这条是原始来源 / 案例卡 / 数据集卡"就在权威记录里彻底消失 —— 计划书明确要求
+    # "不能把 case/dataset 无区别映成 evidence 丢类型"。族用于存储, 这个字段用于语义。
+    payload["_candidate_kind"] = str(proposal.kind)
+    # 对象必须记住自己的**运行身份** (§3.3 G14): 否则查询只能读"项目全部最新对象",
+    # 同项目两次运行的对象会互相串; 有了这三个字段才能按 problem/run 裁剪。
+    payload["_scope"] = {
+        "project_id": str(task.project_id),
+        "problem_id": str(task.problem_id),
+        "run_id": str(task.run_id),
+    }
+    # 命题的**载荷**里也有 `problem_id` 字段 (§2 F0-2/R6)。只写 `_scope` 不够:
+    # 所有按问题过滤的既有读法 (工作台、验收、导出) 都优先读这个字段, 它空着就会被
+    # 当成"归属不明", 于是同项目的每个问题都看得到这条命题 (实测: 两个问题的结论集合
+    # 完全相同)。`_scope` 仍是权威身份, 这里只是把它同步到有该字段的对象上。
+    if "problem_id" in getattr(_model_for_kind(kind), "model_fields", {}):
+        # 空串等同于"没写": 以运行身份为准 (候选自己填的值若与身份冲突, 也以身份为准,
+        # 否则智能体可以用一个字段把对象挂到别人的问题上)。
+        payload["problem_id"] = str(task.problem_id)
+    return object_id, payload
+
+
+def _model_for_kind(kind: str):
+    """候选种类 → 研究对象模型 (只用于判断"这个对象有没有某字段")。
+
+    找不到时返回 `None` (调用方按"没有该字段"处理) —— 这里刻意**不**猜一个模型,
+    猜错会把字段写到不该有它的对象上。
+    """
+    from src.research import schemas
+
+    return {
+        "claim": schemas.Claim,
+        "obligation": schemas.ProofObligation,
+        "evidence": schemas.SourceEvidence,
+        "source": schemas.SourceEvidence,
+        "card": schemas.SourceEvidence,
+        "case": schemas.SourceEvidence,
+        "dataset": schemas.SourceEvidence,
+        "model": schemas.ResearchModel,
+        "assumption": schemas.Assumption,
+        "definition": schemas.Definition,
+        "route": schemas.ResearchRoute,
+        "gap": schemas.ResearchGap,
+        "novelty": schemas.NoveltyRecord,
+        "evidence_link": schemas.EvidenceLink,
+        "verification": schemas.VerificationRecord,
+    }.get(str(kind))
 
 
 def object_rows(store: ResearchStore, kind: str, *, limit: int = 40,

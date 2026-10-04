@@ -189,6 +189,15 @@ def test_figure_dir_is_scoped_by_run(tmp_path, monkeypatch):
     # 目录名不得含路径分隔符等危险字符
     with figure_generator.figure_scope_bound("../../etc"):
         assert figure_generator._ensure_figure_dir().parent == tmp_path / "figures"
+    # G18: 归属再下分到任务与产物版本 —— 同一次运行里的两张图也不得互相覆盖
+    with figure_generator.figure_scope_bound("run-A", task_id="task-1",
+                                             artifact_version=2):
+        scoped = figure_generator._ensure_figure_dir()
+    assert scoped == tmp_path / "figures" / "run-A" / "task-1" / "v2"
+    with figure_generator.figure_scope_bound("run-A", task_id="task-1",
+                                             artifact_version=3):
+        other = figure_generator._ensure_figure_dir()
+    assert other != scoped and other.exists()
 
 
 def test_session_memory_is_bound_to_the_session(tmp_path, monkeypatch):

@@ -330,7 +330,11 @@ def delivery_gate(manuscript: str, snapshot: ResearchSnapshot,
                 f"实验规格 {spec.get('id')} 尚未执行 ({status}), 正文不得出现实验结果"
             )
 
-    if snapshot.claims and not any(c.status == ClaimStatus.supported for c in snapshot.claims) \
+    # 没有命题就不是论文: 空快照 + 有正文骨架最容易伪装成"完整交付"
+    # (实测: 0 条命题、正文只有骨架时交付等级仍报"论文草稿")。
+    if not snapshot.claims:
+        unresolved.append("没有任何已确定结论 (快照里没有命题), 只能作为研究备忘录导出")
+    elif not any(c.status == ClaimStatus.supported for c in snapshot.claims) \
             and not any(c.status == ClaimStatus.refuted for c in snapshot.claims):
         unresolved.append("没有任何已确定结论, 只能作为研究备忘录导出")
 

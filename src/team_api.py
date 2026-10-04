@@ -144,6 +144,9 @@ def run_team(req: TeamRunRequest) -> dict[str, Any]:
             "tasks": [r.to_dict() for r in outcome.results.values()],
             "unresolved_report": outcome.unresolved_report,
             "usage": outcome.usage.to_dict(),
+            # 交付评估必须随响应返回 (§3.2 G12): 界面与人工复核要能回答
+            # "为什么是这一级", 而不是只看到一个 status。
+            "delivery": dict(outcome.delivery),
             "objects": {kind: len(projection.rows(kind))
                         for kind in ("evidence", "claim", "manuscript", "figure",
                                      "review_issue", "validation_plan")},

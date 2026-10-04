@@ -60,35 +60,34 @@ def _wait_done(c: TestClient, thread_id: str, timeout: float = 120.0) -> dict:
     raise AssertionError(f"会话未在 {timeout}s 内收尾: {last.get('status')}")
 
 
-def test_engine_resolution_is_a_single_decision_point():
-    """引擎选择只有一处: 形式化请求走理论引擎, 综述型请求走团队会话引擎。
+def test_there_is_no_engine_decision_point():
+    """**引擎选择已经不存在** (合并计划 §3/M5 / G01)。
 
-    旧的 `survey` 取值已随 stage 图一起退役 —— 它不再是一个可选引擎。
+    这条用例过去断言"选择只有一处、取值受尊重"; 现在断言的是**更强**的事实: 生产代码里
+    没有"按 mode 分流"的入口 —— `_resolve_engine()` 不接受参数, 旧取值 (theory/survey)
+    不再被尊重, 请求类型也不再决定引擎 (由主控在同一个团队里派工)。
     """
-    from src.server import DEFAULT_ENGINE, _resolve_engine
+    import inspect
 
-    assert _resolve_engine("") == DEFAULT_ENGINE
-    assert _resolve_engine("  ") == DEFAULT_ENGINE
-    assert _resolve_engine("theory") == "theory"
-    assert _resolve_engine("team") == "team"
-    # 综述型请求 → 团队会话引擎 (不再有第二个综述引擎)
-    assert _resolve_engine("", request="检索并总结某方向研究进展, 写一篇综述") == "team"
-    # 形式化请求 → 理论引擎
-    assert _resolve_engine("", request="证明 2-(211,15,1) 设计不存在") == "theory"
-    # 退役取值与未识别取值都不得把请求送进未知引擎
-    assert _resolve_engine("survey") == DEFAULT_ENGINE
-    assert _resolve_engine("nonsense") == DEFAULT_ENGINE
+    from src.server import TEAM_ENGINE, _resolve_engine
+
+    assert TEAM_ENGINE == "team"
+    assert _resolve_engine() == "team"
+    # 不接收任何 mode/request: 一旦接收, 就等于承认"可以按它分流"
+    params = list(inspect.signature(_resolve_engine).parameters)
+    assert params == [], f"引擎选择点又出现了形参: {params}"
+    source = (Path(__file__).resolve().parents[1] / "src" / "server.py").read_text(
+        encoding="utf-8")
+    assert 'in ("theory", "team")' not in source, "按 mode 分流的分支又回来了"
+    assert "build_theory_pipeline" not in source, "旧图的建图入口又回来了"
 
 
 def test_survey_request_is_served_by_the_unified_entry(client):
     """**缺口已闭合**: 综述型请求走统一入口 (不带 mode) 能产出交付包。
 
-    本轮之前这里是反过来的断言 (请求澄清 + 零结论); 现在综述型请求由
-    `research.intake.is_survey_request` 识别并交给团队会话引擎, 由
-    Evidence/Reasoning/Writing 角色跑完并导出交付包。
-
-    这条用例同时守住"分类不得过度触发": 形式化请求 (见下一个用例) 必须仍走
-    形式化引擎, 不能被综述流程糊弄。
+    综述型与形式化请求现在走**同一个**团队入口 (G01 之后没有第二张图), 由主控按任务
+    画像派工。这条用例守住的是"不带 mode 也能跑完并导出交付包"; 分类器的保守性由
+    下一个用例守住 (它不再决定用哪张图, 只影响画像)。
     """
     start = client.post("/api/sessions", json={
         "request": SURVEY_REQUEST,
@@ -121,8 +120,12 @@ def test_survey_request_is_served_by_the_unified_entry(client):
     assert "资料" in unresolved or "澄清" in unresolved or "来源" in unresolved, summary
 
 
-def test_formal_request_does_not_get_routed_to_the_survey_engine(client):
-    """反例保护: 形式化请求不得被判成综述 (否则证明题会被综述流程糊弄)。"""
+def test_formal_request_is_served_by_the_same_team_entry(client):
+    """形式化请求不再有专属引擎: 它同样进团队, 由推理角色形式化并核验。
+
+    分类器的**保守性**仍然要守住 (`is_survey_request` 不得把证明题当综述), 但它的
+    用途已经变了: 它只影响"任务画像里算不算综述型", 不再决定用哪张图。
+    """
     from src.research.intake import is_survey_request
 
     assert is_survey_request("判断参数为 2-(211,15,1) 的设计是否存在") is False
@@ -134,4 +137,4 @@ def test_formal_request_does_not_get_routed_to_the_survey_engine(client):
         "max_actions": 6, "max_tool_calls": 6,
     })
     assert start.status_code == 200, start.text[:400]
-    assert start.json()["mode"] == "theory", start.json()
+    assert start.json()["mode"] == "team", start.json()

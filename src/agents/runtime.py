@@ -452,6 +452,42 @@ class AgentRuntime:
         self._resolved_llm: dict[str, Any] = {}
         #: 事件计数 (供测试与运行指标断言)。
         self.events: list[dict[str, Any]] = []
+        #: 本运行的研究存储 (由装配层注入; 团队里就是 `TeamRun.task_store.store`)。
+        #: 角色**不直接**读写它 —— 核验服务用它记账与算输入闭包, 对象写入只走
+        #: 唯一提交口 (合并计划 §6.2)。
+        self.research_store: Any = None
+
+    # ---- 核验服务 (合并计划 §4: "VerificationService 类型化请求与结果提交") ----
+    def verification_backends(self) -> dict[str, bool]:
+        """当前可用的核验后端 (缺失的后端必须影响可用动作集合)。"""
+        from src.verification.runner import available_tools
+
+        return available_tools()
+
+    def run_verification(self, task: AgentTask, claim: Any, obligation: Any, *,
+                         evidence: list[Any] | None = None, run_id: str = ""):
+        """对一个义务执行核验, 返回结构化结果 (`CheckOutcome`)。
+
+        为什么核验**不**由角色自己建服务: 核验要读研究库 (工具账本、输入版本闭包),
+        而角色的契约是"只提交候选、不直接读写研究存储"。因此核验由运行时按本运行的
+        存储执行, 角色只负责**选核查目标**并把结果作为候选提交。
+        """
+        outcome = self.verification_service().check(claim, obligation, evidence=evidence)
+        self.emit("verification_executed", {
+            "task_id": task.task_id, "claim_id": getattr(claim, "id", ""),
+            "obligation_id": getattr(obligation, "id", ""),
+            "tool": outcome.tool, "evaluated": outcome.evaluated,
+            "closed": outcome.closed,
+            "status": (outcome.record.status if outcome.record is not None else "")})
+        return outcome
+
+    def verification_service(self, *, problem_id: str = "", run_id: str = ""):
+        """按本运行的研究存储建一个核验服务 (角色用它挑选并执行核验目标)。"""
+        from src.research.verification_service import VerificationService
+
+        return VerificationService(store=self.research_store,
+                                   problem_id=problem_id or "",
+                                   run_id=run_id)
 
     def _resolve_llm(self, stage: str) -> Any:
         """解析某个角色的模型 (缓存); 工厂返回 None 或抛错都如实记为该角色无模型。"""

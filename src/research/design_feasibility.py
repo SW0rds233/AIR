@@ -494,6 +494,28 @@ def extract_design_params(text: str) -> DesignParams | None:
     """
     body = (text or "").replace("\n", " ")
     found: dict[str, int] = {}
+    # 标准参数记号 `t-(v,k,λ)` (组合设计文献的通用写法) 与 `(v,k,λ)` + 设计关键词。
+    # 为什么单独处理: 上面那组模式靠"每轮/每个节点恰好…"这类**叙述性**措辞抽参数,
+    # 而题目常常只给记号 —— 实测"参数 2-(211,15,1) 的设计是否存在"抽不出 v/k,
+    # 于是一个有唯一确定答案的判定题被当成"研究方向"并停在未决。
+    # 记号本身的含义是通用的 (与具体题目无关), 因此这不是给某道题打补丁。
+    notation = re.search(r"(\d+)\s*[-–]\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", body)
+    if notation:
+        found.setdefault("v", int(notation.group(2)))
+        found.setdefault("k", int(notation.group(3)))
+        found.setdefault("lam", int(notation.group(4)))
+    else:
+        bare = re.search(
+            rf"(?:设计|区组|平衡|{_BLOCKS}|design|BIBD)[^。.;\n]{{0,16}}?"
+            rf"\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)"
+            rf"|\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)[^。.;\n]{{0,16}}?"
+            rf"(?:设计|区组|平衡|design|BIBD)",
+            body, re.IGNORECASE)
+        if bare:
+            groups = [g for g in bare.groups() if g is not None]
+            found.setdefault("v", int(groups[0]))
+            found.setdefault("k", int(groups[1]))
+            found.setdefault("lam", int(groups[2]))
     # 循环变量不要叫 `field`: 会遮蔽 `dataclasses.field` (本模块用它声明的数据类字段),
     # 后续在该作用域里再加字段就会静默拿到字符串而不是 dataclass 字段。
     for pattern, name in _PATTERNS:

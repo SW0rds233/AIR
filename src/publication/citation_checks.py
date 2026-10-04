@@ -1,24 +1,20 @@
 from __future__ import annotations
 
-"""引用守门节点: 写作后强制校验引用编号与可信清单对应
+"""引用守卫: 草稿里的引用与**已验证文献表**是否真的对得上 (计划书 §5.3 D1)。
 
-借鉴:
-- gpt-researcher: 引用只来自实际抓取过的内容 (visited_urls)
-- HKUDS AI-Researcher: 引用只在已读论文中产生
+原 `agents/citation_guard.py` 的纯函数部分逐字迁到这里: 它既不看流水线状态, 也不调
+模型, 只是"文本 × 已核实文献表"的确定性判定 —— 属于出版层的通用检查, 而不是某个旧
+Agent 的私有实现。留在旧 Agent 里, 删旧 Agent 就等于删掉这层检查。
 
-作用:
-1. 提取初稿中所有 [n] 引用编号
-2. 与可信参考文献清单 (verified_references) 比对
-3. **越界/未注册编号 → 用清单中真实论文自动替换, 无匹配则删除标记**
-   （修复: 旧版只检测+触发修订，修订循环仍可能再越界，形成空转；
-    新版守门直接修复，审计记录替换结果）
-4. 确保 citation_check 阶段验证的是真实论文
+判定口径 (逐字保留, 不因为搬家而改变):
+- 编号引用必须能在已验证表里找到, 否则视为无效引用;
+- 句子里的作者姓氏/主题词必须与所引文献**语义上**一致, 否则报"引用与论述不匹配";
+- 自动修复只做"删除无效编号 + 重编号", 不生成新引用。
 """
 
 import logging
 import re
 
-from src.graph.state import PipelineState
 
 logger = logging.getLogger(__name__)
 
@@ -285,48 +281,3 @@ def validate_draft_citations(draft: str, verified_refs: list[dict]) -> dict:
         "fix": fix,
         "report_md": "\n".join(lines),
     }
-
-
-def run_citation_guard(state: PipelineState) -> dict:
-    """流水线节点: 写作后校验引用，并自动修复越界编号 + 语义错配引用"""
-    draft = state.get("paper_draft", "")
-    verified_refs = state.get("verified_references", [])
-
-    if not draft:
-        return {"current_phase": "citation_guard", "guard_report": {}}
-
-    result = validate_draft_citations(draft, verified_refs)
-
-    # 语义一致性校验: 检测 "Xxx等人" 作者名与 ref[n] 不匹配的引用并删除标记。
-    # 在越界自动修复的基础上运行 (base_draft 已替换/删除越界编号)。
-    fix = result.get("fix", {})
-    base_draft = fix.get("repaired_draft") or draft
-    sem = check_citation_semantics(base_draft, verified_refs)
-    if sem["mismatches"]:
-        result["semantic_mismatches"] = sem["mismatches"]
-        result["report_md"] += (
-            "\n\n## ⚠️ 引用语义错配（已删除错误引用标记）\n\n"
-            + "\n".join(
-                f"- [{m['num']}] 正文提到作者「{m['surname']}」但该编号文献作者不含此名"
-                f" → 已删除标记: {m['context']}"
-                for m in sem["mismatches"]
-            )
-        )
-        logger.info(f"引用语义错配已删除 {len(sem['mismatches'])} 处")
-
-    updates: dict = {
-        "current_phase": "citation_guard",
-        "guard_report": result,
-        "guard_invalid_count": len(result["invalid_citations"]) + len(sem["mismatches"]),
-    }
-
-    # sem["repaired_draft"] 已同时包含越界修复与语义错配删除的结果
-    if sem["repaired_draft"] != draft:
-        updates["paper_draft"] = sem["repaired_draft"]
-        logger.info(
-            f"引用守门自动修复: {len(fix.get('replacements', []))} 处替换, "
-            f"{len(set(fix.get('removals', [])))} 处删除, "
-            f"{len(sem['mismatches'])} 处语义错配删除"
-        )
-
-    return updates

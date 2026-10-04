@@ -1,27 +1,31 @@
 # AIR智能体研究系统
 
-基于 **LangGraph** 多智能体 + **RAG (ChromaDB)** 的学术综述论文自动撰写系统（对话式协作）。
+基于 **LangGraph** 多智能体 + **RAG (ChromaDB)** 的学术研究系统（对话式协作）。
 
-流程：`自然语言计划 → 文献检索 → PDF 摄入 → 引用预验证 → 大纲 → 初稿 → 引用守门/核查 → 跨模型审稿 → 修订循环 → LaTeX 出稿`
-
-另含 **`theory` 理论研究模式**：`研究方向/明确问题 → 研究对象形式化 → 缺口驱动的研究循环（定向检索/建模/推导/反例）→ 受限工具核验 → 两道交付门槛 → 研究交付包`。
+**只有一个入口**: 用户给出自然语言研究请求, 主控（Supervisor）画像并派工给七类角色
+（检索 / 建模 / 推理 / 验证 / 写作 / 配图 / 审阅）, 结束后导出交付包。
+没有"综述/理论模式"之分 —— 形式化研究能力（命题 / 义务 / 推导 / 反例 / 受限工具核验）
+是团队里**推理与验证角色**的职责, 由同一张图统一调度。
 
 ## 功能特性
 
-- **对话式协作**：主控 Supervisor 理解自然语言意图，生成任务计划（主题/关键词/子主题 + 任务范围），确认后动态调度工作智能体
-- **多源文献检索**：arXiv + Semantic Scholar + OpenAlex（可选 CNKI / 万方），LLM 筛选与综述
-- **引用防幻觉全流程**：预验证并过滤预印本 → 写作守门 → CrossRef/OpenAlex/arXiv 交叉验证 → GB/T 7714 格式化
-- **撰写-审稿-修订闭环**：跨模型审稿（10 维 50 分制）、跨轮问题台账、有限修订契约、收敛检测与历史最优稿回退
-- **LaTeX 渲染**：Markdown → ctexart → xelatex 编译 PDF；自动生成分类树 / 时间线 / 趋势图等
-- **Web 界面**：历史会话回看、断点续跑、删除会话、产物按对话隔离（`outputs/{run_id}/`）；高级选项可在 `survey` / `theory` 之间切换；**理论研究模式下对话输入框下方常驻附件入口**（选择文件 → 选用途「补充问题说明／补充文献」→ 上传，已上传列表可移除）
-- **科研工作台**：理论模式下「科研工作台」标签页显示研究问题、进度统计、当前动作与未决缺口、研究过程事件、结论状态表、证明义务、证据与原文定位、验证记录、实验/仿真建议、研究路线与失败原因、新颖性审查，并提供对象级反馈与快照派生；理论暂停点可直接**点选候选路线**
-- **成本追踪**：分阶段 Token 用量与费用统计
+- **对话式协作**：主控理解自然语言请求，产出研究画像（子问题 / 交付形态 / 授权与能力）与版本化计划，随后**动态派工**给角色 —— 不是固定阶段流水线
+- **多源文献检索**：arXiv + Semantic Scholar + OpenAlex（可选 CNKI / 万方），命中不等于支持，须显式判定支持/反对/部分/背景/不足
+- **引用可核对**：候选清单逐篇验证、撤稿剔除、写作时只允许引用已核实清单，草稿引用与论述是否对应由 `publication/citation_checks` 判定
+- **判定层零 LLM**：结论状态由规则计算（`supported` 必须"必要义务全闭合 + 存在与原命题对齐的有效验证记录"），局部验证不升级为整体结论
+- **受限工具核验**：SymPy / Z3 / stats / Lean 子进程执行（白名单表达式、超时与资源限制），`unknown / timeout / unsupported` 一律保持未决
+- **多格式同源交付**：唯一文稿 IR → Markdown / LaTeX / PDF（`xelatex`）三份产物同一份稿件；等级按**编译事实**与门槛结论判定，不以"看起来有 PDF"代替
+- **Web 界面**：历史会话回看、断点续跑、删除会话、产物按研究问题隔离（`outputs/research/{project_id}/{snapshot_id}/`）；对话输入框下方常驻附件入口（选择文件 → 选用途「补充问题说明／补充文献」→ 上传，已上传列表可移除）
+- **科研工作台**：研究问题、进度统计、当前动作与未决缺口、研究过程事件、结论状态表、证明义务、证据与原文定位、验证记录、实验/仿真建议、研究路线与失败原因、新颖性审查，并提供对象级反馈与快照派生
+- **成本追踪**：分阶段 Token 用量与费用统计（无模型调用时花费如实记为已知的 0）
 
-### 智能体团队（合并计划 M1，新增）
+### 智能体团队（合并计划 M1）
 
-系统正在按《智能体团队合并计划》从"两套图 + 一次单趟 LLM 角色"收敛为**一个主控 + 七类功能子智能体**的团队：
+系统已按《智能体团队合并计划》收敛为**一个主控 + 七类功能子智能体**的团队：
+旧的综述 stage 流水线、旧引擎选择、旧引用守门/预检 Agent 与旧图状态都已退役
+（删除清单与语义去向见 `tests/test_engine_retirement.py`）。
 
-- **统一入口**：用户只给自然语言（可带附件、资料库与预算），不需要先选"综述/理论模式"；主控产出 `ResearchBrief`（分开记录子问题类型 / 交付形态 / 授权与能力三个维度，未知字段保留为未知）与版本化 `TeamPlan`
+- **统一入口**：用户只给自然语言（可带附件、资料库与授权策略），**不需要选模式**；主控产出 `ResearchBrief`（分开记录子问题类型 / 交付形态 / 授权与能力三个维度，未知字段保留为未知）与版本化 `TeamPlan`
 - **动态派工而非线性阶段**：每轮主控给出一种结构化决策 —— `dispatch` / `request_clarification` / `wait` / `deliver` / `stop_with_report`；子智能体受阻时提 `ResearchNeed`（缺来源 / 缺模型条件 / 缺验证…），由主控转成新任务，**不允许子智能体互相派工**
 - **角色与真实能力**：`GET /api/team/roles` 返回八个角色的职责、交付物，并**探测**能力是否真的可用（无 embedding 时如实报告"只能关键词+卡片召回"，不承诺语义检索）
 - **统一运行时**：有界工具循环、按任务记账、协作式取消、结果契约校验（角色只能提交本职责内的对象种类，越界即降级为 `partial`）；审阅**只可降级、不可升级**由运行时闸门实际拦住，不靠提示词
@@ -31,7 +35,7 @@
 
 离线（无 LLM）时团队走**确定性实现**：检索走 KB/外部检索并留下覆盖记录、综合按已登记证据关系生成候选、写作渲染已登记结果并保留完整追溯；判定层仍为零 LLM。
 
-### 理论研究模式（`--mode theory`）
+### 研究判定层与交付门槛（**所有**研究共用, 无一例外）
 
 - **研究对象可追溯**：`ResearchSpec / Assumption / Definition / ResearchModel / Claim / ProofObligation / ProofAttempt / VerificationRecord / EvidenceLink / ResearchRoute / ResearchGap`，全部带稳定 ID 与版本；版本只增不减，历史不可覆盖
 - **结论状态由规则计算**：`supported` 必须同时满足「全部必要义务已关闭 + 存在与原命题对齐的有效验证记录」，并在 `support_kind / coverage / validation_status` 三个维度上分别标注；局部步骤验证不会升级为整体结论
@@ -105,14 +109,13 @@ cp .env.example .env             # Windows: copy .env.example .env
 | `SKIP_EMBEDDING` | `1` = 跳过向量化入库（调试提速，不影响写作/审阅） | `0` |
 | `PDF_FULLTEXT_MAX_CHARS` | 单篇论文全文摄入最大字符数 | `20000` |
 
-**理论模式（研究 → 出版级论文）**
+**研究判定层与工具核验（所有研究共用）**
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `THEORY_LLM` | `0` = 离线（不调用任何模型、不联网检索，只走规则层与受限工具） | `1` |
 | `THEORY_PROPOSER` | `0` = 停用语义提议，退回确定性打分 | `1` |
 | `THEORY_PROPOSER_MAX_CALLS` | 单次运行提议调用上限 | `20` |
-| `THEORY_LONG_FORM` | `1` = 启用撰写层长文，作为**附录 B** 追加（不替代正文判定链，需要主模型可用） | `0` |
 
 **跨模型审阅（推荐开启）**
 
@@ -132,7 +135,6 @@ cp .env.example .env             # Windows: copy .env.example .env
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `ARXIV_SEARCH_MAX_RESULTS` / `SEMANTIC_SCHOLAR_MAX_RESULTS` | 单次检索结果上限 | `50` / `50` |
-| `MAX_REVISIONS` | 最大修订轮次 | `3` |
 | `REVIEW_ACCEPT_THRESHOLD` | 审稿通过阈值（百分制，`80` 对应 50 分制 `40`） | `80` |
 | `STAGNATION_LIMIT` | 连续 N 轮评分无提升则提前终止修订 | `2` |
 | `CROSSREF_EMAIL` | CrossRef 礼貌池联系邮箱 | 空 |
@@ -194,16 +196,17 @@ python -m src.server          # 或双击 start.bat
 # 浏览器访问 http://127.0.0.1:8000
 ```
 
-在研究计划、大纲、初稿、每轮审稿后暂停等待确认或提意见；顶部「历史会话」支持回看与断点续跑。命令行版对话入口：`python -m src.main_chat --request "..."`。
+研究过程中可在任意时刻查看「科研工作台」（问题、进度、未决缺口、结论状态、义务与
+验证记录）；顶部「历史会话」支持回看与断点续跑。
 
-**理论研究模式：**
+**命令行（同一个入口, 没有模式开关）：**
 
 ```bash
-# 明确问题（直接形式化并研究）
-python -m src.main --mode theory "对所有实数 x: x**2 >= 0"
+# 明确问题（直接研究）
+python -m src.main "对所有实数 x: x**2 >= 0"
 
-# 研究方向（先给出候选路线，确认后研究）
-python -m src.main --mode theory --request "研究信道变化如何影响射频指纹可分性"
+# 自然语言描述 + 资料授权（user_kb=只用授权资料库 / autonomous=授权自主检索）
+python -m src.main --request "研究信道变化如何影响射频指纹可分性" --source-policy autonomous
 ```
 
 产物写入 `outputs/research/{project_id}/{snapshot_id}/`：`research_spec.json`、`claims.json`、
@@ -211,10 +214,10 @@ python -m src.main --mode theory --request "研究信道变化如何影响射频
 `decisions.jsonl`、`novelty_review.md`、`unresolved.md`、`manuscript.md`、`paper.tex`、
 `delivery_gate.md`、`manifest.json`。
 
-要让理论模式能查到资料，先把文献放进主题知识底座（`data/kb/{主题}/manual/` + `meta.json`），
+要让研究能查到资料，先把文献放进主题知识底座（`data/kb/{主题}/manual/` + `meta.json`），
 或在 `ResearchSpec.domain` 中给出主题名；底座为空时检索类动作不会被暴露。
 
-**理论模式的只读接口**（供前端/脚本读取研究状态，不会改动任何结论）：
+**研究状态的只读接口**（供前端/脚本读取，不会改动任何结论）：
 
 | 接口 | 作用 |
 |---|---|
@@ -262,11 +265,8 @@ curl -X POST http://127.0.0.1:8000/api/library/import \
 | `--keywords, -k` | 核心关键词列表 | — |
 | `--subtopics, -s` | 子主题列表 | — |
 | `--time-range` | 时间范围 | `2019-2026` |
-| `--max-revisions` | 最大修改轮次 | `3` |
 | `--resume` | 断点续跑 | 否 |
-| `--skip-retrieval` | 跳过检索/摄入/预验证，复用 `data/pipeline_cache` 检索产物 | 否 |
 
-首次完整运行会把检索产物写入 `data/pipeline_cache/{主题}.json`；之后加 `--skip-retrieval` 可跳过前三个阶段，从大纲开始重跑，大幅缩短重复测试时间（缓存不足时自动回退完整检索）。
 
 ## 常见问题（FAQ）
 
@@ -284,7 +284,7 @@ curl -X POST http://127.0.0.1:8000/api/library/import \
 DeepSeek 等不提供 embedding API 时 RAG 自动降级（主流程不受影响）。要启用完整 RAG，配置硅基流动：`EMBEDDING_MODEL=BAAI/bge-large-zh-v1.5`、`EMBEDDING_BASE_URL=https://api.siliconflow.cn/v1`、`EMBEDDING_API_KEY=sk-xxx`。
 
 **5. 运行太慢 / 只想调试流程**
-`.env` 调低 `PDF_DOWNLOAD_LIMIT`（如 10）、设 `SKIP_EMBEDDING=1`，或加 `--skip-retrieval` 复用已有检索缓存。
+`.env` 调低 `PDF_DOWNLOAD_LIMIT`（如 10）、设 `SKIP_EMBEDDING=1`。
 
 **6. 检索返回 429 / 频繁限流**
 配置 `OPENALEX_API_KEY`（OpenAlex 免费额度按日计，UTC 午夜重置）；调大 `HTTP_429_BACKOFF_BASE`、`HTTP_CIRCUIT_BREAKER_COOLDOWN`；稍后重试。
@@ -315,9 +315,10 @@ Web 界面顶部「历史会话」→ 未完成会话点「继续」；CLI 加 `
 ```
 AIR/
 ├── src/
-│   ├── main.py / main_chat.py / server.py / gui.py   # CLI / 对话 CLI / Web / tkinter 入口
+│   ├── main.py / server.py   # CLI（唯一入口）/ Web 服务与前端 API
 │   ├── config.py            # 全局配置 (.env 加载/默认值)
-│   ├── agents/              # 文献查阅、撰写、审阅、大纲、引用预验证/守门/核查、PDF 摄入、理论写作
+│   ├── agents/              # 团队角色与运行时（旧综述 Agent 与旧引用守门/预检已退役,
+│   │                        #   通用件在 publication/ 下: citation_checks / evidence_ledger）
 │   │   ├── protocol.py      #   团队契约: AgentTask/AgentResult/ResearchNeed/权限令牌/预算
 │   │   ├── registry.py      #   角色注册 + **真实可用能力探测**
 │   │   ├── runtime.py       #   统一运行时: 有界工具循环/记账/取消/结果校验
@@ -359,7 +360,7 @@ AIR/
 
 ## 能力边界（务必留意）
 
-- 理论模式的结论只在**声明的模型与假设**下成立，不承担与真实系统相符的实证验证；
+- 形式化结论只在**声明的模型与假设**下成立，不承担与真实系统相符的实证验证；
 - 工具通过不等于科学真理：形式化工具只检查提交给它的编码，**陈述是否忠实于原问题仍需人工确认**；
 - 多智能体一致同意不能替代数学证明；「没检索到等价结果」只表示在所检索范围内未发现；
 - 未执行的实验/仿真规格不是证据；报告与论文稿在门槛未通过时只作为研究备忘录/条件性报告导出。

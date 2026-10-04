@@ -7,19 +7,28 @@
  * - 迟到响应按加载代号丢弃;
  * - 事件按 seq 去重、发现缺口要求重新加载投影 (不把缺口当"完成")。
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   blockingIssues,
   connectionLabel,
+  dispatch,
   draftFor,
   emptyStore,
+  getState,
+  inputPhase,
   latestDecision,
   reduce,
+  resetSession,
+  resetStore,
   roleStatuses,
   shouldResync,
+  subscribe,
+  switchSelection,
   tasksForCurrentRun,
   visibleTasks,
+  workbenchFrom,
+  workbenchQueryTarget,
   type ResearchStore,
   type TeamTaskRow,
 } from '../src/state/research-store';
@@ -200,5 +209,167 @@ describe('decisions', () => {
     const latest = latestDecision(store)!;
     expect(latest.round).toBe(2);
     expect(latest.decision).toBe('stop_with_report');
+  });
+});
+
+/* ---------------------------------------------------------------------
+ * G19: 运行状态 / 主题 / 草稿身份 / 加载代号都归唯一状态, 页面不再各存一份
+ * ------------------------------------------------------------------- */
+describe('后台运行状态 (与连接状态分开)', () => {
+  it('运行状态改变不动连接状态, 连接状态改变不动运行状态', () => {
+    let store = reduce(emptyStore(), { type: 'selection/status', status: 'running' });
+    store = reduce(store, { type: 'transport/status', status: 'offline' });
+    // 断线 ≠ 后台已停止: 这正是"离线 (后台状态未知)"与"已停止"必须分开的原因
+    expect(store.selection.runStatus).toBe('running');
+    expect(store.transport.status).toBe('offline');
+    expect(connectionLabel(store.transport)).toContain('后台状态未知');
+  });
+
+  it('输入阶段由运行状态派生 (不再有第二个 mode 变量)', () => {
+    const at = (status: any) => inputPhase(reduce(emptyStore(),
+      { type: 'selection/status', status }));
+    expect(at('idle')).toBe('idle');
+    expect(at('waiting')).toBe('waiting');
+    expect(at('running')).toBe('running');
+    // 已结束/出错/已停止都不接受新输入 (与迁移前的本地 mode 语义一致)
+    expect(at('done')).toBe('running');
+    expect(at('stopped')).toBe('running');
+    expect(at('error')).toBe('running');
+  });
+});
+
+describe('身份整体切换与逐字段回写', () => {
+  it('selection/patch 不清掉查看中的对象, 也不推进加载代号', () => {
+    let store = reduce(emptyStore(), {
+      type: 'selection/open',
+      selection: { projectId: 'p1', runId: 'r1', objectKey: 'claim:c1' },
+    });
+    const token = store.ui.loadToken;
+    store = reduce(store, { type: 'selection/patch', patch: { problemId: 'q1' } });
+    expect(store.selection.problemId).toBe('q1');
+    expect(store.selection.objectKey).toBe('claim:c1');
+    expect(store.ui.loadToken).toBe(token);
+  });
+
+  it('selection/open 清掉旧对象并推进加载代号 (迟到响应据此丢弃)', () => {
+    let store = reduce(emptyStore(), {
+      type: 'selection/open',
+      selection: { projectId: 'p1', runId: 'r1', objectKey: 'claim:c1' },
+    });
+    const token = store.ui.loadToken;
+    store = reduce(store, { type: 'selection/open', selection: { projectId: 'p2', runId: 'r2' } });
+    expect(store.selection.objectKey).toBe('');
+    expect(store.ui.loadToken).toBe(token + 1);
+  });
+
+  it('selection/reset 清空身份与运行状态, 保留引擎标识与主题偏好', () => {
+    let store = reduce(emptyStore(), {
+      type: 'selection/open',
+      selection: { projectId: 'p1', problemId: 'q1', sessionId: 's1', threadId: 't1',
+                   runId: 'r1', mode: 'theory', runStatus: 'running' },
+    });
+    store = reduce(store, { type: 'ui/context', topic: '库主题' });
+    store = reduce(store, { type: 'selection/reset' });
+    expect(store.selection).toMatchObject({
+      projectId: '', problemId: '', sessionId: '', threadId: '', runId: '',
+      mode: 'theory', runStatus: 'idle', objectKey: '',
+    });
+    expect(store.ui.contextTopic).toBe('库主题');
+  });
+
+  it('切换会话不清空主题偏好 (资料库主题与项目 id 是两个字段)', () => {
+    let store = reduce(emptyStore(), { type: 'ui/context', topic: '库主题' });
+    store = reduce(store, { type: 'selection/open', selection: { projectId: 'pX' } });
+    expect(store.ui.contextTopic).toBe('库主题');
+  });
+});
+
+describe('草稿身份与工作台查询门禁', () => {
+  it('草稿身份不查工作台; 换成别的 id 放行; 绑定运行后放行', () => {
+    let store = reduce(emptyStore(), { type: 'ui/draftProject', projectId: 'proj-draft' });
+    expect(workbenchQueryTarget(store, 'proj-draft')).toBe('');
+    expect(workbenchQueryTarget(store, 'proj-other')).toBe('proj-other');
+    expect(workbenchQueryTarget(store, '')).toBe('');
+    store = reduce(store, { type: 'ui/boundProject', projectId: 'proj-draft' });
+    expect(store.ui.draftProjectId).toBe('');
+    expect(workbenchQueryTarget(store, 'proj-draft')).toBe('proj-draft');
+  });
+});
+
+describe('角色能力已读标记', () => {
+  it('空角色列表也算"已读" (不能靠 roles.length 推断)', () => {
+    let store = emptyStore();
+    expect(store.entities.rolesLoaded).toBe(false);
+    store = reduce(store, { type: 'entities/roles', roles: [] });
+    expect(store.entities.rolesLoaded).toBe(true);
+    store = reduce(store, { type: 'entities/clear' });
+    expect(store.entities.rolesLoaded).toBe(false);
+  });
+});
+
+describe('工作台投影 (§8.1: 工作台不自己持有工作对象)', () => {
+  it('服务端投影进 entities, 结论详情按它重渲染', () => {
+    let store = emptyStore();
+    expect(workbenchFrom(store)).toBeNull();
+    const projection = {
+      project_id: 'p1',
+      claims: [{ id: 'clm-1', statement: '结论一', status: 'supported' }],
+    };
+    store = reduce(store, { type: 'entities/workbench', data: projection as never });
+    expect(workbenchFrom(store)).toBe(projection);
+    // 换身份时的整体重置会把它一并清掉 (不残留上一个研究的工作台对象)
+    store = reduce(store, { type: 'entities/clear' });
+    expect(workbenchFrom(store)).toBeNull();
+  });
+});
+
+/* ---------------------------------------------------------------------
+ * 进程级唯一实例 (§8.1): 页面/控制器/团队视图读写同一份状态
+ * ------------------------------------------------------------------- */
+describe('唯一 store 实例', () => {
+  beforeEach(() => { resetStore(); });
+  afterEach(() => { resetStore(); });
+
+  it('dispatch 更新 getState 并只通知一次', () => {
+    let notified = 0;
+    let seen = '';
+    const unsubscribe = subscribe((state) => { notified += 1; seen = state.selection.projectId; });
+    dispatch({ type: 'selection/patch', patch: { projectId: 'p1' } });
+    expect(getState().selection.projectId).toBe('p1');
+    expect(notified).toBe(1);
+    expect(seen).toBe('p1');
+    // 状态未变化的动作不通知 (游标只前进)
+    dispatch({ type: 'transport/cursor', sessionId: 's1', seq: 3 });
+    dispatch({ type: 'transport/cursor', sessionId: 's1', seq: 1 });
+    expect(notified).toBe(2);
+    unsubscribe();
+    dispatch({ type: 'selection/patch', patch: { projectId: 'p2' } });
+    expect(notified).toBe(2);
+  });
+
+  it('switchSelection 只在身份真的变了时整体切换', () => {
+    dispatch({ type: 'selection/open', selection: { projectId: 'p1', runId: 'r1' } });
+    dispatch({ type: 'selection/object', objectKey: 'claim:c1' });
+    const token = getState().ui.loadToken;
+    // 同一次刷新把相同身份再交上来: 不清对象、不推进代号
+    switchSelection({ projectId: 'p1', runId: 'r1' });
+    expect(getState().selection.objectKey).toBe('claim:c1');
+    expect(getState().ui.loadToken).toBe(token);
+    // 真换了 run: 整体切换
+    switchSelection({ projectId: 'p1', runId: 'r2' });
+    expect(getState().selection.objectKey).toBe('');
+    expect(getState().ui.loadToken).toBe(token + 1);
+  });
+
+  it('resetSession 清身份与团队投影, 但不动 ui 的主题偏好', () => {
+    dispatch({ type: 'selection/open', selection: { projectId: 'p1', runId: 'r1' } });
+    dispatch({ type: 'ui/context', topic: '库主题' });
+    dispatch({ type: 'entities/roles', roles: [] });
+    dispatch({ type: 'transport/status', status: 'online' });
+    resetSession();
+    expect(getState().selection.projectId).toBe('');
+    expect(getState().entities.rolesLoaded).toBe(false);
+    expect(getState().transport.status).toBe('offline');
+    expect(getState().ui.contextTopic).toBe('库主题');
   });
 });

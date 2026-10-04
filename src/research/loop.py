@@ -125,30 +125,11 @@ _GAP_ACCEPTANCE = {
 
 # 义务处理顺序: 先做效应估计/核心推导, 再关闭依赖其结果的规则型义务。
 # (缺口构造与决策排序必须使用同一顺序, 否则控制器会一直选中依赖项。)
-OBLIGATION_PRIORITY = {
-    "estimate_effect": 0, "prove_inequality": 0, "prove_monotonicity": 0,
-    "prove_identity": 0, "check_implication": 0, "equality_condition": 1,
-    "control_confound": 2, "scope_check": 3, "evidence_support": 4,
-    # 设计/计数类存在性判定: 与计数关系同层, 先于一般规则型义务
-    "design_necessity": 2,
-    # 因果识别类声明必须在效应估计之后再评估 (计划书 §7.4)
-    "identification_assumptions": 4, "design_feasibility": 4,
-    "measurement_and_missing": 4, "error_structure": 4,
-}
-
-
-def _obligation_kind(obligations: list[ProofObligation], obligation_id: str) -> str:
-    for obligation in obligations:
-        if obligation.id == obligation_id:
-            return obligation.kind
-    return ""
-
-
-def _claim_of(obligations: list[ProofObligation], obligation_id: str) -> str:
-    for obligation in obligations:
-        if obligation.id == obligation_id:
-            return obligation.claim_id
-    return ""
+from src.research.obligations import (  # noqa: E402  唯一口径, 见 research/obligations.py
+    OBLIGATION_PRIORITY,
+    obligation_claim as _claim_of,
+    obligation_kind as _obligation_kind,
+)
 
 
 def _feedback_candidates(context: dict) -> list[dict]:
@@ -170,45 +151,16 @@ def _feedback_candidates(context: dict) -> list[dict]:
 def _claim_category(claim: Claim) -> str:
     """命题在能力矩阵里的问题类型 (计划书 §7.2)。
 
-    先看命题类型本身; 定义性命题再区分单调性/恒等/不等式, 以便能力声明
-    不会把"需要数据的描述性命题"当成"可符号核验的定义性命题"。
+    实现只有一份, 在 `reasoning_kernel._claim_category`。此前这里与内核各写一份,
+    结果**分叉**了 (内核只回 formal, 这里还回 inequality/identity/monotonicity),
+    而团队建模角色用的是内核那份 —— 能力声明因此说"未知问题类型 formal"。
     """
-    if claim.claim_type != ClaimType.definitional:
-        return claim.claim_type.value
-    if claim.expr and claim.wrt:
-        return "monotonicity"
-    if claim.relation == Relation.eq:
-        return "identity"
-    if claim.relation in (Relation.ge, Relation.le, Relation.gt, Relation.lt):
-        return "inequality"
-    return "definitional"
+    from src.research.reasoning_kernel import _claim_category as _canonical
+
+    return _canonical(claim)
 
 
-@dataclass
-class ResearchBudget:
-    max_actions: int = 40
-    max_tool_calls: int = 60
-    no_progress_limit: int = 3
-    max_routes: int = 3
-    # ---- 资源预算 (计划书 §9.3): 0 表示不限制 ----
-    max_tokens: int = 0
-    max_cost_usd: float = 0.0
-    max_wall_seconds: float = 0.0
-
-    def exhausted_reason(self, *, actions: int, tool_calls: int, tokens: int,
-                         cost_usd: float, elapsed: float) -> str:
-        """返回触顶的原因; 未触顶返回空串。"""
-        if actions >= self.max_actions:
-            return f"动作预算耗尽 ({actions}/{self.max_actions})"
-        if tool_calls >= self.max_tool_calls:
-            return f"工具调用预算耗尽 ({tool_calls}/{self.max_tool_calls})"
-        if self.max_tokens and tokens >= self.max_tokens:
-            return f"token 预算耗尽 ({tokens}/{self.max_tokens})"
-        if self.max_cost_usd and cost_usd >= self.max_cost_usd:
-            return f"费用预算耗尽 (${cost_usd:.4f}/${self.max_cost_usd})"
-        if self.max_wall_seconds and elapsed >= self.max_wall_seconds:
-            return f"墙钟预算耗尽 ({elapsed:.0f}s/{self.max_wall_seconds:.0f}s)"
-        return ""
+from src.research.budget import ResearchBudget  # noqa: E402  (唯一实现, 见 research/budget.py)
 
 
 @dataclass
@@ -2591,8 +2543,6 @@ class TheoryEngine:
 
     def _weaken_claim(self, claim: Claim, reason: str) -> Claim | None:
         """把严格不等式弱化为非严格, 或把无条件结论限定到声明域。"""
-        from src.research.schemas import Relation
-
         mapping = {Relation.gt: Relation.ge, Relation.lt: Relation.le}
         new_relation = mapping.get(claim.relation, claim.relation)
         if new_relation == claim.relation and not claim.variable_domains:
@@ -2942,72 +2892,19 @@ class TheoryEngine:
 
         只有**全部必要义务关闭**才升级为 supported; 任何义务被反例否决即 refuted;
         未关闭/受阻/未决一律保持 in_progress 或 blocked。
+
+        判据本身在 `reasoning_kernel.claim_state_for` (合并计划 §3.1 G06「按职责
+        抽取」): 团队形式化路径由提交服务调**同一个**函数, 因此"什么时候算
+        supported"只有一处定义, 不会出现两条路径各自漂移。这里只负责落盘。
         """
+        from src.research.reasoning_kernel import apply_claim_state, claim_state_for
+
         obligations = [o for o in self._obligations() if o.claim_id == claim.id]
         records = [v for v in self._verifications() if v.claim_id == claim.id and not v.stale]
-        required = [o for o in obligations if o.required]
-        open_required = [o for o in required if o.status == ObligationStatus.open]
-        refuted = [o for o in required if o.status == ObligationStatus.refuted]
-        blocked = [o for o in required if o.status == ObligationStatus.blocked]
-        closed = [o for o in required if o.status == ObligationStatus.closed]
-
-        updates: dict[str, Any] = {"verification_closure": self._verification_closure(claim)}
-
-        if refuted:
-            witness = next((o.counterexample for o in refuted if o.counterexample), {})
-            updates.update({
-                "status": ClaimStatus.refuted,
-                "coverage": Coverage.target,
-                "validation_status": ValidationStatus.counterexample_found,
-                "support_kind": refuted[0].support_kind or claim.support_kind,
-                "assurance": self._assurance_for(refuted[0].support_kind) or claim.assurance,
-                "verification_scope": VerificationScope.target,
-                "notes": (claim.notes + f" 被反例否决: {witness}").strip(),
-            })
-        elif required and not open_required and not blocked and len(closed) == len(required):
-            # 全部必要义务关闭 → 检查有效验证记录与编码对齐
-            aligned = [v for v in records if self._record_aligned(v, claim)]
-            estimate = claim.effect_estimate or {}
-            if estimate and not estimate.get("ci_excludes_zero", True):
-                # 统计估计的区间跨零: 不能作为"效应存在"的支持
-                updates.update({
-                    "status": ClaimStatus.blocked,
-                    "coverage": Coverage.step,
-                    "validation_status": ValidationStatus.unknown,
-                    "notes": (claim.notes + " 效应95%CI包含0, 不足以支持该结论").strip(),
-                })
-            elif not aligned:
-                updates.update({
-                    "status": ClaimStatus.in_progress,
-                    "coverage": Coverage.step,
-                    "validation_status": ValidationStatus.unknown,
-                    "notes": (claim.notes + " 义务已关闭但缺少与原命题对齐的有效验证记录").strip(),
-                })
-            else:
-                kinds = [o.support_kind for o in closed if o.support_kind != SupportKind.none]
-                support_kind = kinds[0] if kinds else SupportKind.informal_argument
-                updates.update({
-                    "status": ClaimStatus.supported,
-                    "coverage": Coverage.target,
-                    "validation_status": ValidationStatus.verified,
-                    "support_kind": support_kind,
-                    "assurance": self._assurance_for(support_kind) or claim.assurance,
-                    "verification_scope": VerificationScope.target,
-                })
-        elif blocked and not open_required:
-            updates.update({
-                "status": ClaimStatus.blocked,
-                "validation_status": ValidationStatus.unknown,
-                "notes": (claim.notes + " 存在受阻义务, 保持未决").strip(),
-            })
-        else:
-            updates.update({
-                "status": ClaimStatus.in_progress if closed or records else claim.status,
-                "validation_status": claim.validation_status
-                if claim.status == ClaimStatus.supported else ValidationStatus.unknown,
-            })
-
-        updated = claim.model_copy(update=updates)
+        closure = self._verification_closure(claim)
+        disposition = claim_state_for(claim, obligations, records, closure=closure,
+                                      aligned=self._record_aligned)
+        updated = apply_claim_state(claim, disposition, closure=closure)
         if updated.model_dump() == claim.model_dump():
             return updated
         version = self.store.put(KIND_CLAIM, updated.id, updated.model_dump(mode="json"))
@@ -3071,80 +2968,22 @@ class TheoryEngine:
                            problem_id: str = "") -> dict:
         """从既有冻结快照派生一个新问题 (计划书 §9.1 的第三种操作)。
 
-        明确记录: 哪些结论作为**前提导入**(需重新检查条件), 哪些必须重算。
-        不复制验证记录 —— 旧验证绑定的是旧命题版本, 直接复用等于静默继承结论。
+        实现只有一份, 在 `research/forking.py`。这里额外做一件事: 为每条派生命题登记
+        **研究路线** —— 那是引擎自己的策略记账, 团队路径不需要 (主控派工)。
         """
-        source = self.store.load_snapshot(source_snapshot_id or None)
-        if source is None:
-            return {"ok": False, "reason": "未找到可派生的快照"}
-        selected = [c for c in source.claims
-                    if (not claim_ids or c.id in claim_ids)]
-        if not selected:
-            return {"ok": False, "reason": "快照中没有可导入的结论"}
+        from src.research.forking import fork_from_snapshot as _fork
 
-        new_problem = problem_id or new_id("prob")
-        imported: list[str] = []
-        writes: list[tuple[str, str, dict]] = []
-        for claim in selected:
-            forked = claim.model_copy(update={
-                "id": new_id("clm"), "version": 1,
-                "problem_id": new_problem,   # R6: 派生命题归属**新**问题
-                "status": ClaimStatus.proposed,
-                "assurance": Assurance.unverified,
-                "support_kind": SupportKind.none,
-                "coverage": Coverage.step,
-                "validation_status": ValidationStatus.unchecked,
-                "novelty_status": NoveltyStatus.unchecked,
-                "verification_scope": None,
-                "verification_closure": {},
-                "obligations": [],
-                "dependencies": list(claim.dependencies),
-                "notes": (claim.notes + f" 由快照 {source.snapshot_id} 的 {claim.id} 派生导入, "
-                                        "其前提与条件需在本问题下重新检查").strip(),
-            })
-            writes.append((KIND_CLAIM, forked.id, forked.model_dump(mode="json")))
-            imported.append(forked.id)
+        def _on_claim(forked):
             route = self.routes.ensure_route(forked.id, goal=forked.statement,
-                                             strategy=self._plan_strategy(forked))
-            writes.append((KIND_ROUTE, route.id, route.model_dump(mode="json")))
+                                            strategy=self._plan_strategy(forked))
+            return [(KIND_ROUTE, route.id, route.model_dump(mode="json"))]
 
-        # F0-5: 派生必须同时创建**新问题的规格**。只导入命题而不建规格时,
-        # 新问题在存储里没有身份, 工作台按 problem_id 查不到 (404), 也无法续研。
-        forked_spec = self.spec.model_copy(update={
-            "problem_id": new_problem,
-            "problem_statement": self.spec.problem_statement,
-            "original_request": (self.spec.original_request
-                                 or self.spec.problem_statement or self.spec.direction),
-            "questions": [],          # 新问题尚未确认研究路线: 由用户/研究者重新确认
-            "candidates": [],
-            "confirmed": True,        # 命题已从快照导入, 可直接进入研究循环
-            "selected_candidate_id": "",
-            "unknown_fields": [],
-        })
-        writes.append((KIND_SPEC, forked_spec.problem_id,
-                       forked_spec.model_dump(mode="json")))
-
-        lineage = {
-            "source_project_id": source.project_id,
-            "source_snapshot_id": source.snapshot_id,
-            "source_problem_id": self.spec.problem_id,
-            "new_problem_id": new_problem,
-            "imported_claims": imported,
-            "reused_verifications": [],   # 明确不复用: 必须重算
-            "must_recompute": imported,
-            "created_at": utcnow(),
-        }
-        self.append_step(
-            writes=writes,
-            events=[("forked_from_snapshot", lineage)],
-            idempotency_key=f"fork:{source.snapshot_id}:{new_problem}",
-        )
-        self._notes.append(
-            f"已从快照 {source.snapshot_id} 派生 {len(imported)} 条结论作为待重验命题 "
-            f"(新问题 {new_problem})")
-        return {"ok": True, "lineage": lineage, "imported_claims": imported,
-                "new_problem_id": new_problem, "problem_id": new_problem,
-                "spec_created": True}
+        outcome = _fork(self.store, self.spec, source_snapshot_id=source_snapshot_id,
+                        claim_ids=claim_ids, new_problem_id=problem_id,
+                        on_claim=_on_claim)
+        if outcome.get("ok") and outcome.get("note"):
+            self._notes.append(str(outcome["note"]))
+        return outcome
 
     # ------------------------------------------------------------------
     # 用户反馈: 解析为对象级动作并施加 (计划书 §5.1 / §6.1)
@@ -3193,118 +3032,16 @@ class TheoryEngine:
         return data
 
     @staticmethod
-    def _summarize_event(kind: str, payload: dict) -> str:
-        if kind == "evidence_retrieved":
-            extra = f" (失败: {'; '.join(payload.get('failures') or [])})" \
-                if payload.get("failures") else ""
-            blocked = payload.get("dropped_out_of_scope") or 0
-            scope_note = f" (范围外剔除 {blocked} 条)" if blocked else ""
-            channels = payload.get("channels") or []
-            chan_note = f" [通道 {'/'.join(channels)}]" if channels else ""
-            return (f"定向检索「{payload.get('query', '')}」命中 "
-                    f"{payload.get('count', 0)} 条{chan_note}{extra}{scope_note}")
-        if kind == "source_read":
-            return f"回到原文: {payload.get('locator', '')}" + \
-                ("(片段被截断)" if payload.get("truncated") else "")
-        if kind == "cards_extracted":
-            return f"抽取定理/定义卡 {payload.get('count', 0)} 张"
-        if kind == "evidence_interpreted":
-            return (f"判定证据关系: 共 {payload.get('judged', 0)} 条, "
-                    f"支持 {payload.get('supports', 0)} 条")
-        if kind == "obligation_closed":
-            return f"义务关闭: {payload.get('obligation_id', '')} (工具 {payload.get('tool', '')})"
-        if kind == "claim_refuted":
-            return f"找到反例, 命题被否定: {payload.get('witness')}"
-        if kind == "rule_obligation_evaluated":
-            state = "已关闭" if payload.get("closed") else "未满足"
-            return (f"规则型义务 {payload.get('obligation_id', '')} {state}"
-                    + (f" — {payload.get('certificate')}" if payload.get("certificate") else ""))
-        if kind == "route_switched":
-            return (f"换路: 策略 {payload.get('strategy', '')} "
-                    f"(原因: {payload.get('reason', '')})")
-        if kind == "novelty_assessed":
-            return f"新颖性判定: {payload.get('status', '')}"
-        if kind == "experiment_spec_proposed":
-            return f"生成实验/仿真规格 {payload.get('spec_id', '')} (状态 {payload.get('status', '')})"
-        if kind == "model_proposed":
-            return f"提出候选模型 {payload.get('model_id', '')} (来源 {len(payload.get('sources') or [])} 条)"
-        if kind == "model_selected":
-            return (f"选中模型 {payload.get('model_id', '')} v{payload.get('version', 1)} "
-                    f"(原因: {payload.get('reason', '')})")
-        if kind == "capability_declared":
-            return f"问题类型能力声明: {payload.get('declaration', '')}"
-        if kind == "plan_proof":
-            source = payload.get("source") or "rules"
-            label = {"rules": "规则模板", "llm": "LLM 推导+子目标",
-                     "llm_steps": "LLM 推导步骤",
-                     "llm_subgoals": "LLM 子目标"}.get(source, source)
-            extra = f", 新增待核验子目标 {payload.get('subgoals')} 条" \
-                if payload.get("subgoals") else ""
-            return f"制定证明路线: {payload.get('strategy', '')} (来源: {label}{extra})"
-        if kind in ("proposal", "proposal_used", "proposal_rejected", "proposal_failed",
-                    "proposal_skipped"):
-            if kind == "proposal":
-                accepted = payload.get("accepted") or {}
-                rejected = payload.get("rejected") or []
-                if accepted:
-                    return (f"采纳模型提议: {accepted.get('action_type', '')} → "
-                            f"{accepted.get('object_id', '')} (减少不确定性: "
-                            f"{accepted.get('uncertainty_reduced', '')})")
-                if rejected:
-                    return f"拒绝模型提议 {len(rejected)} 条: " + \
-                        "; ".join(str(r.get("reason", ""))[:80] for r in rejected)
-                return "模型提议: 无"
-            if kind == "proposal_used":
-                return (f"模型提议 {payload.get('action_type', '')} → "
-                        f"{payload.get('object_id', '')}")
-            if kind == "proposal_rejected":
-                return "提议被拒: " + "; ".join(str(r)[:80]
-                                                for r in (payload.get("reasons") or []))
-            return f"提议不可用: {payload.get('reason', '')}"
-        if kind == "derive_step":
-            checked = payload.get("adversarial_checked")
-            hits = payload.get("adversarial_hits")
-            extra = f", 反方审查 {checked} 项 (提出 {hits} 项)" if checked else ""
-            return f"生成推导步骤 {payload.get('steps', 0)} 步 (待核验){extra}"
-        if kind == "effect_estimated":
-            return f"效应估计完成: {payload.get('estimate')}"
-        if kind == "equality_condition":
-            return f"等号条件: {payload.get('condition', '')}"
-        if kind == "assumption_revised":
-            return (f"假设 {payload.get('assumption_id', '')} 已修订 "
-                    f"(原因: {payload.get('reason', '')}; 失效 {len(payload.get('affected') or [])} 条结论)")
-        if kind == "hypothesis_revised":
-            return f"命题弱化: {payload.get('original', '')} → {payload.get('weaker', '')}"
-        if kind == "user_feedback":
-            return f"用户反馈已施加: {len(payload.get('applied') or [])} 项"
-        if kind == "formulated":
-            return f"形式化完成: {payload.get('claims', 0)} 条命题 / {payload.get('obligations', 0)} 条义务"
-        if kind == "candidate_confirmed":
-            return f"确认研究路线: {payload.get('statement', '')}"
-        if kind == "evidence_attached":
-            return f"挂接证据 {payload.get('count', 0)} 条"
-        if kind == "run_start":
-            return f"开始研究问题 {payload.get('problem_id') or payload.get('project_id', '')}"
-        if kind == "verification_recorded":
-            return (f"登记验证记录 {payload.get('record_id', '')} "
-                    f"(状态 {payload.get('status', '')})")
-        if kind == "claim_state_reconciled":
-            return (f"重算结论状态: {payload.get('claim_id', '')} → "
-                    f"{payload.get('status', '')} (支持方式 {payload.get('support_kind', '')}, "
-                    f"覆盖 {payload.get('coverage', '')})")
-        if kind == "counterexample":
-            return f"找到反例: {payload.get('witness')}"
-        if kind == "distinguishing_test_proposed":
-            return (f"提出可区分检验 ({payload.get('kind', '')}): "
-                    f"{payload.get('statement', '')}")
-        if kind == "writing_gaps_fed_back":
-            return (f"写作缺口回流: {payload.get('count', 0)} 条新义务 "
-                    "(必须继续研究, 不得只在正文里说明)")
-        if kind == "forked_from_snapshot":
-            return (f"从快照 {payload.get('source_snapshot_id', '')} 派生新问题 "
-                    f"{payload.get('new_problem_id', '')} "
-                    f"(待重算 {len(payload.get('imported_claims') or [])} 条)")
-        return kind
+    def _summarize_event(kind: str, payload: dict | None) -> str:
+        """事件摘要 —— 实现只有一份, 在 
+esearch/reporting.summarize_event。
+
+        迁出理由 (合并计划 §5.5): 摘要/渲染是通用件, 留在引擎里会让"读工作台"这类
+        只读需求也被迫建一个研究引擎。这里保留同名入口供既有调用方与用例使用。
+        """
+        from src.research.reporting import summarize_event
+
+        return summarize_event(kind, payload)
 
     def feedback_context(self) -> dict:
         assumptions = {a.id: a.statement for a in self._assumptions()}

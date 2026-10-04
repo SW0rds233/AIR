@@ -13,12 +13,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from unittest.mock import MagicMock, patch
 
-from src.agents.citation_checker import build_evidence_ledger
-from src.agents.citation_guard import check_citation_semantics
-from src.agents.citation_prechecker import (
-    build_verified_reference_sheet,
-    verify_reference_list,
-)
+from src.publication.evidence_ledger import build_evidence_ledger
+from src.publication.citation_checks import check_citation_semantics
+from src.publication.evidence_ledger import build_verified_reference_sheet
+from src.publication.evidence_ledger import verify_reference_list
 from src.utils.cost_tracker import UsageTracker, estimate_cost
 
 
@@ -121,7 +119,7 @@ def test_evidence_ledger_hallucinated():
     assert "疑似虚构引用" in ledger
 
 
-@patch("src.agents.citation_prechecker.verify_single_citation")
+@patch("src.publication.evidence_ledger.verify_single_citation")
 def test_verify_reference_list(mock_verify):
     def fake_verify(rec):
         r = MagicMock()

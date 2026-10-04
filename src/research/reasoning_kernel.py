@@ -667,33 +667,208 @@ def _as_distinguishing_test(value: Any) -> Any:
 
 
 def _claim_category(claim: Claim) -> str:
-    """命题类别 (供能力声明使用)。
+    """命题在能力矩阵里的问题类型 (**唯一口径**, 合并计划 §7.2)。
 
-    与 `loop._claim_category` 同一判定口径 —— 但内核**不复用**引擎里的私有函数:
-    引擎依赖内核, 反向 import 会成环。因此这里按同一规则重写, 并在
-    `tests/test_reasoning_kernel.py` 里对两个实现做一致性断言。
+    先看命题类型本身; 定义性命题再区分单调性/恒等/不等式 —— 否则能力声明会把
+    "可符号核验的不等式命题"说成"未知问题类型 formal: 需先澄清类型再研究",
+    而那正是团队建模角色用来决定"要不要提前澄清"的输入 (实测)。
+
+    **这里曾经与 `loop._claim_category` 分叉**: 内核只回 causal/empirical/scenario/
+    normative/formal, 引擎还会回 monotonicity/identity/inequality。而且内核的文档
+    声称 `tests/test_reasoning_kernel.py` 有一致性断言 —— 那条断言**并不存在**, 于是
+    分叉一直没被发现。现在完整规则只在这一处, `loop._claim_category` 转发到这里,
+    一致性断言补在 `tests/test_reasoning_kernel.py`。
     """
-    from src.research.schemas import ClaimType
+    from src.research.schemas import ClaimType, Relation
 
     claim_type = getattr(claim, "claim_type", ClaimType.definitional)
-    if claim_type == ClaimType.causal:
-        return "causal"
-    if claim_type in (ClaimType.predictive, ClaimType.associational,
-                      ClaimType.descriptive):
-        return "empirical"
-    if claim_type == ClaimType.scenario:
-        return "scenario"
-    if claim_type == ClaimType.normative:
-        return "normative"
-    return "formal"
+    if claim_type != ClaimType.definitional:
+        return claim_type.value
+    if getattr(claim, "expr", "") and getattr(claim, "wrt", ""):
+        return "monotonicity"
+    if getattr(claim, "relation", None) == Relation.eq:
+        return "identity"
+    if getattr(claim, "relation", None) in (Relation.ge, Relation.le,
+                                            Relation.gt, Relation.lt):
+        return "inequality"
+    return "definitional"
+
+
+# ----------------------------------------------------------------------
+# 命题状态归并 (唯一的状态判据, 零 LLM)
+# ----------------------------------------------------------------------
+def assurance_for_support_kind(support_kind: Any) -> Any:
+    """支持方式 → 保证等级 (与 `loop._assurance_for` 同一张表)。
+
+    引擎侧的同名实现已改为调用这里, 因此"哪种支持算几级保证"只有一处定义。
+    """
+    from src.research.schemas import Assurance, SupportKind
+
+    return {
+        SupportKind.theorem_application: Assurance.symbolic_checked,
+        SupportKind.symbolic_check: Assurance.symbolic_checked,
+        SupportKind.constraint_solve: Assurance.solver_checked,
+        SupportKind.formal_proof: Assurance.formally_checked,
+        SupportKind.statistical_estimate: Assurance.empirical_estimated,
+        SupportKind.informal_argument: Assurance.informal_reviewed,
+    }.get(support_kind)
+
+
+@dataclass
+class ClaimStateDisposition:
+    """由义务聚合与有效验证记录算出的命题状态 (**纯映射, 不写任何状态**)。
+
+    为什么把它抽到内核 (合并计划 §3.1 G06): 团队形式化路径必须能自己走完
+    "义务 → 工具核验 → 结构化记录 → **状态归并**", 而状态归并的判据只能有一份 ——
+    否则团队路径与旧引擎会在"什么时候算 supported"上分叉, 那正是"团队接管研究"
+    最难发现的一类错误。抽取后引擎的 `_reconcile_claim` 变成"调内核 + 落盘",
+    团队侧由提交服务调用同一个函数。
+    """
+
+    status: Any = None
+    coverage: Any = None
+    validation_status: Any = None
+    support_kind: Any = None
+    assurance: Any = None
+    verification_scope: Any = None
+    note: str = ""
+
+
+def claim_state_for(claim: Any, obligations: list[Any], records: list[Any],
+                    *, closure: dict[str, int] | None = None,
+                    aligned: Callable[[Any, Any], bool] | None = None,
+                    ) -> ClaimStateDisposition:
+    """按义务集合与**非 stale** 验证记录算出命题该处于什么状态。
+
+    规则 (与原 `loop._reconcile_claim` 逐条一致, 差异由 `test_reasoning_kernel`
+    的等价性用例把守):
+
+    1. 任一必要义务被反例否决 → `refuted`;
+    2. 全部必要义务关闭 → 还要有**与命题对齐**的有效验证记录才 `supported`;
+       统计估计的区间跨零则保持 `blocked`;
+    3. 存在受阻义务且没有待办必要义务 → `blocked`;
+    4. 其余保持 `in_progress`(或原状态), 验证维度为 `unknown`。
+
+    `aligned` 是"记录是否与原命题编码一致"的判据 (`acceptance._aligned`); 缺省时
+    按"有记录即算对齐"处理 —— 调用方必须显式传入才具备对齐检查, 不传就是放弃检查,
+    因此生产调用方一律要传。
+    """
+    from src.research.schemas import (
+        ClaimStatus,
+        Coverage,
+        ObligationStatus,
+        ValidationStatus,
+        VerificationScope,
+    )
+
+    def _is_aligned(record: Any) -> bool:
+        return True if aligned is None else bool(aligned(record, claim))
+
+    obligations = list(obligations)
+    records = [r for r in records if not getattr(r, "stale", False)]
+    required = [o for o in obligations if getattr(o, "required", True)]
+    open_required = [o for o in required
+                     if getattr(o, "status", None) == ObligationStatus.open]
+    # **反例不受 required 限制**: 找到反例就是命题不成立, 与"这条义务是不是必要义务"
+    # 无关。反例搜索义务通常是 `required=False` (它回答的是"命题是否根本不成立",
+    # 而不是"结论还缺哪一步"), 若把反例也按 required 过滤, 一个被机器找到反例的命题
+    # 会被判成"未决", 那正是最不该发生的漏判。
+    refuted = [o for o in obligations
+               if getattr(o, "status", None) == ObligationStatus.refuted]
+    blocked = [o for o in required
+               if getattr(o, "status", None) == ObligationStatus.blocked]
+    closed = [o for o in required
+              if getattr(o, "status", None) == ObligationStatus.closed]
+
+    if refuted:
+        witness = next((getattr(o, "counterexample", {}) for o in refuted
+                        if getattr(o, "counterexample", {})), {})
+        support_kind = getattr(refuted[0], "support_kind", None) or claim.support_kind
+        return ClaimStateDisposition(
+            status=ClaimStatus.refuted, coverage=Coverage.target,
+            validation_status=ValidationStatus.counterexample_found,
+            support_kind=support_kind,
+            assurance=(assurance_for_support_kind(support_kind) or claim.assurance),
+            verification_scope=VerificationScope.target,
+            note=f"被反例否决: {witness}")
+
+    if required and not open_required and not blocked and len(closed) == len(required):
+        aligned_records = [r for r in records if _is_aligned(r)]
+        estimate = claim.effect_estimate or {}
+        if estimate and not estimate.get("ci_excludes_zero", True):
+            return ClaimStateDisposition(
+                status=ClaimStatus.blocked, coverage=Coverage.step,
+                validation_status=ValidationStatus.unknown,
+                note="效应95%CI包含0, 不足以支持该结论")
+        if not aligned_records:
+            return ClaimStateDisposition(
+                status=ClaimStatus.in_progress, coverage=Coverage.step,
+                validation_status=ValidationStatus.unknown,
+                note="义务已关闭但缺少与原命题对齐的有效验证记录")
+        kinds = [o.support_kind for o in closed if o.support_kind is not None
+                 and getattr(o.support_kind, "value", "") != "none"]
+        from src.research.schemas import SupportKind
+
+        support_kind = kinds[0] if kinds else SupportKind.informal_argument
+        return ClaimStateDisposition(
+            status=ClaimStatus.supported, coverage=Coverage.target,
+            validation_status=ValidationStatus.verified,
+            support_kind=support_kind,
+            assurance=(assurance_for_support_kind(support_kind) or claim.assurance),
+            verification_scope=VerificationScope.target)
+
+    if blocked and not open_required:
+        return ClaimStateDisposition(
+            status=ClaimStatus.blocked,
+            validation_status=ValidationStatus.unknown,
+            note="存在受阻义务, 保持未决")
+
+    if claim.status == ClaimStatus.supported:
+        # 已确证的命题不因"这一轮没有新记录"被降级 (状态只由义务与记录推导,
+        # 不由"本次调用看到多少"推导) —— 与原实现一致。
+        validation_status = claim.validation_status
+    else:
+        validation_status = ValidationStatus.unknown
+    return ClaimStateDisposition(
+        status=(ClaimStatus.in_progress if (closed or records) else claim.status),
+        validation_status=validation_status)
+
+
+def apply_claim_state(claim: Any, disposition: ClaimStateDisposition,
+                      *, closure: dict[str, int] | None = None) -> Any:
+    """把状态处置落到 `Claim` 的一份**新副本**上 (不写存储)。
+
+    只做字段更新: 版本、事件与落盘由调用方负责 (引擎写 `KIND_CLAIM`, 团队侧由
+    提交服务在同一事务里写)。
+    """
+    updates: dict[str, Any] = {"verification_closure": dict(closure or {})}
+    if disposition.status is not None:
+        updates["status"] = disposition.status
+    if disposition.coverage is not None:
+        updates["coverage"] = disposition.coverage
+    if disposition.validation_status is not None:
+        updates["validation_status"] = disposition.validation_status
+    if disposition.support_kind is not None:
+        updates["support_kind"] = disposition.support_kind
+    if disposition.assurance is not None:
+        updates["assurance"] = disposition.assurance
+    if disposition.verification_scope is not None:
+        updates["verification_scope"] = disposition.verification_scope
+    if disposition.note:
+        updates["notes"] = (str(claim.notes or "") + " " + disposition.note).strip()
+    return claim.model_copy(update=updates)
 
 
 __all__ = [
     "COUNTEREXAMPLE_REPEAT_FAILURES",
+    "ClaimStateDisposition",
     "CounterexampleVerdict",
     "ObligationDisposition",
     "ReasoningOutcome",
+    "apply_claim_state",
+    "assurance_for_support_kind",
     "build_design_steps",
+    "claim_state_for",
     "counterexample_verdict_for",
     "derive_steps_for",
     "design_steps_for",

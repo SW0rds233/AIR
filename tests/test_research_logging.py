@@ -86,23 +86,21 @@ def test_validate_event_reports_missing_keys():
     assert is_registered("brand_new_event") is False
 
 
-def _engine(tmp_path, pid: str = "log1", db_path=None):
-    from src.research.loop import ResearchBudget, TheoryEngine
+def _view(tmp_path, pid: str = "log1", db_path=None):
+    """只读检视层 + 存储 (事件/指标类判据不需要研究引擎)。"""
+    from src.research.inspection import StoreInspection
     from src.research.schemas import ResearchSpec
     from src.research.store import ResearchStore
-    from src.verification.runner import VerificationRunner
 
     spec = ResearchSpec(project_id=pid, problem_id="p1",
                         problem_statement="对所有实数 x: x**2 >= 0")
     store = ResearchStore(pid, db_path=db_path or (tmp_path / f"{pid}.sqlite"))
-    engine = TheoryEngine(spec, store, runner=VerificationRunner(inproc=True),
-                          budget=ResearchBudget(max_actions=10))
-    return engine, store
+    return StoreInspection(store, spec), store
 
 
 def test_missing_required_key_is_recorded_not_silently_dropped(tmp_path):
     """少键的事件仍在库里, 但必须同时留下可查询的契约异常。"""
-    engine, store = _engine(tmp_path, "log2")
+    view, store = _view(tmp_path, "log2")
     try:
         assert store.append_event("obligation_closed", {"claim_id": "clm-x"}) is True
         kinds = [e["type"] for e in store.events()]
@@ -114,37 +112,37 @@ def test_missing_required_key_is_recorded_not_silently_dropped(tmp_path):
         assert "obligation_id" in anomaly["missing"] and "tool" in anomaly["missing"]
         assert anomaly["reason"]
 
-        metrics = engine.metrics()
+        metrics = view.metrics(view.claims(), problem_id="p1")
         assert any("obligation_closed" in item for item in metrics["anomalies"])
     finally:
         store.close()
 
 
 def test_unregistered_event_type_is_recorded(tmp_path):
-    engine, store = _engine(tmp_path, "log3")
+    view, store = _view(tmp_path, "log3")
     try:
         store.append_event("brand_new_event", {"whatever": 1})
         anomalies = store.log_anomalies()
         assert [a["kind"] for a in anomalies] == ["brand_new_event"]
         assert "未登记" in anomalies[0]["missing"]
-        assert "brand_new_event" in engine.metrics()["events"]
+        assert "brand_new_event" in view.metrics(view.claims(), problem_id="p1")["events"]
     finally:
         store.close()
 
 
 def test_well_formed_event_has_no_anomaly(tmp_path):
-    engine, store = _engine(tmp_path, "log4")
+    view, store = _view(tmp_path, "log4")
     try:
         store.append_event("obligation_closed",
                            {"claim_id": "c", "obligation_id": "o", "tool": "sympy"})
         assert store.log_anomalies() == []
-        assert engine.metrics()["anomalies"] == []
+        assert view.metrics(view.claims(), problem_id="p1")["anomalies"] == []
     finally:
         store.close()
 
 
 def test_log_anomaly_does_not_recurse(tmp_path):
-    _, store = _engine(tmp_path, "log5")
+    _, store = _view(tmp_path, "log5")
     try:
         store.append_event("log_anomaly", {"kind": "x", "missing": "y", "reason": "z"})
         kinds = [e["type"] for e in store.events()]
@@ -153,92 +151,101 @@ def test_log_anomaly_does_not_recurse(tmp_path):
         store.close()
 
 
-def test_metrics_aggregate_a_real_run(tmp_path):
-    """指标必须来自真实研究过程, 且与动作账本/用量一致。"""
-    engine, store = _engine(tmp_path, "log6")
-    try:
-        result = engine.run()
-        metrics = engine.metrics()
+# ----------------------------------------------------------------------
+# 真实运行的指标与事件摘要 (驱动团队; 旧引擎已不在运行路径上)
+# ----------------------------------------------------------------------
+def _team_facts(tmp_path, pid: str = "log6", *, problem_id: str = "p1",
+                max_rounds: int = 6) -> dict:
+    """跑一次真实团队运行, 返回断言需要的**事实快照**。
 
-        assert metrics["events"].get("run_start") == 1
-        assert metrics["events"].get("formulated") == 1
-        assert metrics["actions"].get("succeeded", 0) >= 1
-        assert metrics["counts"]["claims"] == len(result.snapshot.claims)
-        assert metrics["counts"]["obligations"] == len(result.snapshot.obligations)
-        assert metrics["counts"]["verifications"] == len(result.snapshot.verifications)
-        assert metrics["usage"]["actions"] == result.usage["actions"]
-        assert metrics["identity"]["problem_id"] == "p1"
-        assert metrics["identity"]["run_id"] == engine.run_id
-        assert metrics["stopped_reason"] == ""
-        assert metrics["anomalies"] == []
-        # 提议计数即使为 0 也必须存在 (契约字段不能缺)
-        assert set(metrics["proposals"]) == {"used", "rejected", "failed", "skipped"}
-    finally:
-        store.close()
+    为什么不在运行后留着 store: 团队运行结束时存储会被关闭 (它拥有这个库), 所以这里
+    在运行期间把指标/摘要/快照/异常一次取出 —— 断言用的仍是同一批数据。
+    """
+    from src.graph.research_graph import TeamRun
+    from src.research.inspection import StoreInspection
+    from src.research.schemas import ResearchSpec
+    from src.research.snapshot import snapshot_from_store
+
+    with TeamRun(project_id=pid, problem_id=problem_id,
+                 run_id=f"run-{pid}-{problem_id}",
+                 request="对所有实数 x: x**2 >= 0", source_policy="user_kb",
+                 max_rounds=max_rounds) as team:
+        team.run()
+        store = team.task_store.store
+        spec = ResearchSpec.model_validate(store.get("spec", problem_id))
+        view = StoreInspection(store, spec)
+        claims = view.claims()
+        return {
+            "run_id": team.run_id,
+            "metrics": view.metrics(claims, problem_id=problem_id),
+            "digest": view.event_digest(claims, problem_id=problem_id),
+            "claim_ids": [c.id for c in claims],
+            "snapshot": snapshot_from_store(store, project_id=pid,
+                                            problem_id=problem_id,
+                                            run_id=team.run_id),
+            "anomalies": store.log_anomalies(),
+        }
+
+
+def test_metrics_aggregate_a_real_run(tmp_path):
+    """指标必须来自真实研究过程, 且与冻结快照、运行身份一致。"""
+    facts = _team_facts(tmp_path, "log6")
+    metrics = facts["metrics"]
+    snapshot = facts["snapshot"]
+
+    # 团队的**真实**事件契约 (提交与派工各至少一次)
+    assert metrics["events"].get("commit_result", 0) >= 1, metrics["events"]
+    assert metrics["events"].get("task_finished", 0) >= 1, metrics["events"]
+    # 计数与冻结快照同源
+    assert metrics["counts"]["claims"] == len(snapshot.claims)
+    assert metrics["counts"]["obligations"] == len(snapshot.obligations)
+    assert metrics["counts"]["verifications"] == len(snapshot.verifications)
+    assert metrics["identity"]["problem_id"] == "p1"
+    assert metrics["identity"]["run_id"] == facts["run_id"], "指标必须挂在本 run 上"
+    assert metrics["anomalies"] == []
+    assert set(metrics["proposals"]) == {"used", "rejected", "failed", "skipped"}
 
 
 def test_metrics_are_isolated_per_problem(tmp_path):
-    engine_a, store = _engine(tmp_path, "log7")
-    try:
-        engine_a.run()
-        from src.research.loop import ResearchBudget, TheoryEngine
-        from src.research.schemas import ResearchSpec
+    """同项目两个问题: 各自的计数与事件摘要只能看到自己的对象。"""
+    facts_a = _team_facts(tmp_path, "log7", problem_id="p1")
+    facts_b = _team_facts(tmp_path, "log7", problem_id="p2")
+    metrics_a, metrics_b = facts_a["metrics"], facts_b["metrics"]
 
-        # 问题 B 使用**自己的** problem_id: 同项目多问题时对象必须按问题隔离
-        spec_b = ResearchSpec(project_id="log7", problem_id="p2",
-                              problem_statement="对所有实数 x: x**2 >= 0")
-        engine_b = TheoryEngine(spec_b, store, budget=ResearchBudget(max_actions=4))
-        engine_b.bootstrap()
-
-        metrics_a = engine_a.metrics()
-        metrics_b = engine_b.metrics()
-        assert metrics_a["events"].get("run_start") == 1
-        assert metrics_b["events"].get("run_start") == 1, metrics_b["events"]
-        assert metrics_a["counts"]["claims"] >= 1
-        assert metrics_a["counts"]["obligations"] >= 1
-        # B 只统计自己的对象 (A 的结论/义务不得被算进来)
-        assert metrics_b["counts"]["claims"] == len(engine_b._claims())
-        assert {c.problem_id for c in engine_b._claims()} == {"p2"}
-        assert metrics_a["identity"]["problem_id"] == "p1"
-        assert metrics_b["identity"]["problem_id"] == "p2"
-        # 事件摘要也按问题过滤: A 的过程不串到 B
-        assert all("p2" not in item["detail"] for item in engine_a.event_digest())
-    finally:
-        store.close()
+    assert metrics_a["counts"]["claims"] >= 1
+    assert metrics_a["counts"]["obligations"] >= 1
+    assert metrics_b["counts"]["claims"] == len(facts_b["snapshot"].claims)
+    assert metrics_b["counts"]["claims"] == len(facts_b["claim_ids"])
+    assert metrics_a["identity"]["problem_id"] == "p1"
+    assert metrics_b["identity"]["problem_id"] == "p2"
+    # 事件摘要也按问题过滤: A 的过程不串到 B
+    assert all("p2" not in item["detail"] for item in facts_a["digest"])
 
 
 def test_event_digest_only_shows_surface_events(tmp_path):
     from src.research.logging_schema import SURFACE_EVENT_KINDS
 
-    engine, store = _engine(tmp_path, "log8")
-    try:
-        engine.run()
-        digest = engine.event_digest()
-        assert digest, "研究跑完后应当有可展示的过程事件"
-        assert {item["kind"] for item in digest} <= set(SURFACE_EVENT_KINDS)
-        # 每个条目都要有可读说明, 不能只回显事件名
-        for item in digest:
-            assert item["detail"] and item["detail"] != item["kind"], item
-    finally:
-        store.close()
+    facts = _team_facts(tmp_path, "log8")
+    digest = facts["digest"]
+    assert digest, "研究跑完后应当有可展示的过程事件"
+    assert {item["kind"] for item in digest} <= set(SURFACE_EVENT_KINDS)
+    # 每个条目都要有可读说明, 不能只回显事件名
+    for item in digest:
+        assert item["detail"] and item["detail"] != item["kind"], item
 
 
-def test_workbench_state_exposes_metrics_and_anomalies(tmp_path, monkeypatch):
+def test_workbench_state_exposes_metrics_and_anomalies(tmp_path):
     """工作台必须能看到指标与日志契约异常 (否则"少字段"只会在界面上表现为 0)。"""
-    from src import config
-
-    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
-    monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path / "out")
     from src import server
-    from src.research.store import default_db_path
+    from src.graph.research_graph import TeamRun
 
     # 与工作台读取的是**同一个库路径** (conftest 会把研究库重定向到隔离目录)
-    engine, store = _engine(tmp_path, "log9", db_path=default_db_path("log9"))
-    try:
-        engine.run()
+    with TeamRun(project_id="log9", problem_id="p1", run_id="run-log9-p1",
+                 request="对所有实数 x: x**2 >= 0", source_policy="user_kb",
+                 max_rounds=6) as team:
+        team.run()
+        store = team.task_store.store
         store.append_event("obligation_closed", {"claim_id": "clm-x"})
-    finally:
-        store.close()
 
     payload = server._research_state("log9", "p1")
     assert payload["metrics"]["counts"]["claims"] >= 1
@@ -250,22 +257,17 @@ def test_workbench_state_exposes_metrics_and_anomalies(tmp_path, monkeypatch):
 @pytest.mark.parametrize("kind", ["run_start", "formulated", "capability_declared",
                                   "writing_gaps_fed_back"])
 def test_problem_scoped_events_carry_problem_identity(tmp_path, kind):
-    """按问题隔离日志的前提: 这些"每问题一次"的事件必须带 problem_id。
+    """按问题隔离日志的前提: 目录里"每问题一次"的事件必须声明 `problem_id`。
 
     事件表只按 project 记录; 没有归属字段时多问题项目无法按问题聚合
     (`metrics_from_store` 只能保守地保留, 于是 A 的计数会串到 B)。
-    逐命题事件靠命题归属判断, 不在目录里强制。
+
+    这条判据查的是**事件契约目录** (`EVENT_SPECS`), 与谁发出事件无关 —— 旧引擎的
+    `run_start`/`formulated`/`capability_declared` 仍在目录里 (历史事件要可读),
+    团队发出的是自己那批 (见 `test_metrics_aggregate_a_real_run`)。
     """
     from src.research.logging_schema import EVENT_SPECS
 
     assert "problem_id" in EVENT_SPECS[kind].required, kind
-    if kind == "writing_gaps_fed_back":
-        return       # 只在出现写作缺口时发出, 由下面的目录约束与真实用例覆盖
-    engine, store = _engine(tmp_path, f"log-{kind}")
-    try:
-        engine.run()
-        seen = [e["payload"] for e in store.events() if e["type"] == kind]
-        assert seen, f"真实运行没有产生 {kind}"
-        assert any(p.get("problem_id") == "p1" for p in seen), seen
-    finally:
-        store.close()
+    facts = _team_facts(tmp_path, f"log-{kind}", max_rounds=4)
+    assert facts["metrics"]["anomalies"] == [], "真实运行不应产生契约异常"

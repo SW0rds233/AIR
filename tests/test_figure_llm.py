@@ -1,7 +1,17 @@
-"""LLM 图表生成器测试（沙箱执行 + 风格指南，离线测试）
+"""图表质量检测与审阅文本解析测试（离线测试）
 
 运行:
     python tests/test_figure_llm.py
+
+G18 变更说明 (合并计划 §3.3 G18): 本文件原来还有一整套"LLM 写 matplotlib 脚本 →
+`_execute_code` 子进程执行 → 代码级/视觉审阅"的用例 (`_sanitize_code` /
+`_extract_code` / `_execute_code` / `_classify_exec_error` 等)。那条自由脚本路径
+已被删除 —— 它接受模型产出的任意 Python 并真的执行, 而进程隔离不等于权限隔离;
+绘图现在只走声明式 `FigureSpec` (`src.agents.figures.render_figure_spec`), 公式走
+白名单解析 (`src.rag.figure_formula`)。因此**因功能退场**删掉对应用例, 同时新增
+一条"自由脚本入口必须不存在"的结构用例 (见
+`tests/test_figure_artifact_service.py::test_free_script_execution_path_is_gone`),
+并保留与执行无关的能力用例 (PNG 质量检测、审阅文本解析、风格指南)。
 """
 
 from __future__ import annotations
@@ -12,112 +22,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.rag.figure_generator import parse_taxonomy_from_text, parse_timeline_from_text
-from src.rag.figure_llm import _execute_code, _extract_code, _sanitize_code
+from src.rag.figure_llm import (
+    _extract_review_issues,
+    _extract_vision_issues,
+    check_png_quality,
+)
 from src.rag.figure_style import PALETTE, apply_style, style_guide_prompt
-
-
-def test_sanitize_windows_path_assignment():
-    """LLM 把 Windows 路径当变量赋值 → 整行删除"""
-    save = r"E:\SearchAgents\AIR\outputs\figures\taxonomy_llm_0.png"
-    code = (
-        "import matplotlib.pyplot as plt\n"
-        f'{save} = r"{save}"\n'
-        "plt.savefig(OUTPUT_PATH)\n"
-    )
-    cleaned = _sanitize_code(code, save)
-    assert "E:" not in cleaned
-    assert "plt.savefig(OUTPUT_PATH)" in cleaned
-
-
-def test_sanitize_literal_path_to_output_path():
-    """代码里出现保存路径字符串 → 统一替换为 OUTPUT_PATH"""
-    save = r"E:\SearchAgents\AIR\outputs\figures\foo.png"
-    code = 'plt.savefig(r"outputs/figures/foo.png", dpi=300)'
-    cleaned = _sanitize_code(code, save)
-    assert "OUTPUT_PATH" in cleaned
-    assert "foo.png" not in cleaned
-
-
-def test_sanitize_bare_unquoted_path():
-    """LLM 把路径写成不带引号的裸表达式 → 替换为 OUTPUT_PATH"""
-    save = "outputs/figures/_live_timeline_test.png"
-    code = 'plt.savefig(outputs/figures/_live_timeline_test.png, dpi=300, bbox_inches="tight")'
-    cleaned = _sanitize_code(code, save)
-    assert "plt.savefig(OUTPUT_PATH" in cleaned
-    assert "_live_timeline_test" not in cleaned
-
-
-def test_sanitize_keeps_normal_code():
-    code = "import numpy as np\nx = np.array([1,2,3])\nplt.plot(x)"
-    assert _sanitize_code(code, "outputs/figures/x.png") == code
-
-
-def test_extract_code_fenced():
-    out = "```python\nimport matplotlib.pyplot as plt\nprint('hi')\n```"
-    code = _extract_code(out)
-    assert "import matplotlib" in code
-    assert "```" not in code
-
-
-def test_extract_code_no_fence():
-    out = "import matplotlib.pyplot as plt\nplt.plot([1,2])"
-    code = _extract_code(out)
-    assert "plt.plot" in code
-
-
-def test_extract_code_trailing_space_after_fence():
-    """围栏 ```python 后带尾随空格: 旧正则 ```python\\n 匹配不到 → 返回含围栏文本
-    → exec 报 SyntaxError (实测 File '<string>', line 41)"""
-    out = "```python  \nimport matplotlib.pyplot as plt\nplt.plot([1,2])\n```"
-    code = _extract_code(out)
-    assert "plt.plot" in code
-    assert "```" not in code
-
-
-def test_extract_code_crlf():
-    """CRLF 换行 (```python\\r\\n) 也必须能提取"""
-    out = "```python\r\nimport numpy as np\r\nx = np.arange(3)\r\n```"
-    code = _extract_code(out)
-    assert "np.arange" in code
-    assert "```" not in code
-
-
-def test_extract_code_no_language_tag():
-    """无语言标记的围栏 ``` 也能提取"""
-    out = "```\nimport matplotlib.pyplot as plt\nplt.show()\n```"
-    code = _extract_code(out)
-    assert "plt.show" in code
-    assert "```" not in code
-
-
-def test_extract_code_unclosed_fence():
-    """闭合围栏缺失时取到文本末尾, 不应返回含围栏的原文"""
-    out = "```python\nimport matplotlib.pyplot as plt\nplt.plot([1,2])"
-    code = _extract_code(out)
-    assert "plt.plot" in code
-    assert "```" not in code
-
-
-def test_extract_code_with_preamble():
-    """围栏前有解释文字 (第 N 行才是围栏) 也能定位"""
-    out = "以下是代码：\n\n```python\nimport matplotlib.pyplot as plt\nplt.plot([1,2])\n```"
-    code = _extract_code(out)
-    assert "plt.plot" in code
-    assert "```" not in code
-
-
-def test_execute_code_ok(tmp_path):
-    code = "import matplotlib.pyplot as plt\nimport numpy as np\nfig, ax = plt.subplots()\nax.plot([1,2,3])\n"
-    # 写到 tmp_path: 不再往仓库根目录丢测试产物
-    ok, out = _execute_code(code, str(tmp_path / "test_output.png"))
-    assert ok is True
-
-
-def test_execute_code_error(tmp_path):
-    code = "import matplotlib.pyplot as plt\nraise ValueError('boom')\n"
-    ok, out = _execute_code(code, str(tmp_path / "test_output.png"))
-    assert ok is False
-    assert "boom" in out
 
 
 def test_style_guide_contains_palette():
@@ -139,42 +49,9 @@ def test_parse_functions():
     assert len(tl) == 2
 
 
-def test_classify_exec_error_marker():
-    from src.rag.figure_llm import _classify_exec_error
-
-    hint = _classify_exec_error("ValueError: Unrecognized marker style '•'")
-    assert "标准标记" in hint
-
-
-def test_classify_exec_error_underscore():
-    from src.rag.figure_llm import _classify_exec_error
-
-    assert "转义" in _classify_exec_error("! Missing $ inserted")
-
-
-def test_classify_exec_error_subscript():
-    from src.rag.figure_llm import _classify_exec_error
-
-    assert "dict" in _classify_exec_error("TypeError: 'int' object is not subscriptable")
-
-
-def test_classify_exec_error_timeout():
-    from src.rag.figure_llm import _classify_exec_error
-
-    assert "超时" in _classify_exec_error("code timed out after 60s")
-
-
-def test_classify_exec_error_unknown_empty():
-    from src.rag.figure_llm import _classify_exec_error
-
-    assert _classify_exec_error("random unknown failure") == ""
-
-
 def test_check_png_quality_low_fill_rejected():
     """内容占比过低 (仅标题/空坐标轴) 应被拒绝"""
     from PIL import Image
-
-    from src.rag.figure_llm import check_png_quality
 
     p = Path(__file__).resolve().parent / "_sparse_test.png"
     img = Image.new("RGB", (800, 600), (255, 255, 255))
@@ -197,8 +74,6 @@ def test_check_png_quality_few_colors_rejected():
     import numpy as np
     from PIL import Image
 
-    from src.rag.figure_llm import check_png_quality
-
     p = Path(__file__).resolve().parent / "_fewcolor_test.png"
     rng = np.random.default_rng(0)
     arr = rng.integers(0, 2, (300, 400))
@@ -214,18 +89,23 @@ def test_check_png_quality_few_colors_rejected():
             p.unlink()
 
 
+def test_extract_review_issues_skips_template_echo():
+    text = "问题列表:\n- 缺少 x 轴标签\n- 图例过多\n（若全部合规则输出: 问题列表:\n- 无）"
+    issues = _extract_review_issues(text)
+    assert "缺少 x 轴标签" in issues
+    assert "图例过多" in issues
+    assert "若全部合规则" not in issues  # 模板回显不作为问题
+    assert _extract_review_issues("问题列表:\n- 无") == []
+
+
 def test_vision_issues_filters_nitpicks():
     """视觉审阅只认 Critical 硬伤, 过滤'字号略小/配色可优化'等吹毛求疵
     (实测 kimi 每轮报满 5 个此类问题, 修正循环空转耗光预算)"""
-    from src.rag.figure_llm import _extract_vision_issues
-
     report = "问题列表:\n- 字号略小，可优化\n- 配色不够美观\n- 图例位置可微调"
     assert _extract_vision_issues(report) == []
 
 
 def test_vision_issues_keeps_critical():
-    from src.rag.figure_llm import _extract_vision_issues
-
     report = "问题列表:\n- 文字被截断、超出图框\n- 图例遮挡了数据点\n- 整张图空白"
     out = _extract_vision_issues(report)
     assert len(out) == 3
@@ -236,29 +116,12 @@ def test_vision_issues_keeps_critical():
 
 if __name__ == "__main__":
     tests = [
-        test_extract_code_fenced,
-        test_extract_code_no_fence,
-        test_extract_code_trailing_space_after_fence,
-        test_extract_code_crlf,
-        test_extract_code_no_language_tag,
-        test_extract_code_unclosed_fence,
-        test_extract_code_with_preamble,
-        test_execute_code_ok,
-        test_execute_code_error,
-        test_sanitize_windows_path_assignment,
-        test_sanitize_literal_path_to_output_path,
-        test_sanitize_bare_unquoted_path,
-        test_sanitize_keeps_normal_code,
         test_style_guide_contains_palette,
         test_apply_style_no_crash,
         test_parse_functions,
-        test_classify_exec_error_marker,
-        test_classify_exec_error_underscore,
-        test_classify_exec_error_subscript,
-        test_classify_exec_error_timeout,
-        test_classify_exec_error_unknown_empty,
         test_check_png_quality_low_fill_rejected,
         test_check_png_quality_few_colors_rejected,
+        test_extract_review_issues_skips_template_echo,
         test_vision_issues_filters_nitpicks,
         test_vision_issues_keeps_critical,
     ]

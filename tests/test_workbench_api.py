@@ -161,15 +161,29 @@ def test_research_state_unknown_project_404():
     assert client.get("/api/research/no-such-project/state").status_code == 404
 
 
-def test_step_event_carries_research_progress():
-    """SSE 的 node 事件必须带 research 摘要, 供前端显示进度。"""
-    from src import server
+def test_node_event_carries_no_engine_derived_progress():
+    """节点事件**不再**携带由研究引擎算出的 `research` 摘要 (G01)。
 
-    class FakeSession:
-        mode = "theory"
-        request = {"project_id": "no-such"}
+    此前 SSE 的 node 事件带一个 `research` 字段, 而它是靠**另建一个 `TheoryEngine`**
+    读存储算出来的 —— "看进度"因此依赖了能执行研究的组件, 引擎退役时进度就会消失。
+    现在研究进度由团队事件携带 (`team_event`, 每个角色的派工/成果/缺口), 因此这里守住
+    两件事: 代码里不再有"读进度就建引擎"的入口; 节点描述仍能说明团队事件。
+    """
+    from pathlib import Path
 
-    assert server._research_progress(FakeSession(), "theory_step", {}) is None  # 无项目不报错
+    from src.graph.node_progress import describe_node
+
+    repo = Path(__file__).resolve().parents[1]
+    code = "\n".join(line for line in
+                     (repo / "src" / "server.py").read_text(encoding="utf-8").splitlines()
+                     if not line.strip().startswith("#"))
+    assert "_research_progress" not in code, "又出现了'为进度建引擎'的入口"
+    assert '"research":' not in code, "节点事件又带上引擎算出的进度摘要"
+    # 团队事件必须能被描述成一句进度 (否则界面上团队进度是空的)
+    text = describe_node("research_team", {"node": "task_result", "agent": "evidence",
+                                           "summary": "检索到 3 条来源"})
+    assert text, "团队节点必须能描述"
+    assert "evidence" in text or "检索" in text, text
 
 
 # --------------------------------------------------------------------------
@@ -324,6 +338,54 @@ def test_fork_creates_navigable_new_problem(tmp_path, monkeypatch):
     old = client.get("/api/research/forkp/state?problem_id=src").json()
     assert {c["id"] for c in old["claims"]} == before_claims
     assert old["claims"], "旧问题结论不得被派生动作清空"
+
+
+def test_fork_endpoint_does_not_need_a_research_engine(tmp_path, monkeypatch):
+    """派生是**用户可见功能**: 不该因为引擎退役而消失 (§5.5)。
+
+    判据同样是"把引擎变成一构造就炸", 然后要求派生照常成功 —— 派生只需要
+    "存储 + 输入规格", 不需要任何执行能力。
+    """
+    from fastapi.testclient import TestClient
+
+    from src import config, server as server_module
+    from src.research.store import ResearchStore
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path / "out")
+    (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "out").mkdir(parents=True, exist_ok=True)
+
+    import src.research.loop as loop_module
+
+    class _ExplodingEngine:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("派生路径构造了 TheoryEngine —— 它不该需要执行能力")
+
+    monkeypatch.setattr(loop_module, "TheoryEngine", _ExplodingEngine)
+
+    from src.graph import theory_pipeline
+
+    theory_pipeline.run_theory_pipeline(request="对所有实数 x: x**2 >= 0", topic="fkn",
+                                        project_id="forkn", problem_id="src")
+    store = ResearchStore("forkn", db_path=config.DATA_DIR / "research" / "forkn.sqlite")
+    snap = store.load_snapshot()
+    snapshot_id = snap.snapshot_id
+    store.close()
+
+    with TestClient(server_module.app) as client:
+        r = client.post("/api/research/fork", json={
+            "project_id": "forkn", "problem_id": "src",
+            "new_problem_id": "derived1", "snapshot_id": snapshot_id})
+        assert r.status_code == 200, r.text[:400]
+        body = r.json()
+        assert body["problem_id"] == "derived1"
+        assert body["navigable"] is True, "派生后新问题必须可打开"
+        assert body["lineage"]["reused_verifications"] == [], "派生不得复用验证记录"
+        state = client.get("/api/research/forkn/state?problem_id=derived1")
+        assert state.status_code == 200, state.text[:300]
+        assert all(c["status"] == "proposed" for c in state.json()["claims"])
+        server_module.shutdown_sessions()
 
 
 def server_module():
@@ -553,19 +615,27 @@ def test_state_payload_exposes_feedback_targets(theory_project):
 
 
 def test_frontend_has_single_state_object_and_resume_semantics():
-    """F1: 前端必须有统一的研究状态对象, 且不再各处直接改全局变量。
+    """F1 / §8.1: 前端只能有**一份**可写研究状态, 且不再各处直接改全局变量。
 
-    §9.5 拆分后: 唯一状态对象仍在页面装配层 (`app.ts`), 而会话生命周期、输入与
-    事件流分别在 `session-controller.ts` / `features/intake/controller.ts` /
-    `events/session-stream.ts` —— 因此断言按前端源码集合, 不绑定单个文件。
+    §3.3 G19 之前这条用例断言的是"唯一状态对象是 `app.ts` 里的 `currentResearch`
+    + `syncResearchGlobals()`" —— 那正是要删掉的兼容镜像。现在状态归
+    `state/research-store.ts` 的 store 单例, `current-research.ts` 只剩只读投影,
+    `window.AIR.research` 是冻结的 getter。因此这里断言的是**新的**不变量, 并且
+    明确把旧镜像写成"不得回流"。
     """
     source = _frontend_source()
-    assert "const currentResearch = {" in source
-    assert "function syncResearchGlobals()" in source
-    # 新会话必须清空项目/问题绑定 (`session-controller.ts` 的 newSession)
-    assert "applyResearch({threadId: '', sessionId: '', projectId: '', problemId: '', runId: ''})" in source
-    # 统一入口: 前端不再有"运行模式"这条状态分支 (mode 只作显示用)
     code = _frontend_code_only()
+    # 唯一可写状态: store 的 dispatch/getState/subscribe, 且暴露单例
+    assert "function dispatch(" in source and "function getState(" in source
+    assert "function subscribe(" in source
+    # 旧镜像**不得回流** (它们曾让"新 store 不是唯一权威")
+    for gone in ("const currentResearch = {", "function syncResearchGlobals()",
+                 "syncSelectionFromLegacy", "legacyResearch",
+                 "applyResearch(", "emptyResearch()", "resetForNewSession"):
+        assert gone not in code, f"前端仍有第二份可写状态: {gone}"
+    # 新会话清空项目/问题绑定必须走 store 动作 (session-controller 的 newSession)
+    assert "selection/reset" in source
+    # 统一入口: 前端不再有"运行模式"这条状态分支 (mode 只作显示用)
     for gone in ("runMode", "setRunMode", "onModeChange", "topicForRequest",
                  "RunMode", "mode === 'theory'", "mode === 'survey'"):
         assert gone not in code, f"前端仍残留模式分支: {gone}"

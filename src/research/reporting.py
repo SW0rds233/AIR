@@ -253,24 +253,35 @@ def coverage_notes(counts: dict, *, metrics: dict | None = None,
 
 def workbench_projection(*, project_id: str, problem_id: str, claims,
                          obligations, verifications, evidence, routes, models,
-                         engine, store, problems: list[dict], spec,
+                         store, problems: list[dict], spec,
                          experiment_specs, novelty_records, attempts,
-                         foreign_claim_ids: set[str] | None = None) -> dict:
+                         foreign_claim_ids: set[str] | None = None,
+                         run_id: str = "", branch_id: str = "",
+                         metrics: dict | None = None,
+                         model_selection: dict | None = None,
+                         modeling: dict | None = None,
+                         assumptions=None, decisions=None, events=None,
+                         gaps=None, budget: dict | None = None) -> dict:
     """组装工作台只读投影。
 
-    调用方 (`server._research_state`) 负责: 打开库、解析问题、按问题过滤对象。
-    本函数只负责**投影与计数**, 因此可以对任意输入单独测试。
+    调用方 (server._research_state) 负责: 打开库、解析问题、按问题过滤对象, 以及从
+    **只读检视层** (
+esearch/inspection.py) 取出运行身份/指标/缺口等派生值。
+
+    为什么不再收 ngine: 一个**只读**端点此前必须建一个能执行研究动作的引擎才读得出
+    数据 (§5.5 要抽的正是这件事)。现在这里只接受已经算好的值, 因此"读工作台"不可能顺手
+    推进研究, 引擎退役时这一层也不用改。
     """
+    metrics = dict(metrics or {})
     counts = objects_counts(claims, obligations, evidence, verifications,
                             models=models, routes=routes)
-    metrics = engine.metrics()
     novelty = novelty_payload(novelty_records)
     return {
         "project_id": project_id,
         "problem_id": problem_id,
         # R6: 统一身份 (project/problem/run/branch) —— 前端与产物清单读取同一组值
-        "run_id": engine.run_id,
-        "branch_id": engine.branch_id,
+        "run_id": run_id,
+        "branch_id": branch_id,
         "snapshots": store.list_snapshots(problem_id=problem_id),
         "problems": problems,
         "spec": {
@@ -295,31 +306,219 @@ def workbench_projection(*, project_id: str, problem_id: str, claims,
         "obligations": obligations_payload(obligations),
         "verifications": verifications_payload(verifications),
         # 计划书 §5.2 / §7.2: 领域模型选中情况与问题类型能力声明
-        "model_selection": engine.model_selection(),
+        "model_selection": dict(model_selection or {}),
         # R2: 候选机制的完整比较 (候选、舍弃理由、可区分检验、术语与量纲)
-        "modeling": next((engine.model_comparison(c.id) for c in claims
-                          if engine.model_comparison(c.id)), {}),
-        "assumptions": assumptions_payload(engine._assumptions()),
+        "modeling": dict(modeling or {}),
+        "assumptions": assumptions_payload(assumptions or []),
         "steps": steps_payload(attempts, owned=lambda cid: True),
         "evidence": evidence_payload(evidence),
         "experiments": experiments_payload(experiment_specs,
                                            foreign_claim_ids=foreign_claim_ids),
         "routes": routes_payload(routes),
         "novelty": novelty,
-        "decisions": engine.decisions[-30:],
-        "events": engine.event_digest(limit=40),
+        "decisions": list(decisions or []),
+        "events": list(events or []),
         # 统一日志键的监控指标: 只读聚合, 不触发任何研究动作
         "metrics": metrics,
         "log_anomalies": store.log_anomalies(limit=10),
-        "gaps": gaps_payload(engine._gaps(claims, obligations)),
-        "budget": budget_payload(engine),
+        "gaps": gaps_payload(gaps or []),
+        "budget": dict(budget or {}),
         "objects": counts,
         # 把"还缺什么"显式说出来, 而不是让前端从空数组猜
         "coverage_notes": coverage_notes(counts, metrics=metrics, novelty=novelty),
     }
 
 
+def summarize_event(kind: str, payload: dict | None) -> str:
+    """把一条研究事件压成一句人可读的说明 (界面"研究过程"用)。
+
+    从 TheoryEngine._summarize_event **逐字**迁出 (合并计划 §5.5: 通用摘要不留在
+    引擎里): 工作台读的是存储里的对象与事件, 不该因此必须建一个研究引擎。
+
+    **团队发出的事件在这里补齐** (第九轮): 只从旧引擎搬过来的那份覆盖的是引擎事件,
+    而统一入口之后真正发生的是团队的提交/派工/状态重算 —— 缺摘要时界面只能回显事件名
+    (`task_finished`), 于是"研究过程"变成一串英文标识符 (实测被
+    `test_event_digest_only_shows_surface_events` 抓到)。
+    """
+    payload = payload or {}
+    # ---- 团队运行 (统一入口之后的主要事件) ----
+    if kind == "task_finished":
+        agent = str(payload.get("agent") or payload.get("role") or "")
+        outcome = str(payload.get("outcome") or "")
+        problems = payload.get("problems") or []
+        note = f" ({'; '.join(str(p) for p in problems[:2])})" if problems else ""
+        return f"角色 {agent or '?'} 交回成果: {outcome or '已完成'}{note}"
+    if kind == "task_started":
+        agent = str(payload.get("agent") or payload.get("role") or "")
+        objective = str(payload.get("objective") or "")[:80]
+        return f"派工给 {agent or '?'}: {objective}" if objective else f"派工给 {agent or '?'}"
+    if kind == "commit_result":
+        # `accepted`/`rejected` 是**计数** (不是列表) —— 见唯一提交口的事件载荷。
+        accepted = int(payload.get("accepted") or 0)
+        rejected = int(payload.get("rejected") or 0)
+        agent = str(payload.get("agent") or "")
+        head = f"{agent} 提交: 采纳 {accepted} 条候选" if agent else f"提交: 采纳 {accepted} 条候选"
+        if rejected:
+            head += f", 拒绝 {rejected} 条 (越权/越界候选已隔离)"
+        claims = payload.get("claims") or {}
+        if claims:
+            head += "; 结论状态: " + ", ".join(
+                f"{cid}={state}" for cid, state in list(claims.items())[:3])
+        return head
+    if kind == "candidate_rejected":
+        return (f"候选被拒: {payload.get('kind') or ''} "
+                f"{str(payload.get('reason') or '')[:100]}")
+    if kind == "claim_state_changed":
+        return (f"结论状态变化: {payload.get('claim_id') or ''} "
+                f"{payload.get('from') or '?'} → {payload.get('to') or '?'}")
+    if kind == "commit_replayed":
+        return f"提交被幂等重放 (同一结果未重复写入): {payload.get('task_id') or ''}"
+    if kind == "commit_failed":
+        return f"提交失败: {str(payload.get('reason') or '')[:120]}"
+    if kind == "input_version_conflict":
+        return (f"输入版本冲突: {payload.get('object_id') or ''} "
+                f"(依据 v{payload.get('expected_version') or '?'}, "
+                f"当前 v{payload.get('actual_version') or '?'})")
+    if kind == "verification_orphaned":
+        return (f"验证记录失去对应义务, 已如实保留待复核: "
+                f"{payload.get('record_id') or ''}")
+    if kind == "design_necessity_evaluated":
+        state = "已关闭" if payload.get("closed") else "未满足"
+        return f"设计存在性必要条件 {state}: {payload.get('statement') or ''}"[:160]
+    if kind == "retrieval_coverage":
+        return (f"检索覆盖: 命中 {payload.get('hits', 0)} 条, "
+                f"入库 {payload.get('ingested', 0)} 条"
+                + (f", 未覆盖 {len(payload.get('uncovered') or [])} 项"
+                   if payload.get("uncovered") else ""))
+    if kind == "brief_ready":
+        return f"研究画像完成: {str(payload.get('main_question') or '')[:100]}"
+    if kind == "plan_ready":
+        return f"研究计划就绪: {payload.get('tasks', 0)} 个任务 (版本 {payload.get('version', 1)})"
+    if kind == "spec_persisted":
+        return f"问题规格已冻结: {payload.get('problem_id') or ''}"
+    if kind == "snapshot_export_incomplete":
+        return (f"导出时跳过部分对象 ({payload.get('kind') or ''}): "
+                f"{str(payload.get('reason') or '')[:100]}")
+    if kind == "run_state_persisted":
+        return f"运行状态已落盘 (可续跑): 第 {payload.get('rounds', '?')} 轮"
+    if kind == "run_state_missing":
+        return "没有可恢复的运行状态, 从头开始这次运行"
+    # ---- 旧引擎事件 (历史 run 仍要能读) ----
+    if kind == "evidence_retrieved":
+        extra = f" (失败: {'; '.join(payload.get('failures') or [])})" \
+            if payload.get("failures") else ""
+        blocked = payload.get("dropped_out_of_scope") or 0
+        scope_note = f" (范围外剔除 {blocked} 条)" if blocked else ""
+        channels = payload.get("channels") or []
+        chan_note = f" [通道 {'/'.join(channels)}]" if channels else ""
+        return (f"定向检索「{payload.get('query', '')}」命中 "
+                f"{payload.get('count', 0)} 条{chan_note}{extra}{scope_note}")
+    if kind == "source_read":
+        return f"回到原文: {payload.get('locator', '')}" + \
+            ("(片段被截断)" if payload.get("truncated") else "")
+    if kind == "cards_extracted":
+        return f"抽取定理/定义卡 {payload.get('count', 0)} 张"
+    if kind == "evidence_interpreted":
+        return (f"判定证据关系: 共 {payload.get('judged', 0)} 条, "
+                f"支持 {payload.get('supports', 0)} 条")
+    if kind == "obligation_closed":
+        return f"义务关闭: {payload.get('obligation_id', '')} (工具 {payload.get('tool', '')})"
+    if kind == "claim_refuted":
+        return f"找到反例, 命题被否定: {payload.get('witness')}"
+    if kind == "rule_obligation_evaluated":
+        state = "已关闭" if payload.get("closed") else "未满足"
+        return (f"规则型义务 {payload.get('obligation_id', '')} {state}"
+                + (f" — {payload.get('certificate')}" if payload.get("certificate") else ""))
+    if kind == "route_switched":
+        return (f"换路: 策略 {payload.get('strategy', '')} "
+                f"(原因: {payload.get('reason', '')})")
+    if kind == "novelty_assessed":
+        return f"新颖性判定: {payload.get('status', '')}"
+    if kind == "experiment_spec_proposed":
+        return f"生成实验/仿真规格 {payload.get('spec_id', '')} (状态 {payload.get('status', '')})"
+    if kind == "model_proposed":
+        return f"提出候选模型 {payload.get('model_id', '')} (来源 {len(payload.get('sources') or [])} 条)"
+    if kind == "model_selected":
+        return (f"选中模型 {payload.get('model_id', '')} v{payload.get('version', 1)} "
+                f"(原因: {payload.get('reason', '')})")
+    if kind == "capability_declared":
+        return f"问题类型能力声明: {payload.get('declaration', '')}"
+    if kind == "plan_proof":
+        source = payload.get("source") or "rules"
+        label = {"rules": "规则模板", "llm": "LLM 推导+子目标",
+                 "llm_steps": "LLM 推导步骤",
+                 "llm_subgoals": "LLM 子目标"}.get(source, source)
+        extra = f", 新增待核验子目标 {payload.get('subgoals')} 条" \
+            if payload.get("subgoals") else ""
+        return f"制定证明路线: {payload.get('strategy', '')} (来源: {label}{extra})"
+    if kind in ("proposal", "proposal_used", "proposal_rejected", "proposal_failed",
+                "proposal_skipped"):
+        if kind == "proposal":
+            accepted = payload.get("accepted") or {}
+            rejected = payload.get("rejected") or []
+            if accepted:
+                return (f"采纳模型提议: {accepted.get('action_type', '')} → "
+                        f"{accepted.get('object_id', '')} (减少不确定性: "
+                        f"{accepted.get('uncertainty_reduced', '')})")
+            if rejected:
+                return f"拒绝模型提议 {len(rejected)} 条: " + \
+                    "; ".join(str(r.get("reason", ""))[:80] for r in rejected)
+            return "模型提议: 无"
+        if kind == "proposal_used":
+            return (f"模型提议 {payload.get('action_type', '')} → "
+                    f"{payload.get('object_id', '')}")
+        if kind == "proposal_rejected":
+            return "提议被拒: " + "; ".join(str(r)[:80]
+                                            for r in (payload.get("reasons") or []))
+        return f"提议不可用: {payload.get('reason', '')}"
+    if kind == "derive_step":
+        checked = payload.get("adversarial_checked")
+        hits = payload.get("adversarial_hits")
+        extra = f", 反方审查 {checked} 项 (提出 {hits} 项)" if checked else ""
+        return f"生成推导步骤 {payload.get('steps', 0)} 步 (待核验){extra}"
+    if kind == "effect_estimated":
+        return f"效应估计完成: {payload.get('estimate')}"
+    if kind == "equality_condition":
+        return f"等号条件: {payload.get('condition', '')}"
+    if kind == "assumption_revised":
+        return (f"假设 {payload.get('assumption_id', '')} 已修订 "
+                f"(原因: {payload.get('reason', '')}; 失效 {len(payload.get('affected') or [])} 条结论)")
+    if kind == "hypothesis_revised":
+        return f"命题弱化: {payload.get('original', '')} → {payload.get('weaker', '')}"
+    if kind == "user_feedback":
+        return f"用户反馈已施加: {len(payload.get('applied') or [])} 项"
+    if kind == "formulated":
+        return f"形式化完成: {payload.get('claims', 0)} 条命题 / {payload.get('obligations', 0)} 条义务"
+    if kind == "candidate_confirmed":
+        return f"确认研究路线: {payload.get('statement', '')}"
+    if kind == "evidence_attached":
+        return f"挂接证据 {payload.get('count', 0)} 条"
+    if kind == "run_start":
+        return f"开始研究问题 {payload.get('problem_id') or payload.get('project_id', '')}"
+    if kind == "verification_recorded":
+        return (f"登记验证记录 {payload.get('record_id', '')} "
+                f"(状态 {payload.get('status', '')})")
+    if kind == "claim_state_reconciled":
+        return (f"重算结论状态: {payload.get('claim_id', '')} → "
+                f"{payload.get('status', '')} (支持方式 {payload.get('support_kind', '')}, "
+                f"覆盖 {payload.get('coverage', '')})")
+    if kind == "counterexample":
+        return f"找到反例: {payload.get('witness')}"
+    if kind == "distinguishing_test_proposed":
+        return (f"提出可区分检验 ({payload.get('kind', '')}): "
+                f"{payload.get('statement', '')}")
+    if kind == "writing_gaps_fed_back":
+        return (f"写作缺口回流: {payload.get('count', 0)} 条新义务 "
+                "(必须继续研究, 不得只在正文里说明)")
+    if kind == "forked_from_snapshot":
+        return (f"从快照 {payload.get('source_snapshot_id', '')} 派生新问题 "
+                f"{payload.get('new_problem_id', '')} "
+                f"(待重算 {len(payload.get('imported_claims') or [])} 条)")
+    return kind
+
+
 __all__ = [
+    "summarize_event",
     "BUDGET_KEYS",
     "COUNT_KEYS",
     "assumptions_payload",

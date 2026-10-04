@@ -120,6 +120,9 @@ class TeamRunOutcome:
     open_needs: list[ResearchNeed] = field(default_factory=list)
     issues: list[ReviewIssueRef] = field(default_factory=list)
     unresolved_report: dict[str, Any] = field(default_factory=dict)
+    #: 交付评估 (等级 + 三道门槛的理由, 见 `research/delivery.py`)。**不是**"角色跑过"
+    #: 的摘要: 它由研究有效性/论文表达/出版完备门槛算出 (§3.2 G12)。
+    delivery: dict[str, Any] = field(default_factory=dict)
     usage: UsageRecord = field(default_factory=UsageRecord)
 
     def completed_results(self) -> list[AgentResult]:
@@ -143,6 +146,7 @@ class TeamRunOutcome:
             "open_needs": [n.to_dict() for n in self.open_needs],
             "issues": [i.to_dict() for i in self.issues],
             "unresolved_report": dict(self.unresolved_report),
+            "delivery": dict(self.delivery),
             "usage": self.usage.to_dict(),
         }
 
@@ -204,9 +208,16 @@ class TeamRun:
             self.runtime.run_budget = run_budget
         self.executor = executor or build_default_team()
         self.executor.runtime = self.runtime
-        self.supervisor = supervisor or SupervisorAgent(llm=None)
+        # 角色通过运行时拿到核验服务 (读本运行的研究库做账本与输入闭包); 对象写入
+        # 仍然只走唯一提交口 —— 角色没有直接写库的路径。
+        self.runtime.research_store = None
+        #: 主控自己的模型调用用量 (它不在某个任务里, 但仍要计入本次运行 ——
+        #: 否则"团队真的调了模型"这件事在用量里看不出来)。
+        self._supervisor_usage = UsageRecord()
+        self.supervisor = supervisor or SupervisorAgent(llm=self._supervisor_model())
         self.task_store = task_store or TaskStore(self.project_id)
         self._owns_task_store = task_store is None
+        self.runtime.research_store = self.task_store.store
         if projection is None:
             from src.research.projection import TeamProjection
 
@@ -224,12 +235,32 @@ class TeamRun:
                                         ContextPack] | None = None
         self._cached_default_builder: Any = None
         self._source_set_rows: list[dict[str, Any]] = []
+        #: 唯一提交口 (§6.2): 懒建, 与投影共用同一研究存储。
+        self._commit: Any = None
         #: 主控循环的**显式状态** (合并计划 §15.3 第 1 步)。
         #: 抽出来是为了让循环可以**逐轮驱动** (会话引擎需要"一步一事件 + 可中断"),
         #: 而不是把状态埋在 `run()` 的局部变量里 —— 那样外部无法在轮次之间接手。
         self.loop = TeamLoopState()
 
     # ---- 生命周期 ----
+    def _supervisor_model(self):
+        """主控的角色模型 (缺省从运行时解析, 并**计入本运行用量**)。
+
+        为什么不能省这一步 (§3.1 G02 / G04): `SupervisorAgent(llm=None)` 时主控永远走
+        规则展开, 而它在界面上与"模型理解过任务"长得一模一样。审计复现过这条
+        (`llm_calls == 0`), 修完 G04 之后**接线漏在装配层**: 团队入口建 `TeamRun` 时
+        仍写死 `llm=None`, 于是模型被解析出来却从未交给主控。
+
+        用量也必须记: 主控的调用不属于任何任务, 不记就让"这次运行用了多少模型"
+        少掉一块, 而 `llm_calls == 0` 恰好是审计判断"有没有真调模型"的判据。
+        """
+        model = self.runtime._resolve_llm("supervisor")
+        if model is None:
+            return None
+        from src.bootstrap import metered_llm
+
+        return metered_llm(model, self._supervisor_usage)
+
     def close(self) -> None:
         if self._owns_task_store:
             self.task_store.close()
@@ -253,6 +284,41 @@ class TeamRun:
         """登记本任务可用的资料源摘要 (只放可读范围, 不放全文)。"""
         self._source_set_rows = list(rows or [])
         self._cached_default_builder = None
+
+    def _persist_spec(self) -> None:
+        """把这次研究的**输入规格**落盘 (团队运行同样要有可查的问题规格)。
+
+        为什么团队也要写 (§6.1 "一份事实模型"): 工作台、问题列表与交付清单都按
+        `problem_id` 找规格。团队路径此前不写规格, 于是同一个项目在团队模式下
+        "没有研究问题" —— 界面读不到任何对象, 只读端点直接 404, 尽管对象就在库里。
+
+        **不覆盖已有规格**: 规格是冻结的输入契约 (可能是理论路径或上一次运行写的),
+        覆盖它等于悄悄改掉"这次研究的问题定义"。
+        """
+        from src.research.schemas import SourcePolicy
+        from src.research.store import KIND_SPEC
+
+        try:
+            if self.task_store.store.get(KIND_SPEC, self.problem_id):
+                return
+            from src.research.question_planner import build_spec_from_input
+
+            spec = build_spec_from_input(
+                request=self.request, topic="", project_id=self.project_id,
+                problem_id=self.problem_id)
+            spec.source_set_id = (self.source_set_ids[0] if self.source_set_ids else "")
+            try:
+                spec.source_policy = SourcePolicy(self.source_policy)
+            except ValueError:
+                spec.source_policy = SourcePolicy.user_kb
+            self.task_store.store.put(KIND_SPEC, self.problem_id,
+                                      spec.model_dump(mode="json"))
+            self.runtime.emit("spec_persisted", {
+                "project_id": self.project_id, "problem_id": self.problem_id,
+                "research_type": spec.research_type})
+        except Exception as e:  # noqa: BLE001 - 规格落盘失败不得阻断研究, 但要可见
+            self.runtime.emit("spec_persist_failed",
+                              {"problem_id": self.problem_id, "reason": str(e)})
 
     # ---- 主循环: 准备 + 逐轮 ----
     def prepare(self) -> ResearchBrief:
@@ -280,6 +346,13 @@ class TeamRun:
                                                   "run_id": self.run_id})
         self.loop.plan = plan
         self.outcome.plan = plan
+        # 输入规格也要落盘: 工作台、问题列表、交付清单都按 `problem_id` 找规格, 团队
+        # 运行此前不写规格 —— 于是同一个项目在团队路径下"没有研究问题", 界面读不到
+        # 对象、`resolve_problem` 直接 404 (§6.1 一份事实模型)。
+        self._persist_spec()
+        # 画像/计划一算出来就落盘: "任务落盘不等于恢复团队" (§3.3 G16) —— 只有画像
+        # 与计划也在磁盘上, 续跑才能复用**同一批任务身份与依赖边**, 而不是重新画像。
+        self.save_state()
         self.runtime.emit("brief_ready", {"project_id": self.project_id,
                                           "problem_id": self.problem_id,
                                           "brief": brief.to_dict()})
@@ -350,7 +423,17 @@ class TeamRun:
             # 失败任务无限重试许可 (实测: 同一件事被派 17 次)。
             self._refresh_retry_allowance(state.brief, state.results, state.objectives,
                                           state.pending_retries)
-            return state.rounds < self.max_rounds
+            # 每轮结束都落盘: 进程被杀时最多丢掉"本轮正在执行的那一个动作",
+            # 已交回的成果与派工历史不会重跑 (合并计划 §3.3 G16)。
+            self.save_state()
+            if state.rounds >= self.max_rounds:
+                # 轮次上限也是**一个出口**, 因此必须走同一 finalize (§3.2 G12):
+                # 此前这里直接 `return False`, 于是达到上限的运行停在 status="queued"、
+                # 没有停止原因、也没有交付评估 —— 界面与用例看到的是"没跑过"。
+                self._finish(state, f"达到轮次上限 {self.max_rounds}",
+                             status=TaskStatus.partial.value)
+                return False
+            return True
 
         if decision.decision == DecisionKind.wait:
             self._finish(state, decision.reason or "任务在等待依赖")
@@ -371,7 +454,13 @@ class TeamRun:
 
     def _finish(self, state: TeamLoopState, stop_reason: str,
                 status: str = "") -> None:
-        """收尾: 落定状态、未决报告与用量, 并发出 `run_finished`。"""
+        """收尾: 落定状态、未决报告与用量, 并发出 `run_finished`。
+
+        **交付不升级** (§3.2 G12): 主控说"交付"只是**循环该结束了**, 不等于"研究已
+        验收通过"。因此这里按研究有效性/论文表达/出版完备三道门槛评估产出, 门槛未过
+        一律把状态从 `completed` 降为 `partial`, 并把理由写进未决报告 —— 交付等级
+        由 `classify_deliverable` 给出, 绝不因为"角色都跑过"就称完整论文。
+        """
         if status:
             self.outcome.status = status
         if not stop_reason:
@@ -384,12 +473,63 @@ class TeamRun:
         self.outcome.issues = self.supervisor.review_issues(state.plan, state.results)
         self.outcome.unresolved_report = unresolved_report(
             state.brief, state.plan, state.results)
-        self.outcome.usage = _sum_usage(state.results)
+        # 用量必须含**主控自己**的模型调用: 它不属任何任务, 漏掉就会让
+        # "这次运行有没有真的调模型"在用量里显示为 0 (审计判据之一)。
+        self.outcome.usage = _sum_usage(state.results).merge(self._supervisor_usage)
+        if self.outcome.status in (TaskStatus.completed.value, TaskStatus.partial.value):
+            self._apply_delivery_assessment()
+        else:
+            # 其它终态 (等澄清/被停止) 没有产出可评估: 如实说明"未评估", 不编一个等级。
+            self.outcome.delivery = {
+                "level": "", "accepted": False,
+                "blocking": [], "unresolved": [],
+                "counts": {}, "notes": [f"运行在 {self.outcome.status} 结束, 未做交付评估"],
+            }
+        # 收尾状态也落盘: 续跑据此知道"这次运行已经结束", 不会重跑一遍 (§3.3 G16)。
+        self.save_state(status=self.outcome.status)
         self.runtime.emit("run_finished", {
             "run_id": self.run_id, "status": self.outcome.status,
             "stop_reason": stop_reason, "rounds": self.outcome.rounds,
             "usage": self.outcome.usage.to_dict(),
+            "delivery": self.outcome.delivery,
         })
+
+    def _apply_delivery_assessment(self) -> None:
+        """用交付门槛复核"主控说可以交付"这件事 (失败即降级, 并给出理由)。"""
+        from src.research.delivery import assess_delivery
+        from src.research.snapshot import manuscript_markdown
+
+        store = self.task_store.store
+        try:
+            assessment = assess_delivery(
+                store, project_id=self.project_id, problem_id=self.problem_id,
+                run_id=self.run_id, manuscript_md=manuscript_markdown(store),
+                compile_status="deferred",
+                on_skip=lambda payload: self.runtime.emit(
+                    "snapshot_export_incomplete", payload))
+        except Exception as e:  # noqa: BLE001 - 门槛本身出错不得伪装成"通过"
+            self.outcome.delivery = {
+                "level": "研究备忘录", "accepted": False,
+                "blocking": [f"交付门槛评估失败: {type(e).__name__}: {e}"],
+                "unresolved": [], "counts": {},
+            }
+            self.outcome.status = TaskStatus.partial.value
+            self.outcome.stop_reason = (self.outcome.stop_reason +
+                                        " | 交付门槛评估失败, 已降级为部分交付")
+            self.runtime.emit("delivery_gate_failed",
+                              {"reason": str(e), "recoverable": True})
+            return
+        self.outcome.delivery = assessment.to_dict()
+        self.outcome.unresolved_report["delivery"] = assessment.to_dict()
+        if not assessment.accepted:
+            self.outcome.status = TaskStatus.partial.value
+            reason = (f"交付门槛未通过 (等级 {assessment.level}): "
+                      + "; ".join((assessment.blocking + assessment.unresolved)[:4]))
+            self.outcome.stop_reason = (self.outcome.stop_reason + " | " + reason).strip(" |")
+            self.outcome.unresolved_report.setdefault("unresolved", [])
+            self.outcome.unresolved_report["unresolved"].extend(
+                [*assessment.blocking, *assessment.unresolved])
+        self.runtime.emit("delivery_assessed", assessment.to_dict())
 
     # ---- 主循环 (一次跑完) ----
     def run(self) -> TeamRunOutcome:
@@ -405,6 +545,17 @@ class TeamRun:
     # ---- 单任务执行 ----
     def _execute_one(self, task: AgentTask, results: dict[str, AgentResult],
                      ) -> AgentResult:
+        # **把运行身份钉在任务上** (G03): 计划任务与需求任务走的是同一个执行口, 但
+        # `needs_to_tasks` 生成的补派任务没有 run_id —— 它提交的对象 `_scope.run_id`
+        # 因此为空, 而按运行裁剪的视图 (交付摘要的登记对象、run 过滤的产物清单) 会
+        # 把它们算成"不是这次运行产出的" (实测: 工作台有命题, 摘要里 claim 计数为 0)。
+        # 身份只在这一个执行口回填, 角色自己不需要 (也不应该) 关心运行身份。
+        if not task.run_id:
+            task.run_id = self.run_id
+        if not task.project_id:
+            task.project_id = self.project_id
+        if not task.problem_id:
+            task.problem_id = self.problem_id
         context = self._build_context(task, results)
         try:
             self.task_store.create(task, plan_id=self.outcome.plan.plan_id
@@ -419,28 +570,74 @@ class TeamRun:
         return result
 
     def _persist_result(self, task: AgentTask, result: AgentResult) -> None:
+        """通过**唯一提交口**落盘任务成果 (合并计划 §3.1 G08 / §6.2)。
+
+        此前这里是 `task_store.finish()` 之后再逐条 `projection.register()` ——
+        `TaskStore.commit_result()` 的 read-set 检查与同事务提交能力完全没用上:
+        任务终态、对象、事件各自独立提交, 中断时会出现"工具完成了、对象没落盘"。
+        现在整批交给 `ResearchCommitService`, 它在**一个事务**里写任务终态、
+        接受的对象、义务/命题的判定结果与事件, 并用幂等键防止重放产生第二个对象。
+
+        拒绝理由来自 `finalize()` 已经隔离的候选 (`rejected_changes`) 与提交口自己
+        重查的能力表: 越权候选**没有**任何路径进权威对象库。
+        """
+        service = self._commit_service()
+        rejects = [dict(item) for item in (result.rejected_changes or [])]
+        watched = dict(result.input_versions or {})
         try:
-            self.task_store.finish(task.task_id, result)
-        except Exception as e:  # noqa: BLE001
-            self.runtime.emit("task_persist_failed",
-                              {"task_id": task.task_id, "reason": str(e)})
-        # 候选变更由投影层**登记**为可查询的版本化对象 (不是判定: 它不写命题真值)。
-        if self.projection is not None and result.proposed_changes:
-            try:
-                versions = self.projection.register(task, result)
-            except Exception as e:  # noqa: BLE001
-                versions = {}
-                self.runtime.emit("projection_failed",
-                                  {"task_id": task.task_id, "reason": str(e)})
-            for proposal in result.proposed_changes:
-                self.runtime.emit("change_proposed", {
+            outcome = service.commit(
+                task, result,
+                current_versions=self._current_versions(),
+                reject_reasons=rejects,
+                events=[("task_finished", {
                     "task_id": task.task_id, "agent": task.agent,
-                    "proposal_id": proposal.proposal_id, "kind": proposal.kind,
-                    "object_id": proposal.object_id,
-                    "expected_revision": proposal.expected_revision,
-                    "registered_version": versions.get(
-                        proposal.object_id or proposal.proposal_id),
-                })
+                    "objective": task.objective, "outcome": result.outcome.value,
+                    "summary": result.summary})])
+        except Exception as e:  # noqa: BLE001 - 提交失败必须可见, 不能静默丢成果
+            self.runtime.emit("commit_failed",
+                              {"task_id": task.task_id, "agent": task.agent,
+                               "reason": f"{type(e).__name__}: {e}"})
+            return
+
+        if outcome.stale:
+            # 依据的输入在派工之后换代了: 拒绝合入并交给主控决定重做 (不是静默丢弃)
+            self.runtime.emit("input_version_conflict", {
+                "task_id": task.task_id, "agent": task.agent,
+                "stale": {k: list(v) for k, v in outcome.stale.items()},
+                "watched": watched,
+            })
+        if outcome.idempotent:
+            self.runtime.emit("commit_replayed", {
+                "task_id": task.task_id, "agent": task.agent,
+                "agent_run_id": result.agent_run_id,
+                "note": "同一 attempt 已提交过, 本次不重复写入"})
+        for item in outcome.rejected:
+            self.runtime.emit("candidate_rejected", {
+                "task_id": task.task_id, "agent": task.agent, **item})
+        for proposal in result.proposed_changes:
+            object_id = proposal.object_id or ""
+            self.runtime.emit("change_proposed", {
+                "task_id": task.task_id, "agent": task.agent,
+                "proposal_id": proposal.proposal_id, "kind": proposal.kind,
+                "object_id": object_id,
+                "expected_revision": proposal.expected_revision,
+                "registered_version": outcome.versions.get(object_id) if object_id else None,
+                "committed": bool(outcome.committed),
+            })
+        for claim_id, state in outcome.claims.items():
+            self.runtime.emit("claim_state_reconciled", {
+                "claim_id": claim_id, **state, "source": "commit_service"})
+
+    def _commit_service(self):
+        """懒建唯一提交口 (与投影共用同一个研究存储, 不新造第二个库)。"""
+        if getattr(self, "_commit", None) is None:
+            from src.research.commit import ResearchCommitService
+
+            self._commit = ResearchCommitService(
+                self.task_store.store, project_id=self.project_id,
+                problem_id=self.problem_id, run_id=self.run_id,
+                task_store=self.task_store)
+        return self._commit
 
     def _build_context(self, task: AgentTask,
                        results: dict[str, AgentResult]) -> ContextPack:
@@ -493,8 +690,171 @@ class TeamRun:
 
     # ---- 恢复 ----
     def recovery_view(self) -> dict[str, Any]:
+        """可恢复性视图: 已提交/运行中/待派 + **能否重建主控循环**。
+
+        恢复的判据只有一条: 落盘的 `TeamLoopState` 能不能读回来。只报"库里有几条任务"
+        是不够的 —— 任务落盘不等于恢复团队 (合并计划 §3.3 G16): 没有画像与计划,
+        主控只能从零重新画像并重新派工, 于是"已提交的动作"会被再做一遍。
+        """
         view = self.task_store.recoverable()
-        return {"summary": summarize_recovery(view), **view}
+        restored = self._load_loop_state()
+        return {"summary": summarize_recovery(view), **view,
+                "loop_state_restorable": restored is not None,
+                "resumable": bool(restored and restored.plan and not restored.finished)}
+
+    # ---- 持久化与恢复 (合并计划 §3.3 G16) ----
+    def save_state(self, *, status: str = "") -> bool:
+        """把主控循环状态落盘 (`KIND_TEAM_RUN`), 返回是否写入成功。
+
+        存的是**可重建循环的最小充分集**: 画像、计划、已交回的成果、派工历史、
+        重试许可、轮次与停止原因, 以及运行身份。不存正文 —— 正文在研究对象库与
+        交付包里, 这里只有引用与摘要 (与 §6.1 的"图状态只放引用"一致)。
+        """
+        from src.research.store import KIND_TEAM_RUN
+
+        state = self.loop
+        payload: dict[str, Any] = {
+            "run_id": self.run_id,
+            "project_id": self.project_id,
+            "problem_id": self.problem_id,
+            "request": self.request,
+            "source_set_ids": list(self.source_set_ids),
+            "source_policy": self.source_policy,
+            "autonomous_retrieval": bool(self.autonomous_retrieval),
+            "attachments": list(self.attachments),
+            "attachment_text": self.attachment_text,
+            "max_rounds": self.max_rounds,
+            "rounds": state.rounds,
+            "finished": state.finished,
+            "stop_reason": state.stop_reason,
+            "clarifications": state.clarifications,
+            "status": status or self.outcome.status,
+            "brief": state.brief.to_dict() if state.brief else None,
+            "plan": state.plan.to_dict() if state.plan else None,
+            "objectives": dict(state.objectives),
+            "dispatched": sorted(state.dispatched),
+            "pending_retries": sorted(state.pending_retries),
+            "results": {tid: r.to_dict() for tid, r in state.results.items()},
+            "open_needs": [n.to_dict() for n in state.open_needs],
+            "task_order": list(self.outcome.task_order),
+            "saved_at": _now(),
+        }
+        try:
+            self.task_store.store.put(KIND_TEAM_RUN, self.run_id, payload)
+            return True
+        except Exception as e:  # noqa: BLE001 - 落盘失败必须可见, 但不阻断运行
+            self.runtime.emit("run_state_persist_failed",
+                              {"run_id": self.run_id, "reason": str(e)})
+            return False
+
+    def _load_loop_state(self) -> TeamLoopState | None:
+        """从磁盘重建主控循环状态; 读不回来时返回 `None` (不假装可恢复)。"""
+        payload = self._load_run_payload()
+        return rebuild_loop_state(payload) if payload else None
+
+    def _load_run_payload(self) -> dict[str, Any]:
+        """落盘的运行状态原文 (含收尾状态, 供恢复时如实还原)。"""
+        from src.research.store import KIND_TEAM_RUN
+
+        try:
+            return dict(self.task_store.store.get(KIND_TEAM_RUN, self.run_id) or {})
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def submit_feedback(self, *, statement: str, owner: str,
+                        target_ref: Any | None = None,
+                        why: str = "", acceptance: list[str] | None = None,
+                        kind: Any = None, max_rounds: int | None = None) -> dict[str, Any]:
+        """把一条用户意见变成**需求**交回主控, 然后继续推进 (合并计划 §5.1)。
+
+        为什么走需求而不是直接改对象: 子智能体之间不互相派工, 人类意见同样必须由
+        主控转成任务 —— 否则"谁改了这条结论"就没有单一入口可查。需求进 `open_needs`
+        后由 `SupervisorAgent.decide` 转成 `AgentTask`, 成果仍经**唯一提交口**落盘。
+
+        为什么允许"重新开启已收尾的运行": 用户是在看到交付之后才提意见的, 此时运行
+        已经 `finished`。这里把状态改回进行中(而不是新建一次运行), 因此**已提交的动作
+        不会重跑** —— 画像、计划、派工历史都还在。`stop_reason` 清空并记事件, 让人
+        能看到"这次继续是因为用户意见", 而不是把它当成一次新研究。
+        """
+        from src.agents.protocol import NeedKind, ResearchNeed
+
+        self.prepare()
+        need = ResearchNeed(
+            kind=kind or NeedKind.clause,
+            statement=statement,
+            why=why or "用户对当前产出提出意见",
+            acceptance=list(acceptance or ["修订结果可查, 或明确说明无法执行的原因"]),
+            owner=owner,
+            blocking=False,
+            blocked_refs=[target_ref] if target_ref is not None else [],
+            hints={"feedback": statement[:400]},
+        )
+        self.loop.open_needs.append(need)
+        self.loop.finished = False
+        self.loop.stop_reason = ""
+        # 用户意见之后必须重新过交付门槛 (等级可能升也可能降), 因此状态回到进行中
+        self.outcome.status = TaskStatus.running.value
+        self.runtime.emit("user_feedback", {
+            "need_id": need.need_id, "owner": owner, "statement": statement[:200],
+            "target": (getattr(target_ref, "id", "") if target_ref is not None else "")})
+        self.save_state(status=TaskStatus.running.value)
+        limit = int(max_rounds if max_rounds is not None else self.max_rounds)
+        # **用户意见必须有它自己的轮次额度**: 恢复出来的循环已经用过 `rounds` 轮,
+        # 若沿用原上限, `step()` 会因为 `rounds >= max_rounds` 立刻收尾 —— 需求根本
+        # 派不出去, 而返回结果看起来像"已处理"(实测)。因此把上限抬到"当前轮次 + 本次额度"。
+        self.max_rounds = max(self.max_rounds, self.loop.rounds + limit)
+        before = self.loop.rounds
+        while self.step() and (self.loop.rounds - before) < limit:
+            pass
+        if not self.loop.finished:
+            self._finish(self.loop, f"用户意见处理后达到轮次上限 {self.max_rounds}",
+                         status=TaskStatus.partial.value)
+        return {"ok": True, "need_id": need.need_id, "owner": owner,
+                "status": self.outcome.status,
+                # `rounds` 是绝对轮次 (与恢复出来的循环一致); `rounds_used` 是本次意见
+                # 实际用掉的额度 —— 两者含义不同, 混成一个会让"这次处理了几轮"说不清。
+                "rounds": self.loop.rounds,
+                "rounds_used": self.loop.rounds - before,
+                "stop_reason": self.outcome.stop_reason,
+                "delivery": dict(self.outcome.delivery),
+                "applied": [{"need_id": need.need_id, "owner": owner}]}
+
+    def resume(self) -> TeamRunOutcome:
+        """从落盘状态继续这次运行 (已提交的动作**不重跑**)。
+
+        语义 (§9.1 的 start/resume/fork): `resume` = 同一 run 接着跑。因此恢复后:
+        - 画像与计划**原样复用**(不重新画像 —— 那会换掉任务身份与依赖边);
+        - `results` / `dispatched` / `objectives` / `pending_retries` 一并恢复,
+          主控因此不会把已经交回过的那件事再派一次;
+        - 已经收尾的运行不再重跑, 直接按**落盘时记下的状态**返回结论
+          (不能拿默认状态覆盖它, 否则一次"已完成"会显示成"未跑过")。
+        """
+        payload = self._load_run_payload()
+        restored = rebuild_loop_state(payload) if payload else None
+        if restored is None:
+            self.runtime.emit("run_state_missing", {"run_id": self.run_id})
+            return self.run()
+        self.loop = restored
+        self.outcome.brief = restored.brief
+        self.outcome.plan = restored.plan
+        self.outcome.results = restored.results
+        self.outcome.open_needs = restored.open_needs
+        self.outcome.rounds = restored.rounds
+        self.runtime.emit("run_resumed", {
+            "run_id": self.run_id, "rounds": restored.rounds,
+            "tasks_done": len(restored.results),
+            "dispatched": len(restored.dispatched),
+            "finished": restored.finished})
+        if restored.finished:
+            self._finish(restored, restored.stop_reason or "该运行已收尾",
+                         status=str(payload.get("status", "") or ""))
+            return self.outcome
+        while self.step():
+            pass
+        if not self.loop.finished:
+            self._finish(self.loop, f"达到轮次上限 {self.max_rounds}",
+                         status=TaskStatus.partial.value)
+        return self.outcome
 
     def _current_versions(self) -> dict[str, int]:
         """当前研究对象版本索引 (用于判断"依据是否变了")。
@@ -551,6 +911,35 @@ def run_team(request: str, *, project_id: str, problem_id: str = "",
     with TeamRun(project_id=project_id, problem_id=problem_id, run_id=run_id,
                  request=request, **kwargs) as team:
         return team.run()
+
+
+def rebuild_loop_state(payload: dict[str, Any]) -> TeamLoopState | None:
+    """落盘载荷 → `TeamLoopState` (读不回来时返回 `None`, 不半真半假地恢复)。
+
+    字段缺失/类型不对一律按"不可恢复"处理: 一个只恢复了一半的循环比拒绝恢复更危险
+    —— 它会用空的派工历史重跑已经做过的事。
+    """
+    try:
+        state = TeamLoopState()
+        brief_row = payload.get("brief")
+        plan_row = payload.get("plan")
+        state.brief = ResearchBrief.model_validate(brief_row) if brief_row else None
+        state.plan = TeamPlan.model_validate(plan_row) if plan_row else None
+        state.results = {str(tid): AgentResult.model_validate(row)
+                         for tid, row in (payload.get("results") or {}).items()}
+        state.objectives = {str(k): str(v)
+                            for k, v in (payload.get("objectives") or {}).items()}
+        state.dispatched = {str(v) for v in (payload.get("dispatched") or [])}
+        state.pending_retries = {str(v) for v in (payload.get("pending_retries") or [])}
+        state.open_needs = [ResearchNeed.model_validate(row)
+                            for row in (payload.get("open_needs") or [])]
+        state.rounds = int(payload.get("rounds", 0) or 0)
+        state.clarifications = int(payload.get("clarifications", 0) or 0)
+        state.finished = bool(payload.get("finished", False))
+        state.stop_reason = str(payload.get("stop_reason", "") or "")
+        return state
+    except Exception:  # noqa: BLE001 - 载荷不完整就按不可恢复处理
+        return None
 
 
 def make_context_builder(*, brief_getter: Callable[[], ResearchBrief | None],
@@ -626,6 +1015,13 @@ def _slim_sections(sections: list[Any], text_limit: int) -> list[dict[str, Any]]
         out.append({"heading": section.get("heading", ""),
                     "role": section.get("role", ""), "blocks": blocks})
     return out
+
+
+def _now() -> str:
+    """当前时刻 (落盘时间戳; 与项目其它地方的 ISO 格式一致)。"""
+    from src.research.schemas import utcnow
+
+    return utcnow()
 
 
 def _sum_usage(results: dict[str, AgentResult]) -> UsageRecord:

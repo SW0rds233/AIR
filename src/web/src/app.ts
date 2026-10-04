@@ -1,5 +1,6 @@
 /**
- * 页面装配层 (合并计划 §9.5: `app.ts` 只负责装配, 不再承载业务逻辑)。
+ * 页面装配层 (合并计划 §8.1 / §9.5: `app.ts` 只负责装配, 不再承载业务逻辑,
+ * 也不再持有任何状态副本)。
  *
  * 迁出历史: 本文件原先是 2228 行的单体页面逻辑 (启动、附件、SSE、历史、工作台、
  * 产物与 DOM 绑定全在一起)。现在按 §9.5 的表拆成:
@@ -14,18 +15,26 @@
  * - `library-controller.ts::createLibrarySection` —— 本机路径资料接入;
  * - `team-controller.ts::createTeamMount` —— 团队区块挂载。
  *
+ * G19: 状态只有一份, 在 `state/research-store.ts`。本文件**不**再定义
+ * `currentResearch` 对象, 也**不**再维护 `currentProjectId` / `currentProblemId` /
+ * `currentThreadId` / `currentSessionId` / `currentContext` / `mode` 这一组 ID 镜像
+ * (它们曾经与 `window.AIR.research` 并行存在, 于是必须靠 `syncResearchGlobals()`
+ * 来回对表)。现在:
+ *
+ * - 读: `getState()` + selector (`selectionOf` / `researchView` / `inputPhase` / ...);
+ * - 写: `dispatch(action)` (身份切换用 `selection/open` / `selection/reset`,
+ *   字段回写用 `selection/patch`);
+ * - 页面只留下 DOM 与装配 (渲染在 `views/*`), 运行状态徽标由 selector 现算。
+ *
  * 本文件仍然守住的硬约束 (迁移期不允许退化):
  * 1. 严格 CSP (`script-src 'self'`): **没有内联事件处理器**, 所有动态按钮继续走
  *    `data-action` + 文档级委托 `PAGE_ACTIONS`;
  * 2. 所有 `id` / 选择器不变 (现有 e2e 与后端联调依赖它们);
- * 3. `window.AIRTeam`、`window.AIRLibrary` 与 `window.AIR` 兼容转发保留;
- * 4. **唯一状态**是 `window.AIR.research` (经 `currentResearch` 单向投影), 这里不新建
- *    第二份可写状态, 也不做双向同步;
- * 5. 直接的 DOM 访问保留 `any` 边界 (后端 JSON 载荷形状由 `contracts.ts` 描述),
+ * 3. `window.AIRTeam`、`window.AIRLibrary` 与 `window.AIRPaper` 入口保留;
+ *    `window.AIR.research` 由 `air-global.ts` 暴露为**只读投影** (不再有可写镜像);
+ * 4. 直接的 DOM 访问保留 `any` 边界 (后端 JSON 载荷形状由 `contracts.ts` 描述),
  *    不重新引入 `@ts-nocheck`。
  */
-import { air as AIR } from './air-global';
-import type { ResearchPatch, RunStatus } from './current-research';
 import {
   byId, scrollToBottom, setDisabled, setHtml, setPlaceholder, setProp,
   setText, setVal, val,
@@ -60,6 +69,20 @@ import { escapeHtml as overviewEsc } from './views/research-workbench';
 import { pickManifestEntry, readManifestBody } from './contracts/publication';
 import { buildInterruptCard } from './views/interrupt-cards';
 import { stageLabel as stageLabelOf } from './views/project-navigation';
+// G19: 唯一状态 (§8.1)。这里只 import **动作与 selector**, 不再 import 任何可写镜像。
+import {
+  contextTopic as contextTopicOf,
+  dispatch,
+  getState,
+  inputPhase,
+  newDraftProjectId,
+  subscribe,
+  workbenchFrom,
+  workbenchQueryTarget,
+  type RunStatus,
+  type TabName,
+} from './state/research-store';
+import { researchLabel, researchView } from './current-research';
 // §9.6: 论文/公式/图表追溯 (纯函数视图; 取数与 DOM 装配在这里)
 import {
   numberingView,
@@ -77,7 +100,6 @@ import {
   workbenchNoProjectHtml,
   workbenchUnboundHtml,
 } from './views/research-overview';
-import type { WorkbenchData } from './views/research-workbench';
 // §9.5 取数入口: 页面装配层也不再自己拼 URL / 判错 / 重试 —— 全部走 api/ 层。
 // `pageApi()` 每次调用时解析单例, 这样它永远是最新的客户端 (允许多个入口各自替换)。
 import {
@@ -91,131 +113,46 @@ function pageApi(): ResearchClient {
 }
 import type { LibraryDetail } from './contracts/library';
 
-let currentThreadId: string | null = null;
-let currentSessionId: string | null = null;
-
-let mode = 'idle';            // 会话状态: idle / running / waiting
-let currentContext = '';      // 选中的资料库主题 (与项目 id 不是同一个字段)
-let currentProjectId = '';    // 研究项目 ID (反馈/派生/工作台)
-let currentProblemId = '';
-let pendingInterruptId = '';  // 当前等待回答的暂停点 ID (F2 幂等键)
-let chosenCandidateId = '';   // 用户点选的候选路线 ID (仅用于卡片回显)
-
-/* ---------------- 当前研究状态 (计划书 §2 F1) ----------------
- * 一次上下文切换必须让**所有**视图跟着走: 标题、问题、预算、反馈目标、
- * 文件与 SSE 事件都读取这里, 而不是各自持有副本。早期实现把 ID 散落在
- * 多个全局变量里, 切换历史会话时只恢复了线程, 模式和项目字段会沿用上一个会话。
- *
- * F1/F4: 状态的**唯一权威**是 main.ts 暴露的 `window.AIR.research`
- * (纯函数状态机 current-research.ts + Vitest 用例)。此前 app.ts 自己又定义了
- * 一份同名字段的对象, 两份状态各自更新 —— 这正是计划书 F1 要消除的"页面状态与
- * 用户研究意图不一致"的成因。这里只保留薄适配层, 不再持有第二份状态。
+/* ---------------- 唯一状态的只读取用 (G19) ----------------
+ * 迁移前这里有一组镜像变量 (`currentProjectId`/`currentProblemId`/`currentThreadId`/
+ * `currentSessionId`/`currentContext`/`mode`) 和一个 `currentResearch` 对象, 它们必须与
+ * `window.AIR.research` 来回同步。现在这类取值一律走 selector —— 没有第二份可写副本。
  */
-const AIR_STATE = (typeof window !== 'undefined' && window.AIR) ? window.AIR : AIR;
-
-const currentResearch = {
-  threadId: '',
-  sessionId: '',
-  mode: '',
-  projectId: '',
-  problemId: '',
-  // 选中的资料库主题; 与项目 id 分开保存, 互不覆盖
-  contextTopic: '',
-  runId: '',
-  status: 'idle',              // idle / running / waiting / done
-  reset() {
-    if (AIR_STATE) AIR_STATE.reset();
-    this.pull();
-    syncResearchGlobals();
-    return this;
-  },
-  apply(patch: ResearchPatch) {
-    if (AIR_STATE) AIR_STATE.apply(patch || {});
-    this.pull();
-    syncResearchGlobals();
-    return this;
-  },
-  /** 从权威状态同步本文件的本地投影 (两个文件不得各自维护一份状态)。 */
-  pull() {
-    if (!AIR_STATE) return this;
-    const src = AIR_STATE.research;
-    this.threadId = src.threadId || '';
-    this.sessionId = src.sessionId || '';
-    this.mode = src.mode || '';
-    this.projectId = src.projectId || '';
-    this.problemId = src.problemId || '';
-    this.contextTopic = src.contextTopic || '';
-    this.runId = src.runId || '';
-    this.status = src.status || 'idle';
-    return this;
-  },
-  /** 是否存在权威状态 (没有时退化为纯本地对象, 仍保持可用的降级行为)。 */
-  canonical() { return Boolean(AIR_STATE); },
-  /** 把本地直接修改的字段回写到权威状态 (调用方随后调用 syncResearchGlobals)。 */
-  push() {
-    if (!AIR_STATE) return this;
-    AIR_STATE.apply({
-      threadId: this.threadId, sessionId: this.sessionId,
-      mode: this.mode,
-      projectId: this.projectId, problemId: this.problemId,
-      contextTopic: this.contextTopic, runId: this.runId,
-      status: this.status as RunStatus,
-    });
-    return this;
-  },
-  // 是否已绑定一个研究问题 (工作台/反馈/派生都需要)
-  hasProblem() { return AIR_STATE ? AIR_STATE.hasProblem() : Boolean(this.projectId); },
-  label() {
-    if (AIR_STATE) return AIR_STATE.label();
-    const bits: string[] = [];
-    if (this.problemId) bits.push(this.problemId);
-    else if (this.projectId) bits.push(this.projectId);
-    if (this.status && this.status !== 'idle') bits.push(statusLabelOf(this.status) || this.status);
-    return bits.join(' · ');
-  },
-};
-
-function labelOf(map: Record<string, string>, key: string): string {
-  return map && map[key] !== undefined ? map[key] : key;
+function selectionOf() {
+  return getState().selection;
 }
 
-function statusLabelOf(status: string): string {
-  return labelOf(STATUS_LABEL as Record<string, string>, status);
+function currentProjectId(): string {
+  return selectionOf().projectId || '';
 }
 
-const STATUS_LABEL = {idle: '就绪', running: '运行中', waiting: '等待输入', done: '已完成'};
+function currentProblemId(): string {
+  return selectionOf().problemId || '';
+}
 
-// 让既有渲染路径读到同一份状态 (旧变量保留为投影, 避免各处重复维护)
-function syncResearchGlobals() {
-  // 本地直接改字段的地方 (setStatus 等) 也要回写到权威状态,
-  // 否则同一份"当前研究"又会出现两个不同步的副本 (F1)。
-  if (currentResearch.canonical()) {
-    currentResearch.pull();
-  } else if (AIR_STATE) {
-    AIR_STATE.apply({
-      threadId: currentResearch.threadId, sessionId: currentResearch.sessionId,
-      mode: currentResearch.mode, projectId: currentResearch.projectId,
-      problemId: currentResearch.problemId,
-      contextTopic: currentResearch.contextTopic, runId: currentResearch.runId,
-      status: currentResearch.status as RunStatus,
-    });
-  }
-  currentThreadId = currentResearch.threadId || null;
-  currentSessionId = currentResearch.sessionId || null;
-  currentProjectId = currentResearch.projectId || '';
-  currentProblemId = currentResearch.problemId || '';
-  currentContext = currentResearch.contextTopic || '';
-  const badge = byId('researchctx')!;
-  if (badge) {
-    badge.textContent = currentResearch.label();
-    badge.className = 'ctx-badge' + (currentResearch.status === 'running' ? ' running' : '');
-  }
+function currentThreadId(): string {
+  return selectionOf().threadId || '';
+}
+
+function currentContext(): string {
+  return contextTopicOf(getState());
+}
+
+/** 当前查看的对象键 (工作台结论详情)。 */
+function openObjectKey(): string {
+  return selectionOf().objectKey || '';
+}
+
+/** 渲染当前研究上下文徽标 (纯 selector 投影 → 只是 DOM 文本)。 */
+function renderResearchBadge() {
+  const view = researchView(getState());
+  const badge = byId('researchctx');
+  if (!badge) return;
+  badge.textContent = researchLabel(view);
+  badge.className = 'ctx-badge' + (view.status === 'running' ? ' running' : '');
 }
 
 const $ = (id: any) => document.getElementById(id);
-
-// 初始投影 (必须在 $ 与 STATUS_LABEL 之后: label() 依赖它们)
-currentResearch.pull();
 
 function setStatus(text: any, cls: any) {
   const el = byId('status');
@@ -224,11 +161,17 @@ function setStatus(text: any, cls: any) {
   el.className = cls ? ('dot-' + cls) : '';
 }
 
+/** 阶段 → 后台运行状态 (与旧 `setMode` 的映射逐字一致)。 */
+function phaseStatus(m: any): RunStatus {
+  if (m === 'running') return 'running';
+  if (m === 'waiting') return 'waiting';
+  if (m === 'idle') return 'idle';
+  return 'done';
+}
+
 function setMode(m: any) {
-  mode = m;
-  currentResearch.status = m === 'running' ? 'running'
-    : (m === 'waiting' ? 'waiting' : (mode === 'idle' ? 'idle' : 'done'));
-  currentResearch.push();
+  // 唯一状态: 阶段写进 store (徽标由订阅者按 selector 重画), 这里只改 DOM
+  dispatch({ type: 'selection/status', status: phaseStatus(m) });
   const input = byId<HTMLTextAreaElement>('reply')!;
   const btn = byId<HTMLButtonElement>('btn-send')!;
   const stop = byId<HTMLButtonElement>('btn-stop')!;
@@ -250,7 +193,7 @@ function setMode(m: any) {
     btn.disabled = false;
     stop.disabled = false;
   }
-  syncResearchGlobals();
+  renderResearchBadge();
 }
 
 function defaultPlaceholder() {
@@ -272,13 +215,6 @@ function addMsg(text: any, cls: any) {
   scrollToBottom('log');
 }
 
-/* ---------------- 运行模式 ---------------- */
-
-/** 生成新的草稿项目 id (R2: 让附件在稳定身份下上传)。 */
-function newDraftProjectId(): string {
-  return 'proj-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-}
-
 /* ---------------- 统一输入的准备 (取代旧的"模式切换") ----------------
  * 统一入口下没有模式可选, 因此这里只做两件**始终成立**的准备:
  * 1. 落实稳定草稿身份 (R2): 附件与检索必须归属到明确的项目/问题;
@@ -286,12 +222,12 @@ function newDraftProjectId(): string {
  * 工作台仍只在"该项目确实有运行记录"时查询 (草稿身份不查, 避免必然 404)。
  */
 function prepareUnifiedIntake() {
-  if (mode === 'idle') setPlaceholder('reply', defaultPlaceholder());
+  if (inputPhase(getState()) === 'idle') setPlaceholder('reply', defaultPlaceholder());
   // R2: 落实稳定身份 —— 附件必须在有 project_id 之后上传, 否则文件会落到与运行无关的目录
   if (!(val('projid') || '').trim()) {
     const draft = newDraftProjectId();
     setVal('projid', draft);
-    currentResearch.apply({ projectId: draft });
+    dispatch({ type: 'selection/patch', patch: { projectId: draft } });
     // 草稿身份**不是**运行绑定: 必须显式记下来, 否则刷新工作台只能靠"项目 id 恰好
     // 不等于状态里的项目 id"这条间接判据, 判据一旦被后来写入的值填平就会 404
     d.markDraftProject(draft);
@@ -300,16 +236,16 @@ function prepareUnifiedIntake() {
   void d.refreshAttachments();
   const pid = d.workbenchTargetPid();
   if (pid) {
-    currentResearch.apply({projectId: pid});
+    dispatch({ type: 'selection/patch', patch: { projectId: pid } });
     refreshWorkbench();
   } else if (byId('workbench')) {
     byId('workbench')!.innerHTML = workbenchMissingHtml(
-      (val('projid') || '').trim() || currentProjectId);
+      (val('projid') || '').trim() || currentProjectId());
   }
 }
 
 function copyProjectId() {
-  const pid = (val('projid') || '').trim() || currentProjectId;
+  const pid = (val('projid') || '').trim() || currentProjectId();
   if (!pid) { addMsg('当前没有项目 ID', 'msg-error'); return; }
   if (navigator.clipboard) navigator.clipboard.writeText(pid);
   addMsg('项目 ID: ' + pid, 'msg-system');
@@ -385,32 +321,15 @@ function getLibraryController(): LibraryController {
   return library().controller();
 }
 
-/* ---------------- 科研工作台 (§9.5: 渲染在 views/research-overview.ts) ---------------- */
-let wbRequestSeq = 0;
-let wbRequestKey = '';
-let workbenchData: WorkbenchData | null = null;   // 最近一次工作台状态 (供详情导航查询)
-let openClaimDetail = '';        // 当前展开详情的结论 id
-
-/** 已确认建立过运行的项目 id (`''` = 尚未确认)。 */
-let runBoundProjectId = '';
-let draftUnboundProjectId = '';
-
-function bindRunToProject(projectId: any) {
-  runBoundProjectId = String(projectId || '');
-  draftUnboundProjectId = '';
-}
-
-function markDraftProject(projectId: any) {
-  runBoundProjectId = '';
-  draftUnboundProjectId = String(projectId || '');
-}
-
+/* ---------------- 科研工作台 (§9.5: 渲染在 views/research-overview.ts) ----------------
+ * 工作台**不自己持有工作对象**: 最近一次服务端投影存放在唯一状态的 `entities` 片
+ * (`entities/workbench`), 这里只是取数 + 把渲染结果写进 DOM。结论详情导航也因此可以从
+ * 状态重渲染, 而不是靠页面局部变量。
+ */
 function workbenchTargetFor(pid: string): string {
-  if (!pid) return '';
   // 两条判据都必须显式判: "记录里明确说过没有运行记录" 且 "当前就是那个 id"。
   // 只要用户换成别的 id (手填/历史会话), 就允许查一次 —— 否则手动加载工作台被堵死。
-  if (!runBoundProjectId && pid === draftUnboundProjectId) return '';
-  return pid;
+  return workbenchQueryTarget(getState(), pid);
 }
 
 // F0-1: 用 URL/searchParams 构造地址。早期实现手拼 '?problem_id=...' + '&_=...',
@@ -424,7 +343,7 @@ function researchStateUrl(projectId: any, problemId: any) {
 }
 
 function refreshWorkbench() {
-  const pid = ((byId<HTMLInputElement>('projid') && val('projid')) || currentProjectId || '').trim();
+  const pid = ((byId<HTMLInputElement>('projid') && val('projid')) || currentProjectId() || '').trim();
   if (!pid) {
     writeWorkbench(workbenchNoProjectHtml());
     return;
@@ -435,34 +354,35 @@ function refreshWorkbench() {
     writeWorkbench(workbenchUnboundHtml(pid));
     return;
   }
-  currentResearch.apply({projectId: pid});
-  // F2: 每次读取绑定 (项目, 问题) 与序号; 旧请求最后返回时不得覆盖新画面
-  const key = pid + '|' + (currentProblemId || '');
-  const seq = ++wbRequestSeq;
-  wbRequestKey = key;
+  dispatch({ type: 'selection/patch', patch: { projectId: pid } });
+  // F2: 每次读取带加载代号; 旧请求最后返回时不得覆盖新画面。
+  // 代号就是唯一状态的 `ui.loadToken` (身份切换/整体重置同样会推进它) ——
+  // 不再另设一套 `wbRequestSeq` 序号。
+  dispatch({ type: 'ui/loadStarted' });
+  const token = getState().ui.loadToken;
   // 工作台状态也走统一客户端; 用 raw 是为了按状态码区分"加载失败"与"内容异常"
-  const statePath = researchStateUrl(pid, currentProblemId);
+  const statePath = researchStateUrl(pid, currentProblemId());
   pageApi().raw(statePath)
     .then((r: Response) => r.json().then((d: any) => ({status: r.status, body: d})))
     .then(({status, body}) => {
-      if (seq !== wbRequestSeq || key !== wbRequestKey) return;  // 已被更新的请求取代
+      if (token !== getState().ui.loadToken) return;  // 已被更新的请求取代
       if (status !== 200) {
         writeWorkbench(workbenchErrorHtml(status, body));
         return;
       }
-      if (body.problem_id && body.problem_id !== currentProblemId) {
+      if (body.problem_id && body.problem_id !== currentProblemId()) {
         // 服务端已解析出唯一问题: 写回上下文与表单, 保持一致
-        currentResearch.apply({problemId: body.problem_id});
+        dispatch({ type: 'selection/patch', patch: { problemId: body.problem_id } });
         if (byId<HTMLInputElement>('probid')) setVal('probid', body.problem_id);
       }
-      workbenchData = body;
-      renderWorkbench(body);
-      // 团队视图: 主控理解与派工在前, 旧工作台 (研究对象与产物) 在后。
-      // 状态只有一份 (team-controller 的 ResearchStore), 这里只负责触发加载与拼装。
+      // 服务端投影进唯一状态 (只读结论): 工作台不自己持有工作对象
+      dispatch({ type: 'entities/workbench', data: body });
+      renderWorkbench(body);      // 团队视图: 主控理解与派工在前, 旧工作台 (研究对象与产物) 在后。
+      // 状态只有一份 (state/research-store.ts), 这里只负责触发加载与拼装。
       void team().mount(pid, body && body.run_id);
     })
     .catch((e: any) => {
-      if (seq !== wbRequestSeq) return;
+      if (token !== getState().ui.loadToken) return;
       setHtml('workbench', '<div class="empty">读取工作台失败: ' + overviewEsc(String(e)) + '</div>');
     });
 }
@@ -474,8 +394,8 @@ function writeWorkbench(html: string) {
 
 function renderWorkbench(d: any) {
   const html = renderResearchOverview(d, {
-    data: () => workbenchData,
-    openClaimId: () => openClaimDetail,
+    data: () => workbenchFrom(getState()),
+    openClaimId: () => openObjectKey(),
   });
   writeWorkbench(html);
   return html;
@@ -486,19 +406,22 @@ function selectProblem(encodedProblemId: any) {
   const pid = decodeURIComponent(encodedProblemId);
   const field = byId<HTMLInputElement>('probid')!;
   if (field) field.value = pid;
-  currentResearch.apply({problemId: pid});
+  dispatch({ type: 'selection/patch', patch: { problemId: pid } });
   refreshWorkbench();
 }
 
 /* F3: 结论详情导航 —— 从结论点开所用模型、原文证据、证明义务与验证记录。
  * 实现已搬到 views/research-overview.ts (纯函数, 有类型与单测), 这里只做开关。 */
 function toggleClaimDetail(claimId: any) {
-  openClaimDetail = toggledClaimId(openClaimDetail, claimId);
-  if (workbenchData) renderWorkbench(workbenchData);
+  // 查看中的对象属于唯一状态的 `selection.objectKey` (不再是页面局部变量)
+  const next = toggledClaimId(openObjectKey(), claimId);
+  dispatch({ type: 'selection/object', objectKey: next });
+  const projection = workbenchFrom(getState());
+  if (projection) renderWorkbench(projection);
 }
 
 function submitWorkbenchFeedback(objectId: any, textOverride: any) {
-  const pid = currentProjectId || ((byId<HTMLInputElement>('projid') && val('projid')) || '').trim();
+  const pid = currentProjectId() || ((byId<HTMLInputElement>('projid') && val('projid')) || '').trim();
   const box = byId<HTMLTextAreaElement>('wbfeedback');
   const text = (textOverride !== undefined ? textOverride : (box ? box.value : '')).trim();
   if (!pid) { addMsg('请先关联理论研究项目（启动一次理论研究）', 'msg-error'); return; }
@@ -508,7 +431,7 @@ function submitWorkbenchFeedback(objectId: any, textOverride: any) {
     ? objectId : (picker ? picker.value : '');
   pageApi().raw(ENDPOINTS.researchFeedback(String(pid)), {
     method: 'POST',
-    body: {response: text, object_id: target || '', problem_id: currentProblemId || ''},
+    body: {response: text, object_id: target || '', problem_id: currentProblemId() || ''},
   // 反馈是**变更类**请求: 用 raw 以便如实读出状态码 (4xx 也要照原样报给用户),
   // 同时由客户端统一处理请求头与错误语义。
   }).then((r: Response) => r.json().then((d: any) => ({status: r.status, body: d})))
@@ -533,7 +456,7 @@ function submitWorkbenchFeedback(objectId: any, textOverride: any) {
 }
 
 function forkFromWorkbench() {
-  const pid = currentProjectId || ((byId<HTMLInputElement>('projid') && val('projid')) || '').trim();
+  const pid = currentProjectId() || ((byId<HTMLInputElement>('projid') && val('projid')) || '').trim();
   if (!pid) { addMsg('请先关联理论研究项目', 'msg-error'); return; }
   const snapBox = byId<HTMLInputElement>('wbsnapid');
   const snap = snapBox ? snapBox.value.trim() : '';
@@ -558,7 +481,7 @@ function refreshContexts() {
   pageApi().json(ENDPOINTS.contexts, {params: {_: Date.now()}}).then((d: any) => {
     const sel = byId<HTMLSelectElement>('ctx')!;
     if (!sel) return;
-    const prev = currentContext || '';
+    const prev = currentContext();
     sel.innerHTML = '<option value="">+ 新主题</option>';
     (d.contexts || []).forEach((c: any) => {
       const opt = document.createElement('option');
@@ -567,14 +490,14 @@ function refreshContexts() {
       sel.appendChild(opt);
     });
     sel.value = prev;
-    currentResearch.apply({contextTopic: prev});
+    dispatch({ type: 'ui/context', topic: prev });
   }).catch(() => {});
 }
 
 function onContextChange() {
   // 综述上下文只是**资料库/主题偏好**: 它不改变理论研究问题 (F1-3)
   const topic = val('ctx');
-  currentResearch.apply({contextTopic: topic});
+  dispatch({ type: 'ui/context', topic });
   if (topic) {
     addMsg('已切换到上下文: ' + topic, 'msg-agent');
     loadContextNotes(topic);
@@ -600,6 +523,7 @@ function loadContextNotes(topic: any) {
 
 /* ---------------- 标签页 / 产物 ---------------- */
 function switchTab(name: any) {
+  if (name) dispatch({ type: 'selection/tab', tab: name as TabName });
   document.querySelectorAll<HTMLElement>('.tab').forEach((t) => {
     const active = t.dataset.tab === name;
     t.classList.toggle('active', active);
@@ -647,9 +571,9 @@ function renderMarkdown(el: any, text: any) {
 
 function refreshArtifacts() {
   // F3: 文件清单绑定当前 run/研究问题; 不再把全部 outputs/ 混在一起展示
-  const binding = {projectId: currentResearch.projectId,
-                   problemId: currentResearch.problemId,
-                   runId: currentResearch.runId};
+  const binding = {projectId: currentProjectId(),
+                   problemId: currentProblemId(),
+                   runId: selectionOf().runId};
   const qs = artifactQuery(binding);
   pageApi().json(ENDPOINTS.artifacts + (qs ? '?' + qs + '&' : '?') + '_=' + Date.now())
     .then((data: any) => {
@@ -691,10 +615,10 @@ function loadArtifact(name: any) {
 async function refreshPaperTrace() {
   const target = byId('paper');
   if (!target) return;
-  const identity = {projectId: currentResearch.projectId, runId: currentResearch.runId};
+  const identity = {projectId: currentProjectId(), runId: selectionOf().runId};
   // 复用既有清单查询: 与研究问题/运行绑定, 不把别的问题的产物混进来
   const qs = artifactQuery({projectId: identity.projectId,
-                            problemId: currentResearch.problemId,
+                            problemId: currentProblemId(),
                             runId: identity.runId});
   let files: ArtifactEntryView[] = [];
   let listReason = '';
@@ -756,28 +680,12 @@ function clearReply() {
 
 /** 统一输入与附件 (计划书 §9.5 `features/intake/`)。 */
 const d: IntakeController = createIntakeController({
-  threadId: () => currentThreadId || '',
-  setThreadId: (id) => { currentResearch.apply({threadId: id}); },
-  applyResearch: (patch) => { currentResearch.apply(patch as ResearchPatch); },
-  problemId: () => currentProblemId,
-  projectId: () => currentProjectId,
-  projectField: () => ((byId<HTMLInputElement>('projid') && val('projid')) || '').trim(),
-  boundProjectId: () => runBoundProjectId,
-  workbenchTargetFor: (pid) => workbenchTargetFor(pid),
-  bindRun: (projectId) => bindRunToProject(projectId),
-  markDraftProject: (projectId) => markDraftProject(projectId),
-  ensureDraftProjectId: () => newDraftProjectId(),
-  researchContext: () => currentContext || '',
   addMsg: (text, cls) => addMsg(text, cls),
   setMode: (m) => setMode(m),
-  mode: () => mode,
   setStatus: (text, cls) => setStatus(text, cls),
   clearReply: () => clearReply(),
   replyInput: () => byId<HTMLTextAreaElement>('reply'),
   setPlaceholder: (id, value) => setPlaceholder(id, value),
-  pendingInterruptId: () => pendingInterruptId,
-  currentCandidateId: () => chosenCandidateId,
-  onCandidateChosen: (candidateId) => { chosenCandidateId = candidateId; },
   refreshSourceSets: () => refreshSourceSets(),
   refreshHistorySelect: () => sessions.refreshHistorySelect(),
   refreshWorkbench: () => refreshWorkbench(),
@@ -785,7 +693,6 @@ const d: IntakeController = createIntakeController({
   refreshContexts: () => refreshContexts(),
   switchTab: (name) => switchTab(name),
   connectStream: (tid) => stream.connect(tid),
-  setPendingInterruptId: (id) => { pendingInterruptId = id; },
   submitFeedback: (objectId, text) => submitWorkbenchFeedback(objectId, text),
 });
 
@@ -802,22 +709,22 @@ const sessions: SessionController = createSessionController({
   refreshContexts: () => refreshContexts(),
   refreshHistorySelect: () => sessions.refreshHistorySelect(),
   loadArtifact: (name) => loadArtifact(name),
-  applyResearch: (patch) => { currentResearch.apply(patch as ResearchPatch); },
-  threadId: () => currentThreadId || '',
-  sessionId: () => currentSessionId || '',
-  workbenchSeqBump: () => { wbRequestSeq += 1; },
   resetTeam: () => { resetTeamStore(); teamCache = null; },
 });
+
+/** 断线补偿返回的服务端状态 → 前端运行状态 (不是连接状态)。 */
+function compensateStatus(status: string): RunStatus {
+  if (status === 'waiting') return 'waiting';
+  if (status === 'running') return 'running';
+  if (status === 'done') return 'done';
+  return 'idle';
+}
 
 /** 事件流 (计划书 §9.5 `events/session-stream.ts`)。 */
 const stream: SessionStream = createSessionStream({
   handleEvent: (ev) => handleEvent(ev),
-  currentThreadId: () => currentThreadId || '',
-  onCompensate: (status) => {
-    currentResearch.apply({status: status === 'waiting' ? 'waiting'
-                                   : (status === 'running' ? 'running'
-                                   : (status === 'done' ? 'done' : 'idle'))});
-  },
+  currentThreadId: () => currentThreadId(),
+  onCompensate: (status) => dispatch({ type: 'selection/status', status: compensateStatus(status) }),
   onOfflineStatus: () => {
     setStatus('连接中断，等待你的输入', 'running');
     setMode('waiting');
@@ -831,8 +738,6 @@ let teamCache: TeamMount | null = null;
 function team(): TeamMount {
   if (teamCache) return teamCache;
   teamCache = createTeamMount({
-    legacyResearch: () => (AIR.research || null) as any,
-    problemId: () => currentProblemId,
     notify: (text, cls) => addMsg(text, cls || 'msg-error'),
   });
   return teamCache;
@@ -876,8 +781,8 @@ function updateRunHint(r: any) {
 function onInterrupt(p: any) {
   setMode('waiting');
   setStatus('等待你的输入', 'running');
-  // F2: 记录暂停点 ID, 提交响应时回传 (服务端据此幂等去重)
-  pendingInterruptId = (p && p.interrupt_id) || '';
+  // F2: 记录暂停点 ID, 提交响应时回传 (服务端据此幂等去重)。它属于唯一状态的 `ui` 片。
+  dispatch({ type: 'ui/interrupt', interruptId: (p && p.interrupt_id) || '' });
   const type = (p && p.type) || '';
 
   if (type === 'theory_candidates') { d.showCandidateChoice(p); return; }
@@ -943,6 +848,9 @@ function bindStaticHandlers() {
 }
 
 function boot() {
+  // 唯一状态 → 视图: 状态一变就按 selector 重画上下文徽标 (计划书 §8.3 的
+  // "事件经 reducer 更新 store 后渲染", 不再是回调各自改全局状态)。
+  subscribe(() => renderResearchBadge());
   bindStaticHandlers();
   setMode('idle');
   refreshContexts();
@@ -953,14 +861,16 @@ function boot() {
   // 拉取资料/附件"必须在它**之后** —— 否则刚落实的草稿项目 id 会被清掉。
   sessions.newSession();
   prepareUnifiedIntake();
+  renderResearchBadge();
   // 团队视图: 页面打开即显示团队角色与**真实可用能力** (来自 /api/team/roles)。
   // 迁移期通过 window.AIRTeam 暴露入口, 让浏览器用例不必点击进入某个运行就能验证它。
   exposeTeamApi();
   void team().mount('', '');
 }
 
-/* 迁移期入口 (计划书 §9.3: `window.AIR` 在迁移期提供兼容转发, 最终退出业务写路径)。
- * 团队视图的读接口在这里暴露, 供浏览器验收与调试使用; 它**只读**, 不启动任何任务。 */
+/* 迁移期入口 (`window.AIRTeam` / `window.AIRLibrary` / `window.AIRPaper`)。
+ * 团队视图的读接口在这里暴露, 供浏览器验收与调试使用; 它**只读**, 不启动任何任务。
+ * 注意: 它们读的是**唯一状态**, 不再是 `window.AIR.research` 的第二份副本。 */
 function exposeTeamApi() {
   if (typeof window === 'undefined') return;
   (window as any).AIRTeam = {
@@ -1033,7 +943,3 @@ if (typeof window !== 'undefined') {
     (window as unknown as Record<string, unknown>)[name] = fn;
   });
 }
-
-
-
-

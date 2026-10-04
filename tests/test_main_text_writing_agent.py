@@ -91,18 +91,31 @@ def test_theory_writer_no_longer_builds_the_main_text_itself():
 # ----------------------------------------------------------------------
 # 离线逐字不变 + 降级原因
 # ----------------------------------------------------------------------
-def test_offline_main_text_is_byte_identical_to_the_snapshot_renderer():
-    from src.rag.theory_render import render_markdown
+def test_offline_main_text_is_the_deterministic_unified_render():
+    """离线下主文必须**就是**唯一 IR 的确定性渲染 (逐字一致, 且可复现)。
+
+    这条契约曾经是"与旧快照渲染器逐字一致" —— 那时 Markdown 走旧 IR、`.tex/.pdf` 走唯一
+    IR, 同一次运行的两份产物来自两种表示, 只能靠人工比对。现在两者同源 (§3.3 G17),
+    因此断言改成:**主文 == 唯一 IR 的渲染**, 且逐次调用完全一致 (确定性)。
+    """
+    from src.agents.writing import render_markdown
+    from src.publication.schemas import Manuscript
 
     snapshot = _snapshot()
-    legacy = theory_writer.build_manuscript(snapshot, "Problem 2")
-    legacy_md = render_markdown(legacy)
-
-    manuscript, markdown, writing_map, note = write_main_manuscript(snapshot, "Problem 2")
-    assert markdown == legacy_md, "离线下主文必须与确定性渲染逐字一致"
-    assert writing_map == legacy.writing_map
+    first_manuscript, first_md, writing_map, note = write_main_manuscript(snapshot,
+                                                                         "Problem 2")
+    _second_manuscript, second_md, _map2, _note2 = write_main_manuscript(snapshot,
+                                                                       "Problem 2")
+    # 1) 确定性: 同一输入两次渲染逐字相同
+    assert first_md == second_md, "确定性起草出现了不确定的差异"
+    # 2) 同源: 主文就是唯一 IR 的渲染 (Markdown 与 LaTeX/PDF 用同一份稿件)
+    assert isinstance(first_manuscript, Manuscript), type(first_manuscript)
+    assert first_md == render_markdown(first_manuscript)
+    # 3) 可追溯: 正文里必须出现块锚点, 否则"从论断回到快照对象"只能靠猜
+    assert "<!-- block:" in first_md, first_md[:200]
+    assert first_manuscript.sections, "稿件必须分段"
+    assert writing_map, "写作映射不能为空 (正文要能回到快照对象)"
     assert "确定性起草" in note
-    assert manuscript.blocks, "稿件仍然必须是可渲染的快照稿件"
 
 
 def test_failed_llm_draft_falls_back_and_reports_the_reason():

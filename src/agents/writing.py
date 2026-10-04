@@ -74,9 +74,12 @@ class WritingAgent(AgentBase):
 1. 先按论证需要设计章节 (不是套固定模板): 每个章节说明它承担哪一步论证;
 2. 每个段落给出: 段落角色 (结论/论证/证据/证书/方法/局限/背景)、正文、以及它依据的
    对象 id (来源 / 命题 / 模型 / 图表 / 核验记录);
-3. 引用只使用**给定的来源清单**; 清单里没有的来源一律不得出现;
-4. 未决项与局限必须如实写出来, 不得用模糊措辞掩盖;
-5. 发现缺少依据时, 在 "needs" 里提出需求, 不要自己补数据或条件。
+3. 引用只使用**给定的来源清单**; 清单里没有的来源一律不得出现。
+   **正文里不要写 `[1]`、`[2]` 这类编号** —— 编号由渲染器按来源清单分配;
+   来源清单为空时, 正文一个引用标记都不要写 (没有来源就不可能有引用);
+4. 每一处结论都要在正文里写出它的对象 id (形如 `clm-…`), 否则无法与快照反查;
+5. 未决项与局限必须如实写出来, 不得用模糊措辞掩盖;
+6. 发现缺少依据时, 在 "needs" 里提出需求, 不要自己补数据或条件。
 
 不得: 编造数值/引用/定理; 把非形式化论证写成"已证明"; 把案例类比写成普适结论。
 
@@ -117,6 +120,11 @@ class WritingAgent(AgentBase):
                     "kind": "deterministic_draft", "detail": fallback_note,
                     "blocking": False,
                 })
+
+        # 出版必需结构在**稿件 IR 层**统一补齐, 而不是各起草路径各写一遍 (合并计划
+        # §3.3 G17): 模型起草的稿件与确定性起草的稿件必须在同一套结构契约下,
+        # 否则"预览/Markdown/PDF 同源同版"就只是对其中一条路径成立。
+        finalise_manuscript(manuscript, packet)
 
         # 追溯与缺口检查 (零 LLM)
         problems = self.audit_manuscript(manuscript, packet)
@@ -200,6 +208,10 @@ class WritingAgent(AgentBase):
             snapshot_id=packet.snapshot_id,
             input_versions=dict(packet.input_versions),
         )
+        # 摘要必须是**如实的一句话**: 只说已判定的结论与范围, 不润色、不外推。
+        # 没有明文摘要的稿件过不了出版门槛 ("缺少摘要"), 而用模型润色出来的摘要又会把
+        # "候选"说成"结论" —— 因此这里由已登记对象直接生成 (零 LLM)。
+        manuscript.abstract = _abstract_of(packet)
         intro = Section(heading="1 引言", role="introduction")
         intro.blocks.append(Block(
             role=BlockRole.background,
@@ -213,6 +225,14 @@ class WritingAgent(AgentBase):
                      + ("; 交付形态: " + "、".join(packet.deliverables)
                         if packet.deliverables else ""),
             ))
+        # 关键词: 由任务画像的显式字段组成 (类型 + 交付形态), 不从正文里"提炼"——
+        # 提炼就是生成叙事, 而这一路径的纪律是"只渲染已登记的东西"。
+        keywords = [*packet.subquestion_kinds, *packet.deliverables]
+        if keywords:
+            intro.blocks.append(Block(
+                role=BlockRole.transition,
+                text="关键词: " + "; ".join(dict.fromkeys(keywords)),
+            ))
         manuscript.sections.append(intro)
 
         evidence_section = Section(heading="2 资料与证据", role="method")
@@ -221,7 +241,7 @@ class WritingAgent(AgentBase):
                 source_id = str(source.get("source_id") or source.get("id") or "")
                 block = Block(
                     role=BlockRole.evidence,
-                    text=(f"{index}. {clip(str(source.get('title', '')), 200)}"
+                    text=(f"[{index}] {clip(str(source.get('title', '')), 200)}"
                           f" (定位: {source.get('locator') or '无定位'}; "
                           f"关系: {source.get('relation', 'insufficient')})"),
                     input_versions=dict(packet.input_versions),
@@ -247,7 +267,10 @@ class WritingAgent(AgentBase):
                 claim_id = str(claim.get("id", "") or "")
                 block = Block(
                     role=BlockRole.claim,
-                    text=clip(str(claim.get("statement", "")), 600),
+                    # 论断 id 必须出现在正文里: 出版门槛据此判断"核心结论能否反查",
+                    # 只写块 id 是不够的 (块 id 回到快照, 但读者要按结论编号核对)。
+                    text=(f"[{claim_id}] " if claim_id else "")
+                         + clip(str(claim.get("statement", "")), 600),
                     input_versions=dict(packet.input_versions),
                     needs_check=str(claim.get("status", "")) not in ("supported",),
                 )
@@ -301,6 +324,29 @@ class WritingAgent(AgentBase):
                 limit_section.blocks.append(Block(role=BlockRole.limitation,
                                                   text=clip(item, 400)))
             manuscript.sections.append(limit_section)
+
+        # 参考文献章节必须在位 (§5 阶段 1): 列表本身就来自已登记来源, 没有来源时
+        # 也要**说明检索范围** —— 缺这一节时出版门槛判"不完整", 交付等级因此降级。
+        ref_section = Section(heading="7 参考文献", role="references")
+        if packet.sources:
+            for index, source in enumerate(packet.sources[:20], 1):
+                ref_section.blocks.append(Block(
+                    role=BlockRole.evidence,
+                    text=(f"[{index}] {clip(str(source.get('title', '')), 200)}. "
+                          f"{clip(str(source.get('authors', '')), 120)} "
+                          f"{str(source.get('year', '') or '')}. "
+                          f"定位: {source.get('locator') or '无定位'} "
+                          f"(来源 id: {source.get('source_id') or source.get('id') or '-'})"),
+                    needs_check=not source.get("locator"),
+                ))
+        else:
+            ref_section.blocks.append(Block(
+                role=BlockRole.limitation,
+                text=("本次运行没有可引用的可定位来源。检索范围与授权情况已记录在"
+                      "交付清单中; 未命中不等于相关文献不存在。"),
+                needs_check=True,
+            ))
+        manuscript.sections.append(ref_section)
 
         note = ("确定性起草: 只渲染已登记的结果与来源, 不生成新论断; "
                 "正文未经过写作模型润色")
@@ -363,6 +409,152 @@ class WritingAgent(AgentBase):
 # ----------------------------------------------------------------------
 # 辅助
 # ----------------------------------------------------------------------
+def _abstract_of(packet: WritingPacket) -> str:
+    """由已登记对象生成**如实**的摘要 (零 LLM)。
+
+    它只陈述两件事: 研究了什么, 以及当前登记到的结论状态。绝不把候选说成结论 ——
+    这个函数是降级路径的一部分, 而"没有模型就把候选写成定论"正是最危险的那种失败。
+    """
+    settled = [c for c in packet.claims
+               if str(c.get("status", "")) in ("supported", "refuted")]
+    pending = [c for c in packet.claims
+               if str(c.get("status", "")) not in ("supported", "refuted")]
+    parts = [f"本文研究: {clip(packet.main_question or packet.original_request, 400)}。"]
+    if settled:
+        for claim in settled[:3]:
+            status = "已确证" if str(claim.get("status")) == "supported" else "已被反例否决"
+            parts.append(f"当前登记到 {len(settled)} 条{status}的结论, 例如: "
+                         f"{clip(str(claim.get('statement', '')), 200)}。")
+    if pending:
+        parts.append(f"另有 {len(pending)} 条结论尚未定论, 正文按候选状态如实标注。")
+    if not settled and not pending:
+        parts.append("本次运行未登记到可陈述的结论; 该状态如实记录, 不是零结果。")
+    if packet.unresolved:
+        parts.append(f"存在 {len(packet.unresolved)} 项未决事宜, 见末节。")
+    return "".join(parts)
+
+
+def _references_section(packet: WritingPacket) -> Section:
+    """参考文献章节 (列表来自已登记来源; 没有来源时**说明检索范围**)。
+
+    为什么这一节不能省 (§5 阶段 1): 缺它时出版门槛判"不完整", 交付等级因此降级;
+    而没有来源时更不能凭空省掉 —— 必须让读者看到"这次没有可引用来源"而不是"作者忘了"。
+    """
+    section = Section(heading="7 参考文献", role="references")
+    if packet.sources:
+        for index, source in enumerate(packet.sources[:20], 1):
+            section.blocks.append(Block(
+                role=BlockRole.evidence,
+                text=(f"[{index}] {clip(str(source.get('title', '')), 200)}. "
+                      f"{clip(str(source.get('authors', '')), 120)} "
+                      f"{str(source.get('year', '') or '')}. "
+                      f"定位: {source.get('locator') or '无定位'} "
+                      f"(来源 id: {source.get('source_id') or source.get('id') or '-'})"),
+                needs_check=not source.get("locator"),
+            ))
+    else:
+        section.blocks.append(Block(
+            role=BlockRole.limitation,
+            text=("本次运行没有可引用的可定位来源。检索范围与授权情况已记录在"
+                  "交付清单中; 未命中不等于相关文献不存在。"),
+            needs_check=True,
+        ))
+    return section
+
+
+def finalise_manuscript(manuscript: Manuscript, packet: WritingPacket,
+                        *, max_citations: int = 40) -> list[str]:
+    """把稿件补齐到**出版必需结构** (幂等, 零 LLM)。返回补充说明。
+
+    补的四件事都来自真实存在的对象或正文, 不生成新论断:
+    1. **摘要** (缺失时由已登记结论如实生成);
+    2. **关键词** (由任务画像的显式字段组成);
+    3. **参考文献章节** (来自已登记来源; 无来源时说明检索范围);
+    4. **论断锚点**: 带 claim 引用的块, 正文里必须出现该 claim id —— 出版门槛与
+       追溯视图都据此判断"核心结论能否反查"。
+
+    另外**如实标出**正文里指向文献表之外的引用编号: 模型写出的 `[1][2]` 如果文献表里
+    没有对应条目, 那不是格式问题而是"编造引用", 必须留在未决项里让审阅与人工看到。
+    """
+    notes: list[str] = []
+    if not (manuscript.abstract or "").strip():
+        manuscript.abstract = _abstract_of(packet)
+        notes.append("补写摘要 (由已登记结论如实生成)")
+
+    blocks = manuscript.all_blocks()
+    has_keywords = any("关键词" in (b.text or "") for b in blocks)
+    if not has_keywords:
+        keywords = [*packet.subquestion_kinds, *packet.deliverables]
+        if keywords:
+            target = manuscript.sections[0] if manuscript.sections else None
+            if target is None:
+                target = Section(heading="1 引言", role="introduction")
+                manuscript.sections.append(target)
+            target.blocks.append(Block(
+                role=BlockRole.transition,
+                text="关键词: " + "; ".join(dict.fromkeys(keywords))))
+            notes.append("补关键词 (来自任务画像)")
+
+    has_references = any("参考文献" in (s.heading or "")
+                         for s in manuscript.sections)
+    if not has_references:
+        manuscript.sections.append(_references_section(packet))
+        notes.append("补参考文献章节")
+
+    # 论断锚点: 正文里出现 claim id 才能被反查 (块 id 只回到快照, 不是结论编号)。
+    # 两种情况都要处理:
+    #   1. 块已有 claim 引用 → 正文里补上 id;
+    #   2. 正文里**已经写了** id 但块没有引用记录 → 补上引用 (这是从正文里读出来的
+    #      关联, 不是新造的): 模型起草时常把 [clm-…] 写进正文却忘了登记引用,
+    #      于是"结论已写入正文"在 `writing_map` 里看不见, 交付门槛判为未映射。
+    known_claims = {str(c.get("id", "")) for c in packet.claims if c.get("id")}
+    for block in manuscript.all_blocks():
+        text = block.text or ""
+        existing = {ref.id for kind, ref in zip(block.ref_kinds, block.refs)
+                    if kind == RefKind.claim.value}
+        for claim_id in sorted(known_claims):
+            if claim_id in text and claim_id not in existing:
+                block.add_ref(RefKind.claim.value, ObjectRef(id=claim_id))
+                existing.add(claim_id)
+        for claim_id in sorted(existing):
+            if claim_id and claim_id not in text:
+                block.text = f"[{claim_id}] " + text
+                text = block.text
+
+    # 编造引用检测: 正文里的 [n] 必须在文献表里存在
+    listed = _reference_numbers(manuscript)
+    cited = {int(n) for n in re.findall(r"\[(\d+)\]", _manuscript_text(manuscript))}
+    dangling = sorted(n for n in cited if n not in listed and n <= max_citations)
+    if dangling and packet.sources:
+        notes.append(f"正文引用了文献表之外的编号 {dangling}: 按未决项处理, 不当作已核实引用")
+        manuscript.gaps.append({
+            "kind": "unresolved_citation",
+            "detail": f"正文出现文献表之外的引用编号 {dangling}",
+            "blocking": False,
+        })
+    return notes
+
+
+def _manuscript_text(manuscript: Manuscript) -> str:
+    return "\n".join(b.text or "" for b in manuscript.all_blocks())
+
+
+def _reference_numbers(manuscript: Manuscript) -> set[int]:
+    """文献表里实际存在的编号 (按 `[n]` 行首计; 我们的文献表就是这种形态)。"""
+    numbers: set[int] = set()
+    in_references = False
+    for section in manuscript.sections:
+        if "参考文献" in (section.heading or ""):
+            in_references = True
+            continue
+        if not in_references:
+            continue
+        for block in section.blocks:
+            for match in re.finditer(r"(?:^|\s)\[(\d+)\]", block.text or ""):
+                numbers.add(int(match.group(1)))
+    return numbers
+
+
 def _is_revision_task(task: AgentTask) -> bool:
     return "修订" in task.objective or "revise" in task.objective.lower()
 
@@ -374,6 +566,15 @@ def _gap_texts(manuscript: Manuscript) -> list[str]:
 
 
 def _title_of(packet: WritingPacket) -> str:
+    """稿件标题: 用主问题的一句话, 并**去掉 Markdown 标记**。
+
+    题面常常以 Markdown 标题给出 (`# Problem 2：…`), 直接当标题会渲染成
+    `# # Problem 2…` —— 用户看到的是两个井号。这里只做清洗, 不重写内容。
+    """
+    raw = (packet.main_question or packet.original_request or "研究报告").strip()
+    first = raw.splitlines()[0] if raw else "研究报告"
+    cleaned = first.lstrip("#").strip().strip("*_`").strip()
+    return clip(cleaned or "研究报告", 200)
     question = packet.main_question or packet.original_request or "研究报告"
     first = re.split(r"[。\n]", question.strip())[0]
     return clip(first, 80) or "研究报告"
@@ -550,6 +751,11 @@ def to_publication_manuscript(snapshot_manuscript: Any, snapshot: Any = None
             for c in getattr(snapshot, "claims", []) if getattr(c, "id", "")},
     )
     section = Section(heading="正文", role="result")
+    # **块锚点必须确定性**: `Block.block_id` 默认是随机 id, 于是"同一份冻结快照渲染两次"
+    # 会得到不同的正文锚点 —— 离线交付不再是可复现的 (同一输入两次产物不同), 版本之间
+    # 也无法按锚点对齐。这里按**位置**给稳定 id (文档序), 只对"由快照确定性渲染"这条
+    # 路径负责; 模型起草的稿件保留它自己的 id (内容本来就不同)。
+    position = 0
     for block in getattr(snapshot_manuscript, "blocks", []):
         kind = str(getattr(block, "kind", "") or "prose")
         text = str(getattr(block, "text", "") or "")
@@ -562,7 +768,9 @@ def to_publication_manuscript(snapshot_manuscript: Any, snapshot: Any = None
             continue
         chunk = Block(role=_ROLE_BY_KIND.get(kind, BlockRole.reasoning),
                       heading=title, text=text,
+                      block_id=f"blk-{position}",
                       input_versions=dict(manuscript.input_versions))
+        position += 1
         if kind == "equation":
             chunk.math = text
             chunk.text = ""
@@ -608,7 +816,11 @@ def write_main_manuscript(
                     task, context, runtime, usage or UsageRecord(), packet)
                 if drafted is not None:
                     legacy = _snapshot_manuscript_from_blocks(drafted)
-                    return (legacy, _legacy_render(legacy),
+                    unified = to_publication_manuscript(legacy, snapshot)
+                    # **Markdown 与 LaTeX 从同一份稿件出来** (§3.3 G17): 此前 Markdown
+                    # 走旧快照 IR, 而交付的 .tex/.pdf 走唯一 IR —— 同一次运行的两份产物
+                    # 来自两种表示, "同源同版"只能靠人工比。现在两者都是 `Manuscript`。
+                    return (unified, render_markdown(unified),
                             _writing_map_of(drafted), "由写作智能体起草 (LLM)")
                 if parse_note:
                     reasons.append(parse_note)
@@ -616,21 +828,11 @@ def write_main_manuscript(
             reasons.append(f"写作智能体调用失败: {type(e).__name__}: {e}")
 
     manuscript, writing_map = manuscript_from_snapshot(snapshot, topic, delivery_level)
+    unified = to_publication_manuscript(manuscript, snapshot)
     note = "确定性起草 (由冻结快照渲染, 未经过写作模型润色)"
     if reasons:
         note += "; 降级原因: " + "; ".join(reasons)
-    return manuscript, _legacy_render(manuscript), writing_map, note
-
-
-def _legacy_render(manuscript: Any) -> str:
-    """用交付链认的渲染器把稿件渲染成 Markdown (编号与锚点由它分配)。
-
-    `render_markdown` 属于 `rag.theory_render` (稿件中间表示层) —— 不在
-    `agents.theory_writer` 里, 后者只负责"由快照组装稿件"。
-    """
-    from src.rag.theory_render import render_markdown as render
-
-    return render(manuscript)
+    return unified, render_markdown(unified), writing_map, note
 
 
 def _snapshot_manuscript_from_blocks(manuscript: Manuscript) -> Any:

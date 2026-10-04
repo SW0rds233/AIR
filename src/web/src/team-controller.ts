@@ -1,14 +1,16 @@
 /**
- * 团队工作台接入层 (合并计划 §9.2 / §9.3)。
+ * 团队工作台接入层 (合并计划 §9.2 / §9.3 / §8.1)。
  *
  * 定位: 把**已有的**理论工作台 (`app.ts` 的 `renderWorkbench`) 与新的团队视图拼在
  * 一起, 而不把两套状态再复制一份。做法:
  *
- * - 页面只有**一份**团队状态: `ResearchStore` 的 `entities`/`transport`/`ui` 三片;
+ * - 页面只有**一份**状态: `state/research-store.ts` 的
+ *   `selection`/`entities`/`transport`/`ui` —— 本模块**不再持有**模块级 store;
  * - 数据来源是后端已有的投影接口 (`/api/team/roles`、`/api/team/{project}/{run}`),
  *   视图**不推断**科学结论, 也不在页面里另做一套主控调度;
- * - 旧的 `window.AIR.research` 在这一层被**单向映射**到 `selection`
- *   (计划书 §9.3: "不能在兼容对象与新 store 之间双向同步");
+ * - 身份 (project/problem/session/run) 由 `selection` 决定: 挂载时按显式身份做
+ *   一次**整体切换** (`switchSelection`), 身份没变就不切 —— 不再从旧全局状态
+ *   (`window.AIR.research`) 单向同步 (G19: `syncSelectionFromLegacy` 已删除);
  * - 每次加载都带加载代号, 迟到响应直接丢弃。
  *
  * 迁移期它渲染进 `#workbench` 的同一个容器: 团队视图在前 (主控理解与派工), 旧工作台
@@ -18,8 +20,9 @@
 import { applyEvent, type EventEffect, type TeamEvent } from './events/session-events';
 import { ENDPOINTS } from './api/research-client';
 import {
-  emptyStore,
-  reduce,
+  dispatch,
+  getState,
+  switchSelection,
   type ResearchStore,
   type TeamRoleRow,
 } from './state/research-store';
@@ -32,38 +35,13 @@ export const TEAM_API = {
     ENDPOINTS.teamProjection(projectId, runId),
 } as const;
 
-let store: ResearchStore = emptyStore();
-let rolesLoaded = false;
-
+/** 唯一状态的只读入口 (迁移期入口 `window.AIRTeam.store()` 也用它)。 */
 export function getStore(): ResearchStore {
-  return store;
+  return getState();
 }
 
-export function dispatch(action: Parameters<typeof reduce>[1]): ResearchStore {
-  store = reduce(store, action);
-  return store;
-}
-
-/** 兼容层: 只把旧 `window.AIR.research` 的身份**单向**同步进 selection。 */
-export function syncSelectionFromLegacy(research: {
-  projectId?: string; problemId?: string; sessionId?: string;
-  threadId?: string; runId?: string;
-} | null | undefined): void {
-  if (!research) return;
-  const next = {
-    projectId: String(research.projectId || ''),
-    problemId: String(research.problemId || ''),
-    sessionId: String(research.sessionId || ''),
-    threadId: String(research.threadId || ''),
-    runId: String(research.runId || ''),
-  };
-  const current = store.selection;
-  const changed = next.projectId !== current.projectId
-    || next.problemId !== current.problemId
-    || next.sessionId !== current.sessionId
-    || next.runId !== current.runId;
-  if (!changed) return;
-  dispatch({ type: 'selection/open', selection: next });
+export function dispatchAction(action: Parameters<typeof dispatch>[0]): ResearchStore {
+  return dispatch(action);
 }
 
 // ----------------------------------------------------------------------
@@ -106,13 +84,13 @@ export async function loadRoles(deps: LoadDeps = {}): Promise<TeamRoleRow[]> {
   const fetchJson = deps.fetchJson ?? defaultFetchJson;
   const data = await fetchJson(TEAM_API.roles);
   const roles = (data?.roles ?? []).map(toRoleRow);
+  // "已读过"由状态本身记录: 空列表也是有效结果, 不能靠 roles.length 推断
   dispatch({ type: 'entities/roles', roles });
-  rolesLoaded = true;
   return roles;
 }
 
 export function rolesAreLoaded(): boolean {
-  return rolesLoaded;
+  return getState().entities.rolesLoaded;
 }
 
 /**
@@ -124,21 +102,22 @@ export function rolesAreLoaded(): boolean {
 export async function loadRunProjection(
   projectId: string, runId: string, deps: LoadDeps = {},
 ): Promise<boolean> {
-  const token = store.ui.loadToken;
+  const token = getState().ui.loadToken;
   const fetchJson = deps.fetchJson ?? defaultFetchJson;
   let data: any;
   try {
     data = await fetchJson(TEAM_API.projection(projectId, runId));
   } catch (error) {
-    if (token !== store.ui.loadToken) return false;
+    if (token !== getState().ui.loadToken) return false;
     dispatch({ type: 'transport/status', status: 'offline', error: String(error) });
     deps.onNotice?.(`读取团队状态失败: ${String(error)}`);
     return false;
   }
   // 加载期间身份被切走 -> 丢弃这份迟到结果 (§9.3)
-  if (token !== store.ui.loadToken
-      || store.selection.projectId !== projectId
-      || store.selection.runId !== runId) {
+  const state = getState();
+  if (token !== state.ui.loadToken
+      || state.selection.projectId !== projectId
+      || state.selection.runId !== runId) {
     return false;
   }
   const tasks = (data?.tasks ?? []).map((raw: any) => ({
@@ -187,30 +166,26 @@ export function renderTeamSection(targets?: string[]): string {
       && !targets.includes('timeline') && !targets.includes('review')) {
     return '';
   }
-  return renderTeamBoard(store);
+  return renderTeamBoard(getState());
 }
 
-/** 事件接入: 把后端事件交给状态层 (纯函数, 不改 DOM)。 */
+/** 事件接入: 把后端事件交给状态层 (纯函数, 不改 DOM), 结果装入唯一 store。 */
 export function applyTeamEvent(event: TeamEvent): EventEffect {
-  const effect = applyEvent(store, event);
-  store = effect.store;
+  const effect = applyEvent(getState(), event);
+  dispatch({ type: 'state/replace', state: effect.store });
   return effect;
 }
 
+/** 会话级整体重置 (新会话/删除会话): 团队投影与连接状态一起清空。 */
 export function resetTeamStore(): void {
-  store = emptyStore();
-  rolesLoaded = false;
+  dispatch({ type: 'entities/clear' });
+  dispatch({ type: 'transport/reset' });
 }
 
 // ----------------------------------------------------------------------
 // 页面接入 (§9.5: 把团队区块挂进 `#workbench`; `app.ts` 只调用)
 // ----------------------------------------------------------------------
 export interface TeamMountDeps {
-  /** 只读兼容层状态 (`window.AIR.research`), 只用于**单向**填 selection。 */
-  legacyResearch(): { projectId?: string; problemId?: string; sessionId?: string;
-                      threadId?: string; runId?: string } | null;
-  /** 当前研究问题 id (selection 的一部分)。 */
-  problemId(): string;
   /** 用户可见提示 (读取失败不阻断旧工作台)。 */
   notify(text: string, cls?: string): void;
   /** 更新连接/加载状态 (状态条)。 */
@@ -233,7 +208,7 @@ export interface TeamMount {
  */
 export function createTeamMount(deps: TeamMountDeps): TeamMount {
   async function ensureRoles() {
-    if (rolesLoaded) return;
+    if (rolesAreLoaded()) return;
     try {
       await loadRoles();
     } catch (error) {
@@ -272,15 +247,14 @@ export function createTeamMount(deps: TeamMountDeps): TeamMount {
     }
     deps.status?.('loading');
     await ensureRoles();
-    const legacy = deps.legacyResearch();
-    syncSelectionFromLegacy({
+    const target = String(runId || getState().selection.runId || '');
+    // 身份进唯一 store (§8.1): 只有真的换了身份才整体切换, 否则一次普通刷新会
+    // 把用户正展开的对象详情关掉。这里**不再**从 `window.AIR.research` 兼容同步。
+    switchSelection({
       projectId,
-      problemId: deps.problemId(),
-      sessionId: (legacy && legacy.sessionId) || '',
-      threadId: (legacy && legacy.threadId) || '',
-      runId: runId || (legacy && legacy.runId) || '',
+      problemId: getState().selection.problemId,
+      runId: target,
     });
-    const target = String(runId || (legacy && legacy.runId) || '');
     if (projectId && target) {
       try {
         await loadRunProjection(projectId, target);
@@ -294,4 +268,3 @@ export function createTeamMount(deps: TeamMountDeps): TeamMount {
 
   return { mount, rolesOnly };
 }
-

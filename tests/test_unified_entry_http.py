@@ -70,15 +70,15 @@ def test_mode_free_entry_runs_the_unified_engine(client):
     start = client.post("/api/sessions", json=body)
     assert start.status_code == 200, start.text[:400]
     payload = start.json()
-    # 服务端决定引擎: 不再是"未指定即综述"
-    assert payload["mode"] == "theory", payload
+    # 只有一种引擎 (G01): 请求里没有 mode 字段, 回传的是团队引擎
+    assert payload["mode"] == "team", payload
     assert payload["project_id"] == "unified" and payload["problem_id"] == "p1"
     assert payload["run_id"], "统一入口同样必须回传运行身份"
 
     thread_id = payload["thread_id"]
     state = _wait_done(client, thread_id)
     assert state["status"] == "done", state
-    assert state["mode"] == "theory"
+    assert state["mode"] == "team"
 
     # 事件流: 序号递增且可回放
     events = client.get(f"/api/sessions/{thread_id}/events", params={"last_event_id": 0})
@@ -100,4 +100,8 @@ def test_mode_free_entry_runs_the_unified_engine(client):
     assert manifest["usage"]["cost_usd"] == 0.0, manifest["usage"]
     trace = manifest.get("manuscript_traceability", {})
     assert trace.get("checked") in ("markdown", "snapshot_only"), trace
-    assert any(n.endswith("publication.pdf") for n in names), names[:10]
+    # 多格式同源 (G17): PDF 与 Markdown 来自**同一份**文稿 IR, 清单必须记录编译产物,
+    # 且产物列表里真的存在那个文件 (编译成功但没落盘的"看起来有 PDF"要被挡住)。
+    pdf_name = str(manifest.get("pdf") or "")
+    assert pdf_name.endswith(".pdf"), manifest.get("pdf")
+    assert any(n.endswith("manuscript.pdf") for n in names), names[:10]

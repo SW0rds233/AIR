@@ -12,8 +12,9 @@ from __future__ import annotations
 4. **暂停点**: 非等待态不接受 respond (409), 不把回答送错对象。
 
 历史遗留说明 (2026-09-24 复核, 仍适用):
-- 综述/团队会话的身份是 `thread_id/session_id/run_id`; `project_id/problem_id` 是
-  形式化研究的对象范围, 不该强求;
+- 综述/团队会话的身份是 `thread_id/session_id/run_id` **加上** `project_id/problem_id`
+  (合并计划 §3.1 G03 已改为: 身份在创建 run 之前分配, 并整份注入团队 —— 团队按
+  project 建研究库、按 problem/run 裁剪对象, 所以这几个 ID 必须与 HTTP 返回一致);
 - `/events` 是 SSE 长连接: 会话未收尾时读 `.text` 会永久阻塞, 必须先让会话收尾
   (stop / 等 done) 再读完整流。
 """
@@ -64,9 +65,15 @@ def test_team_session_starts_and_reports_identity(client):
     assert body["mode"] == "team"
     assert body["run_id"], "统一入口同样需要运行身份"
     assert body["session_id"] and body["thread_id"]
-    # 团队会话的身份是 thread/session/run: `project_id/problem_id` 是形式化研究的
-    # 对象范围, 团队引擎既不依赖也不回填它 (不该强求一个用不上的东西)
-    assert body["project_id"] == "" and body["problem_id"] == ""
+    # G03: 团队**必须**拿到研究身份 —— 它按 project 建研究库、按 problem/run 裁剪对象
+    # 与交付包。因此这里断言的是"HTTP 返回的 ID 与团队装配实际使用的 ID 完全一致",
+    # 而不是"空着也行"(旧行为: 先建 TeamRun 再回填 request, 团队拿的是自动 ID)。
+    assert body["project_id"] == "entry" and body["problem_id"] == "p1"
+    from src import server as _server
+
+    team = _server.SESSIONS[body["thread_id"]].app.session.team
+    assert (team.project_id, team.problem_id, team.run_id) == (
+        body["project_id"], body["problem_id"], body["run_id"])
 
     state = _wait_status(client, body["thread_id"],
                          {"running", "waiting", "done", "stopped", "error"})

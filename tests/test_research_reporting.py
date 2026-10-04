@@ -14,6 +14,7 @@ from __future__ import annotations
 import pytest
 
 from src.research import reporting
+from src.research.inspection import StoreInspection
 
 
 def _empty_inputs(tmp_path, pid: str = "rep1"):
@@ -74,10 +75,19 @@ def test_counts_reflect_object_statuses():
 def test_projection_exposes_frontend_contract_and_notes(tmp_path):
     spec, engine, store = _empty_inputs(tmp_path, "rep2")
     try:
+        # 投影只接受**已算好的值**: 传送留给只读检视层 (`research/inspection.py`),
+        # 因此这里不再传引擎 —— 一个只读投影不该依赖能执行研究动作的组件。
+        view = StoreInspection(store, spec)
         payload = reporting.workbench_projection(
             project_id="rep2", problem_id="p1", claims=[], obligations=[],
-            verifications=[], evidence=[], routes=[], models=[], engine=engine,
+            verifications=[], evidence=[], routes=[], models=[],
             store=store, problems=[{"problem_id": "p1"}], spec=spec,
+            run_id=view.identity()["run_id"], branch_id=view.identity()["branch_id"],
+            metrics=view.metrics([], problem_id="p1"),
+            model_selection=view.model_selection([], available=None),
+            modeling={}, assumptions=view.assumptions(), decisions=view.decisions(),
+            events=view.event_digest([], problem_id="p1"), gaps=[],
+            budget=view.budget_payload(),
             experiment_specs=[], novelty_records=[], attempts=[],
         )
         for key in ("project_id", "problem_id", "run_id", "branch_id", "snapshots",
@@ -130,11 +140,18 @@ def test_projection_is_read_only(tmp_path):
         assert engine.bootstrap()
         before = [(c.id, c.status.value) for c in engine._claims()]
         assert before
+        view = StoreInspection(store, spec)
         reporting.workbench_projection(
             project_id="rep3", problem_id="p1", claims=engine._claims(),
             obligations=engine._obligations(), verifications=[], evidence=[],
-            routes=[], models=[], engine=engine, store=store,
+            routes=[], models=[], store=store,
             problems=[{"problem_id": "p1"}], spec=spec,
+            run_id=view.identity()["run_id"], branch_id=view.identity()["branch_id"],
+            metrics=view.metrics(engine._claims(), problem_id="p1"),
+            model_selection=view.model_selection(engine._claims(), available=None),
+            modeling={}, assumptions=view.assumptions(), decisions=view.decisions(),
+            events=view.event_digest(engine._claims(), problem_id="p1"), gaps=[],
+            budget=view.budget_payload(),
             experiment_specs=[], novelty_records=[], attempts=[],
         )
         after = [(c.id, c.status.value) for c in engine._claims()]

@@ -25,6 +25,11 @@ import pytest
 
 from src import server
 
+def _checkpointer_of(session) -> object:
+    """会话的检查点连接 (桩图要与真实图用同一个, 否则续跑读不到状态)。"""
+    return getattr(session, "checkpointer", None)
+
+
 
 # ----------------------------------------------------------------------
 # 夹具
@@ -76,7 +81,8 @@ def _quiet_graph(checkpointer=None):
 @pytest.fixture
 def stub_pipeline(monkeypatch):
     """让 `Session(...)` 不真建图 (与 tests/test_server.py 同一手法)。"""
-    monkeypatch.setattr(server, "build_theory_pipeline", _quiet_graph)
+    monkeypatch.setattr(server, "_build_team_app",
+                        lambda session: _quiet_graph(_checkpointer_of(session)))
     return _quiet_graph
 
 
@@ -174,7 +180,8 @@ def test_event_views_are_views_not_second_copies(stub_pipeline):
 # 2. interrupt 期间的停止收尾
 # ----------------------------------------------------------------------
 def test_stop_flag_while_waiting_ends_as_stopped_without_double_answer(monkeypatch):
-    monkeypatch.setattr(server, "build_theory_pipeline", _stub_graph)
+    monkeypatch.setattr(server, "_build_team_app",
+                        lambda session: _stub_graph(_checkpointer_of(session)))
     session = _session("t-stop-waiting")
     thread, _ = _drive_to_interrupt(session)
     assert session.status == "waiting"
@@ -200,7 +207,8 @@ def test_stop_flag_while_waiting_ends_as_stopped_without_double_answer(monkeypat
 
 def test_stop_flag_set_before_iteration_ends_as_stopped(monkeypatch):
     """已置位的 stop_flag 必须让循环收尾为 stopped (而不是继续跑到 done)。"""
-    monkeypatch.setattr(server, "build_theory_pipeline", _quiet_graph)
+    monkeypatch.setattr(server, "_build_team_app",
+                        lambda session: _quiet_graph(_checkpointer_of(session)))
     session = _session("t-stop-early")
     session.stop_flag.set()
     server._run_session(session, {"interactive": False})

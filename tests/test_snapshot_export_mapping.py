@@ -15,12 +15,12 @@ from __future__ import annotations
 
 import pytest
 
-from src.graph.team_session import (
+from src.graph.team_session import _snapshot_from_store
+from src.research.snapshot import (
     EVIDENCE_FIELD_ALIASES,
     SUPPORT_RELATION_MAP,
     _evidence_of,
     _model_of,
-    _snapshot_from_store,
     _validation_plan_of,
 )
 
@@ -176,7 +176,7 @@ def test_empty_store_still_returns_an_honest_snapshot():
 @pytest.mark.parametrize("kind", ["evidence", "claim", "model", "obligation"])
 def test_each_kind_maps_without_throwing(kind):
     """每类对象的最小合法行都能映射 (不抛异常 = 不会被静默跳过)。"""
-    from src.graph import team_session
+    from src.research import snapshot as snapshot_module
 
     samples = {
         "evidence": {"id": "x", "title": "t"},
@@ -184,10 +184,10 @@ def test_each_kind_maps_without_throwing(kind):
         "model": {"id": "x", "name": "M", "natural_language": "n"},
         "obligation": {"id": "x", "statement": "s"},
     }
-    mapper = {
-        "evidence": team_session._evidence_of,
-        "claim": team_session._claim_of,
-        "model": team_session._model_of,
-        "obligation": team_session._obligation_of,
-    }[kind]
-    assert mapper(samples[kind]) is not None
+    mappers = {
+        "evidence": snapshot_module._evidence_of,
+        "claim": snapshot_module._claim_of,
+        "model": snapshot_module._model_of,
+        "obligation": snapshot_module._obligation_of,
+    }
+    assert mappers[kind](samples[kind]) is not None

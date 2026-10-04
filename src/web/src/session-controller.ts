@@ -1,5 +1,5 @@
 /**
- * 会话操作单一入口 (合并计划 §9.5 `session-controller.ts`)。
+ * 会话操作单一入口 (合并计划 §9.5 `session-controller.ts` / §8.1)。
  *
  * 归属这里的操作都是"会话级生命周期": 新建 / 查看历史 / 继续 / 停止 / 结束 / 删除。
  * 迁移前它们散在 `app.ts` 各处, 于是同一件事有几套写法:
@@ -11,7 +11,12 @@
  * 现在统一为: **旧请求先作废 + 状态整体切换 + 明确的查看/继续/停止语义**。
  * 统一入口 (本轮迁移) 之后这里不再有"运行模式"要恢复或回放 —— 模式选择器已删除。仍然:
  *
- * - 唯一状态是 `window.AIR.research` (经 `deps.applyResearch`), 这里不存第二份;
+ * - 唯一状态是 `state/research-store.ts`; 本模块**不持有**任何状态副本, 也不接
+ *   `applyResearch(patch)` 这类兼容写入口 —— 身份变化直接派发 store action
+ *   (`selection/open` / `selection/patch` / `selection/reset`), §8.1 要求
+ *   "session-controller 的 applyResearch/reset 改为 store action";
+ * - 身份切换 (`selection/open` / `selection/reset`) 会推进加载代号, 在途的工作台请求
+ *   因此自动作废 (迟到回包不得覆盖新会话), 不再另设一套序号;
  * - 行为与 `id` / 选择器零变化 (历史下拉框、回看抽屉、日志容器都保持原样);
  * - 渲染判定在 `views/project-navigation.ts` (纯函数、可单测), 这里只做装配;
  * - 不新增内联事件处理器 (CSP 不变)。
@@ -31,6 +36,7 @@ import {
   client as defaultApi,
   type ResearchClient,
 } from './api/research-client';
+import { dispatch, getState } from './state/research-store';
 
 export interface SessionDeps {
   // 连接 (SSE) 启停: 重连策略归 events/ 层
@@ -47,13 +53,6 @@ export interface SessionDeps {
   refreshContexts(): void;
   refreshHistorySelect(): void;
   loadArtifact(name: string): void;
-
-  // 唯一研究状态 (只经这里读写)
-  applyResearch(patch: Record<string, any>): void;
-  threadId(): string;
-  sessionId(): string;
-  /** 作废在途的工作台请求 (新会话/新切换都不得被旧回包覆盖)。 */
-  workbenchSeqBump(): void;
 
   // 团队状态整体重置 (会话级)
   resetTeam(): void;
@@ -85,6 +84,15 @@ function selectorValue(value: string): string {
   return /^[A-Za-z0-9_.:-]+$/.test(value) ? value : '';
 }
 
+/** 当前线程/会话身份 (**只读 selector**, 不在这里另存一份)。 */
+function threadId(): string {
+  return getState().selection.threadId || '';
+}
+
+function sessionId(): string {
+  return getState().selection.sessionId || '';
+}
+
 export function createSessionController(deps: SessionDeps): SessionController {
   const api = deps.api ?? defaultApi();
 
@@ -92,9 +100,10 @@ export function createSessionController(deps: SessionDeps): SessionController {
   // 新建 / 切换
   // ------------------------------------------------------------------
   function newSession() {
-    // F1-2: 新会话必须清空旧项目/问题与工作台绑定, 否则新研究会沿用上一个问题
-    deps.applyResearch({threadId: '', sessionId: '', projectId: '', problemId: '', runId: ''});
-    deps.workbenchSeqBump();           // 作废在途的工作台请求
+    // F1-2: 新会话必须清空旧项目/问题与工作台绑定, 否则新研究会沿用上一个问题。
+    // 唯一状态的"清空身份"是一个 store action; 它同时推进加载代号, 于是在途的
+    // 工作台请求 (旧会话的迟到回包) 自动作废。
+    dispatch({ type: 'selection/reset' });
     deps.closeStream();
     // 团队状态同样是**会话级**: 新会话必须整体重置, 否则会显示上一个 run 的任务
     deps.resetTeam();
@@ -136,13 +145,17 @@ export function createSessionController(deps: SessionDeps): SessionController {
     // 统一入口: 不再有"模式"需要恢复或回放 (模式选择器已删除)。
     api.json(ENDPOINTS.conversation(String(sid))).then((rec: any) => {
       const req = rec.request || {};
-      deps.applyResearch({
-        sessionId: sid,
-        // 服务端记录的引擎标识只用于显示
-        mode: String(req.mode || ''),
-        projectId: req.project_id || '',
-        problemId: req.problem_id || '',
-        runId: req.run_id || rec.run_id || '',
+      dispatch({
+        type: 'selection/open',
+        selection: {
+          sessionId: String(sid || ''),
+          // 服务端记录的引擎标识只用于显示
+          mode: String(req.mode || ''),
+          projectId: req.project_id || '',
+          problemId: req.problem_id || '',
+          runId: req.run_id || rec.run_id || '',
+          threadId: '',
+        },
       });
       // 历史会话带的是**真实**项目 id (不是草稿): 允许工作台查询它。
       // 字段必须在工作台查询之前写上, 否则 `workbenchTargetPid()` 会按草稿/空身份拒绝查询。
@@ -154,7 +167,7 @@ export function createSessionController(deps: SessionDeps): SessionController {
       if ((rec.status || '') !== 'done') {
         resumeSession(sid);
       } else {
-        deps.applyResearch({threadId: ''});
+        dispatch({ type: 'selection/patch', patch: { threadId: '' } });
         deps.setMode('idle');
         deps.setStatus('已完成', 'done');
       }
@@ -181,7 +194,7 @@ export function createSessionController(deps: SessionDeps): SessionController {
     api.json(ENDPOINTS.sessionResume(String(sid)), {method: 'POST'})
       .then((d: any) => {
         if (d.thread_id) {
-          deps.applyResearch({threadId: d.thread_id});
+          dispatch({ type: 'selection/patch', patch: { threadId: String(d.thread_id) } });
           deps.setMode('running');
           deps.setStatus('恢复会话…', 'running');
           deps.connectStream(d.thread_id);
@@ -196,7 +209,7 @@ export function createSessionController(deps: SessionDeps): SessionController {
       .then((d: any) => {
         if (d.thread_id) {
           closeHistory();
-          deps.applyResearch({threadId: d.thread_id});
+          dispatch({ type: 'selection/patch', patch: { threadId: String(d.thread_id) } });
           const log = byId('log');
           if (log) log.innerHTML = '';
           deps.setMode('running');
@@ -216,7 +229,7 @@ export function createSessionController(deps: SessionDeps): SessionController {
       .then((d: any) => {
         const sel = byId<HTMLSelectElement>('hist');
         if (!sel) return;
-        const prev = deps.sessionId();
+        const prev = sessionId();
         sel.innerHTML = '<option value="">+ 历史会话</option>';
         (d.conversations || []).forEach((c: any) => {
           const view = historyOption(c);
@@ -313,7 +326,9 @@ export function createSessionController(deps: SessionDeps): SessionController {
         if (state.snapshot_id) lines.push('快照: ' + state.snapshot_id);
         if (state.package_dir) lines.push('交付包: ' + state.package_dir);
         deps.addMsg(lines.join('\n'), 'msg-done');
-        if (state.project_id) deps.applyResearch({projectId: state.project_id});
+        if (state.project_id) {
+          dispatch({ type: 'selection/patch', patch: { projectId: String(state.project_id) } });
+        }
         deps.switchTab('workbench');
         deps.refreshWorkbench();
       } else {
@@ -345,7 +360,7 @@ export function createSessionController(deps: SessionDeps): SessionController {
   function finishRun() {
     deps.setMode('idle');
     // 结束的只是**本次运行**的线程; 项目与问题仍是当前研究上下文, 工作台继续指向它
-    deps.applyResearch({threadId: ''});
+    dispatch({ type: 'selection/patch', patch: { threadId: '' } });
     deps.closeStream();
     deps.refreshContexts();
     deps.refreshHistorySelect();
@@ -353,7 +368,7 @@ export function createSessionController(deps: SessionDeps): SessionController {
   }
 
   function stopSession() {
-    const tid = deps.threadId();
+    const tid = threadId();
     if (!tid) return;
     api.json(ENDPOINTS.sessionStop(tid), {method: 'POST'}).catch(() => {});
     deps.addMsg('已请求停止（等待当前节点完成）…', 'msg-agent');
@@ -361,7 +376,7 @@ export function createSessionController(deps: SessionDeps): SessionController {
 
   function deleteSession() {
     const sel = byId<HTMLSelectElement>('hist');
-    const sid = deps.sessionId() || val('hist');
+    const sid = sessionId() || val('hist');
     if (!sid) { alert('请先在「历史会话」下拉框选择要删除的会话'); return; }
     const label = sel && sel.selectedOptions[0] ? sel.selectedOptions[0].textContent : sid;
     if (!confirm('确认删除该会话？\n\n' + label + '\n\n将删除以下内容（不可恢复）：\n' +
@@ -375,7 +390,7 @@ export function createSessionController(deps: SessionDeps): SessionController {
       .then((r: any) => r.json()).then((d: any) => {
         const removed = (d.removed || []).join('、');
         deps.addMsg(removed ? '已删除会话: ' + removed : '会话已删除', 'msg-agent');
-        deps.applyResearch({threadId: '', sessionId: ''});
+        dispatch({ type: 'selection/patch', patch: { threadId: '', sessionId: '' } });
         deps.closeStream();
         const log = byId('log');
         if (log) log.innerHTML = '';
@@ -410,4 +425,3 @@ export function createSessionController(deps: SessionDeps): SessionController {
     viewConversation,
   };
 }
-

@@ -11,10 +11,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-from src.agents.citation_guard import auto_fix_citations, validate_draft_citations
-from src.agents.citation_prechecker import verify_reference_list
+from src.publication.citation_checks import (auto_fix_citations,
+                                              validate_draft_citations)
+from src.publication.evidence_ledger import verify_reference_list
 from src.tools.citation_verifier import _doi_exists_via_crossref
 from src.tools.search_tools import _dedup_key, _norm_title, merge_papers
 from src.utils.context_budget import budget_text, list_to_budgeted
@@ -189,94 +190,11 @@ def test_doi_exists_none_on_empty(mock_get):
     mock_get.assert_not_called()
 
 
-# ---------- literature_reviewer agent 循环 ----------
-
-def test_format_papers_for_tool():
-    from src.agents.literature_reviewer import _format_papers_for_tool
-
-    papers = [
-        {"title": "Paper One", "year": "2023", "source": "arXiv", "citations": 5, "abstract": "摘要内容"},
-    ]
-    out = _format_papers_for_tool(papers)
-    assert "Paper One" in out
-    assert "2023" in out
-    assert "摘要" in out
-
-
-def test_agent_loop_executes_tools_and_finishes():
-    """LLM 第一轮返回 1 个工具调用，第二轮返回最终文本 → notes 应为最终文本"""
-    from src.agents.literature_reviewer import _TOOL_MAP, _run_agent_loop
-
-    first = MagicMock()
-    first.content = ""
-    first.response_metadata = {}
-    first.tool_calls = [
-        {"name": "search_all_sources", "args": {"query": "rf fingerprinting"}, "id": "call_1"}
-    ]
-    second = MagicMock()
-    second.content = "最终综述素材"
-    second.response_metadata = {}
-    second.tool_calls = []
-
-    fake_llm = MagicMock()
-    fake_llm.invoke.side_effect = [first, second]
-
-    # 打桩 search_all_sources.func, 避免真实网络
-    original = _TOOL_MAP["search_all_sources"]
-    fake_tool = MagicMock()
-    fake_tool.func = lambda query, max_results=10: [
-        {"title": "RF Fingerprinting Survey", "year": "2023", "source": "arXiv",
-         "citations": 3, "abstract": "A survey of RF fingerprinting."}
-    ]
-    _TOOL_MAP["search_all_sources"] = fake_tool
-    try:
-        all_papers: list[dict] = []
-        notes = _run_agent_loop(fake_llm, [], all_papers)
-    finally:
-        _TOOL_MAP["search_all_sources"] = original
-
-    assert notes == "最终综述素材"
-    assert len(all_papers) == 1
-    assert all_papers[0]["title"] == "RF Fingerprinting Survey"
-
-
-def test_agent_loop_feeds_error_back():
-    """工具抛异常 → 以 [Tool Call Error] 文本作为 tool 消息回喂"""
-    from langchain_core.messages import ToolMessage
-
-    from src.agents.literature_reviewer import _TOOL_MAP, _run_agent_loop
-
-    first = MagicMock()
-    first.content = ""
-    first.response_metadata = {}
-    first.tool_calls = [
-        {"name": "openalex_search", "args": {"query": "q"}, "id": "call_x"}
-    ]
-    second = MagicMock()
-    second.content = "done"
-    second.response_metadata = {}
-    second.tool_calls = []
-
-    fake_llm = MagicMock()
-    fake_llm.invoke.side_effect = [first, second]
-
-    def boom(query, max_results=10):
-        raise RuntimeError("API down")
-
-    original = _TOOL_MAP["openalex_search"]
-    fake_tool = MagicMock()
-    fake_tool.func = boom
-    _TOOL_MAP["openalex_search"] = fake_tool
-    try:
-        messages = [MagicMock(), MagicMock()]  # system + human
-        _run_agent_loop(fake_llm, messages, [])
-    finally:
-        _TOOL_MAP["openalex_search"] = original
-
-    tool_msgs = [m for m in messages if isinstance(m, ToolMessage)]
-    assert tool_msgs, "工具结果必须以 ToolMessage 回喂"
-    assert "[Tool Call Error]" in tool_msgs[0].content
-    assert "API down" in tool_msgs[0].content
+# ---------- (已删除) literature_reviewer 的工具循环用例 ----------
+# 该模块已随 §5.3 D1 退役; 它测的语义有两个新家, 覆盖更强而非更弱:
+#   * 工具循环/错误回喂 → `AgentRuntime.run` (tests/test_agent_runtime.py 11 项)
+#   * 候选文献排版 → `publication/evidence_ledger` (tests/test_new_features.py)
+# 因此这里删掉的是**旧实现的断言**, 不是行为判据。
 
 
 # ---------- 中文分块自适应 + 向量库降级入库 ----------
@@ -367,9 +285,6 @@ if __name__ == "__main__":
         test_doi_exists_false,
         test_doi_exists_unknown_on_error,
         test_doi_exists_none_on_empty,
-        test_format_papers_for_tool,
-        test_agent_loop_executes_tools_and_finishes,
-        test_agent_loop_feeds_error_back,
         test_chunk_text_cjk_adaptive,
         test_chunk_text_english_unchanged,
         test_add_documents_resilient_batch_split,

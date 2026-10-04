@@ -89,6 +89,8 @@ EVENT_SPECS: dict[str, EventSpec] = dict([
     _spec("counterexample", ("claim_id", "witness"), "找到反例", surface=True),
     _spec("claim_state_reconciled", ("claim_id", "status"), "命题状态按记录重算",
           surface=True),
+    _spec("claim_state_changed", ("claim_id", "previous", "current"),
+          "命题状态发生转移 (下游依据失效的触发点)", surface=True),
     _spec("equality_condition", ("claim_id", "condition"), "派生出等号条件命题",
           surface=True),
     _spec("effect_estimated", ("claim_id", "estimate"), "得到效应估计", surface=True),
@@ -139,6 +141,27 @@ EVENT_SPECS: dict[str, EventSpec] = dict([
     # 资料摄入 (知识库侧)
     _spec("ingest_manual", ("doc_id",), "摄入人工资料"),
     _spec("ingest_machine", ("doc_id", "title"), "摄入机读资料"),
+
+    # 团队任务与唯一提交口 (合并计划 §6.2 / §3.1 G08)
+    #
+    # 这几个事件由 `ResearchCommitService` 在**同一事务**里写入。不登记它们会让
+    # `_anomaly_of` 每次都生成同一条 `log_anomaly` (键相同), 于是第二次提交直接撞
+    # 唯一索引并整步回滚 —— 表现为"提交失败但看不出为什么"。因此新事件类型必须
+    # 与写入方同时登记, 这不是可选的文档工作。
+    _spec("task_finished", ("task_id", "agent", "outcome"),
+          "一个团队任务交回成果 (含终态与摘要)", surface=True),
+    _spec("commit_result", ("task_id", "agent", "accepted"),
+          "唯一提交口接受/拒绝候选并落盘", surface=True),
+    _spec("candidate_rejected", ("task_id", "reason"),
+          "候选被提交口/运行时拒绝 (越权或未登记种类)", surface=True),
+    _spec("input_version_conflict", ("task_id", "stale"),
+          "依据的输入版本已过期, 成果不合并", surface=True),
+    _spec("commit_replayed", ("task_id", "note"),
+          "同一 attempt 重放: 不重复写入", surface=True),
+    _spec("commit_failed", ("task_id", "reason"),
+          "提交失败 (事务回滚, 成果未落盘)", surface=True),
+    _spec("verification_orphaned", ("task_id", "reason"),
+          "核验记录指向的义务不存在, 不做义务处置", surface=True),
 ])
 
 SURFACE_EVENT_KINDS: tuple[str, ...] = tuple(
@@ -263,7 +286,7 @@ def metrics_from_store(store, problem_id: str = "", *,
     }
 
     from src.research.schemas import ObligationStatus
-    from src.research.store import KIND_CLAIM, KIND_GAP, KIND_OBLIGATION
+    from src.research.store import KIND_CLAIM, KIND_GAP, KIND_OBLIGATION, KIND_VERIFICATION
 
     def _mine(claim_id: str) -> bool:
         if claim_ids is None:
@@ -279,12 +302,17 @@ def metrics_from_store(store, problem_id: str = "", *,
         # 只统计属于本问题的命题: 归属由调用方 (引擎的 `_claims()`) 判定,
         # 这里不再"猜"旧数据的归属, 否则 B 问题会把 A 的结论算成自己的。
         claims = [c for c in all_claims if str(c.get("id", "")) in claim_ids]
+    # 验证记录必须**按对象数**, 不能只数 `verification_recorded` 事件: 那个事件是旧引擎
+    # 发出的, 团队走唯一提交口时不会发它 —— 于是工作台对每一次团队运行都显示"验证记录 0",
+    # 而库里其实有记录 (实测: 快照 2 条、指标 0 条)。指标与快照必须同源。
+    verifications = [v for v in store.list_latest(KIND_VERIFICATION)
+                     if _mine(v.get("claim_id", ""))]
     closed = ObligationStatus.closed.value
     metrics.counts = {
         "obligations": len(obligations),
         "obligations_closed": sum(1 for o in obligations if o.get("status") == closed),
         "claims": len(claims),
-        "verifications": metrics.events.get("verification_recorded", 0),
+        "verifications": len(verifications),
         "route_switches": metrics.events.get("route_switched", 0),
         "writing_gaps_fed_back": metrics.events.get("writing_gaps_fed_back", 0),
         "experiment_specs": sum(1 for d in store.list_latest(KIND_GAP)

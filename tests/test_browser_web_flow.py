@@ -25,6 +25,8 @@ DRAFT_SCRIPT = WEB_DIR / "tests" / "e2e" / "draft_identity.mjs"
 UPLOAD_SCRIPT = WEB_DIR / "tests" / "e2e" / "web_upload.mjs"
 TEAM_SCRIPT = WEB_DIR / "tests" / "e2e" / "team_board.mjs"
 LIBRARY_SCRIPT = WEB_DIR / "tests" / "e2e" / "library_paths.mjs"
+# G19 / 合并计划 §8.1: 前端唯一状态 (切会话后只读投影与团队 store 必须是同一份 identity)
+SINGLE_STORE_SCRIPT = WEB_DIR / "tests" / "e2e" / "single_store.mjs"
 
 
 def _node() -> str | None:
@@ -427,6 +429,55 @@ def test_library_path_import_in_real_browser(tmp_path, monkeypatch):
         output = (result.stdout or "") + (result.stderr or "")
         assert result.returncode == 0, output
         assert "本机路径资料接入浏览器验收通过" in output, output
+    finally:
+        uv_server.should_exit = True
+        thread.join(timeout=15)
+        server.shutdown_sessions()
+
+
+@pytest.mark.skipif(_node() is None, reason="需要 node 运行浏览器脚本")
+@pytest.mark.skipif(not _playwright_ready(), reason="需要 playwright 与已下载的浏览器")
+@pytest.mark.skipif(not (WEB_DIR / "dist" / "index.html").is_file(),
+                    reason="需要先构建前端 (cd src/web && npm run build)")
+def test_single_store_in_real_browser(tmp_path, monkeypatch):
+    """G19 / §8.1: 切换历史会话后前端只有**一份**身份。
+
+    迁移前 `window.AIR.research`、`app.ts` 的 ID 镜像与 `team-controller.ts` 的 reducer
+    store 是三份可写状态, 只能靠 `syncSelectionFromLegacy()` 事后对表 —— 于是界面可以
+    同时显示两个研究。这个用例在真实 Chromium 里切换历史会话, 取三种身份
+    (`#projid` / `window.AIR.research` / `window.AIRTeam.store().selection`) 并要求
+    三者完全相同, 切回空会话后一起清空; 同时要求按该身份真的查询了工作台。
+    """
+    import uvicorn
+
+    monkeypatch.setenv("THEORY_LLM", "0")
+    from src import config
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path / "out")
+    monkeypatch.delenv("AIR_WEB_DEV", raising=False)
+
+    from src import server
+
+    port = _free_port()
+    uv_config = uvicorn.Config(server.app, host="127.0.0.1", port=port,
+                               log_level="warning")
+    uv_server = uvicorn.Server(uv_config)
+    thread = threading.Thread(target=uv_server.run, daemon=True)
+    thread.start()
+    deadline = time.time() + 30
+    while not uv_server.started and time.time() < deadline:
+        time.sleep(0.1)
+    assert uv_server.started, "uvicorn 未能在 30s 内启动"
+
+    try:
+        result = subprocess.run(
+            [_node(), str(SINGLE_STORE_SCRIPT), f"http://127.0.0.1:{port}"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=str(WEB_DIR), check=False, timeout=420)
+        output = (result.stdout or "") + (result.stderr or "")
+        assert result.returncode == 0, output
+        assert "唯一状态浏览器验收通过" in output, output
     finally:
         uv_server.should_exit = True
         thread.join(timeout=15)

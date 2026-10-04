@@ -76,23 +76,49 @@ class EventLog:
         self.records: list[dict[str, Any]] = []
         self.lock = threading.RLock()
         #: 实时出口 (通常是 `queue.Queue`); 为空表示只做日志。
+        #:
+        #: **SSE 不再消费它** (合并计划 §3.3 G15): 一个队列只能被一个读者取走一条,
+        #: 两个页面同时订阅就是互相抢事件。订阅者改为各自持游标读日志 + 等通知。
+        #: 保留它是因为既有调试/用例入口按名取用, 不是交付路径。
         self.sink = sink
+        #: 通知用的条件变量 (与 `lock` 共用一把锁, 避免"读到旧 seq 再等待"的竞态)。
+        self.condition = threading.Condition(self.lock)
 
     # ------------------------------------------------------------------
     # 写
     # ------------------------------------------------------------------
     def append(self, event: dict[str, Any]) -> dict[str, Any]:
-        """登记一个事件: 分配序号 → 进日志 (有界) → 进实时出口。"""
-        with self.lock:
+        """登记一个事件: 分配序号 → 进日志 (有界) → 通知订阅者 → 进实时出口。"""
+        with self.condition:
             self.seq += 1
             record = {**event, "_seq": self.seq}
             self.records.append(record)
             # 只保留最近 `limit` 条: 重放日志用于补偿短时断线, 不是完整归档
             if len(self.records) > self.limit:
                 del self.records[:-self.limit]
+            self.condition.notify_all()
         if self.sink is not None:
             self.sink.put(record)
         return record
+
+    # ------------------------------------------------------------------
+    # 订阅 (每个订阅者有自己的游标)
+    # ------------------------------------------------------------------
+    def wait_for(self, cursor: int, timeout: float = 0.5) -> bool:
+        """等到日志里出现**晚于 `cursor`** 的事件, 或超时; 返回是否已有新事件。
+
+        判据是 `seq > cursor` 而不是"队列里有没有东西": 日志是真值来源, 因此
+        "等到了"与"读得到"永远一致 (不会出现被别的订阅者取走的情况)。
+        """
+        try:
+            wanted = int(cursor or 0)
+        except (TypeError, ValueError):
+            wanted = 0
+        with self.condition:
+            if self.seq > wanted:
+                return True
+            self.condition.wait(timeout)
+            return self.seq > wanted
 
     # ------------------------------------------------------------------
     # 读

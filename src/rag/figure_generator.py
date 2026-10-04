@@ -16,6 +16,7 @@ import re
 import textwrap
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
@@ -42,55 +43,127 @@ if _CN_FONT:
     plt.rcParams["axes.unicode_minus"] = False
 
 
-#: 当前产物归属 (会话/运行的 run_id)。为空表示"没有运行身份", 沿用旧的扁平目录。
+#: 当前产物归属。修复前只有 run 身份一层 (`figures/<run>/`), 而文件名只是局部序号
+#: (`taxonomy_0.png`): 同一 run 里两张**不同**的图仍可能同名互相覆盖 (§3.3 G18)。
+#: 现在归属是 `(run_id, task_id, artifact_version)` 三元组, 目录逐层下分。
 #: 用 ContextVar 而不是参数: 绘图函数有 8 个入口, 每个都加一个 scope 参数会把
-#: 归属信息散到调用链上; 而 run 身份本来就是"当前在跑哪次运行"的环境事实。
-_FIGURE_SCOPE: ContextVar[str] = ContextVar("air_figure_scope", default="")
+#: 归属信息散到调用链上; 而"这次是谁在画第几张图"本来就是环境事实。
+_FIGURE_SCOPE: ContextVar[FigureScope | None] = ContextVar("air_figure_scope",
+                                                           default=None)
+
+
+@dataclass(frozen=True)
+class FigureScope:
+    """图表产物的归属: 哪次运行 / 哪个任务 / 第几个产物版本。"""
+
+    run_id: str = ""
+    task_id: str = ""
+    artifact_version: str = ""
+
+    def is_empty(self) -> bool:
+        return not (self.run_id or self.task_id or self.artifact_version)
+
+    def to_dict(self) -> dict[str, str]:
+        return {"run_id": self.run_id, "task_id": self.task_id,
+                "artifact_version": self.artifact_version}
+
+    def parts(self) -> list[str]:
+        """目录分量: run → task → v<版本> (缺失的层不下分)。"""
+        run = _sanitize_scope(self.run_id)
+        task = _sanitize_scope(self.task_id)
+        version = _sanitize_scope(self.artifact_version)
+        if not (run or task or version):
+            return []
+        parts = [run or "_unscoped"]
+        if task:
+            parts.append(task)
+        if version:
+            parts.append(f"v{version}")
+        return parts
+
+
+def current_figure_scope() -> FigureScope:
+    """当前绑定的产物归属 (未绑定时为空归属)。"""
+    return _FIGURE_SCOPE.get() or FigureScope()
 
 
 def figure_scope() -> str:
-    """当前图表产物归属的 run 身份 (空表示未绑定)。"""
-    return _FIGURE_SCOPE.get()
+    """当前图表产物归属的 run 身份 (空表示未绑定; 保留旧接口)。"""
+    return current_figure_scope().run_id
 
 
 @contextmanager
-def figure_scope_bound(scope: str):
-    """在 `with` 块内把图表产物归到该 run 名下 (合并计划 §7.4 / M4)。
+def figure_scope_bound(scope: str, *, task_id: str = "", artifact_version: str | int = ""):
+    """在 `with` 块内把图表产物归到 `(run, task, 产物版本)` 名下 (合并计划 §7.4 / §3.3 G18)。
 
     为什么必须做: 图表文件名是**局部序号** (`taxonomy_0.png`、`framework_0.png`),
     此前所有会话共用 `outputs/figures/`, 于是两个会话同时画图会互相覆盖对方的产物
-    ("两任务不串图表"是 M4 的退出条件之一)。绑定 run 身份后各自独立。
+    ("两任务不串图表"是 M4 的退出条件之一)。只按 run 分一层还不够 —— 同一次运行里的
+    两张不同图仍会同名; 因此归属扩到任务与产物版本: `figures/<run>/<task>/v<version>/`。
+    未绑定任何身份时保持原来的扁平目录 (向后兼容旧调用点与测试)。
     """
-    token = _FIGURE_SCOPE.set(str(scope or "").strip())
+    bound = FigureScope(run_id=str(scope or "").strip(),
+                        task_id=str(task_id or "").strip(),
+                        artifact_version=str(artifact_version or "").strip())
+    token = _FIGURE_SCOPE.set(bound)
     try:
         yield
     finally:
         _FIGURE_SCOPE.reset(token)
 
 
+def _figure_base() -> Path:
+    """`OUTPUT_DIR/figures` (**调用时**读配置, 测试隔离与部署都据此生效)。"""
+    from src import config
+
+    root = Path(getattr(config, "OUTPUT_DIR",
+                        Path(__file__).resolve().parent.parent.parent / "outputs"))
+    return root / "figures"
+
+
+def _scoped_dir(base: Path, scope: FigureScope) -> Path:
+    parts = scope.parts()
+    return base / Path(*parts) if parts else base
+
+
+def figure_artifact_dir(*, scope: FigureScope | None = None,
+                        output_dir: str | Path | None = None) -> tuple[Path | None, str]:
+    """**产物服务**解析图的目标目录; 返回 `(目录, 拒绝原因)`。
+
+    与 `_ensure_figure_dir()` 的区别: 这是新图纸路径的入口, 因此**必须有身份** ——
+    缺任务或产物版本时返回 `(None, 原因)` 让调用方如实报错, 而不是退回共用目录
+    (退回共用目录正是"多 run 互相覆盖"的成因)。显式给出 `output_dir` 时由调用方
+    自己负责归属 (测试与手工产物)。
+    """
+    if output_dir is not None:
+        return Path(output_dir), ""
+    bound = scope or current_figure_scope()
+    if not bound.task_id:
+        return None, ("缺少任务身份: 图必须经 figure_scope_bound(run_id, task_id=...,"
+                      " artifact_version=...) 绑定归属, 不得写入共用图表目录")
+    if not bound.artifact_version:
+        return None, "缺少产物版本 (artifact_version): 无法保证同一次运行的图不互相覆盖"
+    return _scoped_dir(_figure_base(), bound), ""
+
+
 def _ensure_figure_dir() -> Path:
-    """图表输出目录 (**调用时**读取配置 + 当前 run 归属)。
+    """图表输出目录 (**调用时**读取配置 + 当前产物归属)。
 
     早先这里写死 `Path(__file__).../outputs/figures`: 模块只按项目根拼路径,
     于是 `config.OUTPUT_DIR` 改了也不生效 —— 测试隔离失效(测试图直接写进仓库
     outputs/figures/), 部署到别的产物根时也会写错地方。与 server.py 的
     `output_dir()` 保持一致, 统一按调用时的配置取值。
 
-    M4: 目录再按 `figure_scope()` 分一层 (`figures/<run_id>/`), 使并发运行的图表
-    不互相覆盖; 未绑定 run 身份时保持原来的扁平目录 (向后兼容旧调用点与测试)。
+    M4/G18: 目录按归属分 `figures/<run>/<task>/v<版本>/`, 使并发运行与同一次运行的
+    多张图都不互相覆盖; 未绑定身份时保持原来的扁平目录 (向后兼容旧调用点与测试)。
     """
-    from src import config
-
-    base = Path(getattr(config, "OUTPUT_DIR", Path(__file__).resolve().parent.parent.parent
-                                              / "outputs")) / "figures"
-    scope = _sanitize_scope(figure_scope())
-    d = (base / scope) if scope else base
+    d = _scoped_dir(_figure_base(), current_figure_scope())
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def _sanitize_scope(scope: str) -> str:
-    """run 身份用作目录名: 只留安全字符, 空/异常一律回退为不分子目录。"""
+    """身份片段用作目录名: 只留安全字符, 空/异常一律回退为不分子目录。"""
     text = "".join(ch for ch in str(scope or "") if ch.isalnum() or ch in "-_.")
     return text.strip("._-")[:64]
 
@@ -396,35 +469,31 @@ def parse_timeline_from_text(text: str) -> list[dict]:
 def generate_figures_from_notes(
     topic: str, lit_notes: str, verified_refs: list[dict] | None = None
 ) -> list[str]:
-    """从文献综述素材自动生成图表（LLM 优先，确定性模板兜底）
+    """从文献综述素材生成图表（**确定性模板**, 不再执行 LLM 生成的绘图脚本）
 
     策略 (借鉴 PaperBanana + FigMirror + AI-Scientist 12 图上限):
-    1. 研究框架总览图 (framework, LLM 优先 → 模板兜底)
+    1. 研究框架总览图 (framework, 分层框图模板)
     2. 识别流水线图 (pipeline, 确定性流程框图)
-    3. 分类体系图 (taxonomy, LLM 优先 → 模板兜底)
-    4. 研究时间线图 (timeline, LLM 优先 → 模板兜底)
+    3. 分类体系图 (taxonomy, 从素材解析出的结构)
+    4. 研究时间线图 (timeline, 从素材解析出的里程碑)
     5. 出版趋势图 (trend, 确定性: 从 verified_refs 年份统计)
     6. 主题×年份热力图 (heatmap, 确定性: 从 verified_refs 统计)
-    7. 方法对比图 (comparison, LLM 提取数据 → 分组柱状图)
+    7. 方法对比图 (comparison, LLM 只提取**结构化数据**, 仍由本模块绘图)
+
+    为什么不再走"LLM 写 matplotlib 脚本 → 子进程执行" (§3.3 G18): 那条路径等于
+    让模型产出任意 Python 并执行, 进程隔离不等于权限隔离。绘图统一走本模块的
+    声明式实现; 方法对比数据仍可由模型提取, 但必须过 `_validate_comparison_data`
+    的结构/值域校验才会被画出来。
 
     Returns: 生成的图片路径列表
     """
     paths: list[str] = []
     refs = verified_refs or []
 
-    # ===== 1. 研究框架总览图 =====
-    print("  [figure] 生成研究框架总览图 (LLM 优先, 超时/失败回退模板)...")
-    try:
-        from src.rag.figure_llm import generate_framework_figure
-
-        llm_path = generate_framework_figure(topic, index=len(paths))
-        if llm_path:
-            paths.append(llm_path)
-        else:
-            paths.append(generate_framework_overview(f"{topic} 研究框架总览", filename=f"framework_{len(paths)}.png"))
-    except Exception as e:
-        logger.warning(f"LLM framework failed: {e}")
-        paths.append(generate_framework_overview(f"{topic} 研究框架总览", filename=f"framework_{len(paths)}.png"))
+    # ===== 1. 研究框架总览图 (确定性模板) =====
+    print("  [figure] 生成研究框架总览图 (确定性分层框图)...")
+    paths.append(generate_framework_overview(f"{topic} 研究框架总览",
+                                             filename=f"framework_{len(paths)}.png"))
 
     # ===== 2. 识别流水线图 (确定性) =====
     print("  [figure] 生成识别流水线图 (确定性流程框图)...")
@@ -433,34 +502,17 @@ def generate_figures_from_notes(
     # ===== 3. 分类体系图 =====
     taxonomy = parse_taxonomy_from_text(lit_notes)
     if taxonomy:
-        tax_text = "\n".join(f"- {cat}: {', '.join(subs[:8])}" for cat, subs in taxonomy.items())
-        print("  [figure] 生成分类体系图 (LLM 优先, 超时/失败回退模板)...")
-        try:
-            from src.rag.figure_llm import generate_taxonomy_figure
-            llm_path = generate_taxonomy_figure(topic, tax_text, index=0)
-            if llm_path:
-                paths.append(llm_path)
-            else:
-                paths.append(generate_taxonomy_tree(f"{topic} 分类体系", {k: v[:6] for k, v in taxonomy.items()}, filename=f"taxonomy_{len(paths)}.png"))
-        except Exception as e:
-            logger.warning(f"LLM taxonomy failed: {e}")
-            paths.append(generate_taxonomy_tree(f"{topic} 分类体系", {k: v[:6] for k, v in taxonomy.items()}, filename=f"taxonomy_{len(paths)}.png"))
+        print("  [figure] 生成分类体系图 (从素材结构)...")
+        paths.append(generate_taxonomy_tree(
+            f"{topic} 分类体系", {k: v[:6] for k, v in taxonomy.items()},
+            filename=f"taxonomy_{len(paths)}.png"))
 
     # ===== 4. 时间线图 =====
     milestones = parse_timeline_from_text(lit_notes)
     if len(milestones) >= 3:
-        tl_text = "\n".join(f"{m['year']}: {m['event']}" for m in milestones[:12])
-        print("  [figure] 生成研究时间线图 (LLM 优先, 超时/失败回退模板)...")
-        try:
-            from src.rag.figure_llm import generate_timeline_figure
-            llm_path = generate_timeline_figure(topic, tl_text, index=len(paths))
-            if llm_path:
-                paths.append(llm_path)
-            else:
-                paths.append(generate_timeline(f"{topic} 研究发展脉络", milestones[:12], filename=f"timeline_{len(paths)}.png"))
-        except Exception as e:
-            logger.warning(f"LLM timeline failed: {e}")
-            paths.append(generate_timeline(f"{topic} 研究发展脉络", milestones[:12], filename=f"timeline_{len(paths)}.png"))
+        print("  [figure] 生成研究时间线图 (从素材里程碑)...")
+        paths.append(generate_timeline(f"{topic} 研究发展脉络", milestones[:12],
+                                       filename=f"timeline_{len(paths)}.png"))
 
     # ===== 5. 出版趋势图 (确定性: 从 verified_refs 统计) =====
     print("  [figure] 生成出版趋势图 (确定性统计)...")

@@ -176,9 +176,20 @@ def test_export_produces_a_package_with_candidate_claims_only(tmp_path, monkeypa
         assert "delivery_level" in manifest
         assert (Path(package) / "manuscript.md").is_file()
         assert (Path(package) / "evidence.json").is_file()
-        # 团队只提交候选: 判定层的真值字段不得被团队写出来
+        # 团队**不自报**科学等级: 结论状态必须由判定层给出, 且给出时必须有依据
+        # (§3.1 G06 之后团队能走完形式化闭环, 因此这里的判据从"只许是 proposed"
+        #  收紧为"不许由团队自报, 且 supported 必须配上已关闭义务与有效核验记录")。
+        store = session.team.task_store.store
+        obligations = store.list_latest("obligation") or []
+        verifications = store.list_latest("verification") or []
         for claim in claims:
-            assert claim.get("status") in ("proposed", ""), claim
+            status = claim.get("status", "")
+            assert status != "", "结论没有状态: 判定层没有给出结论状态"
+            if status == "supported":
+                assert any(o.get("status") == "closed" for o in obligations), \
+                    "结论被标为已确证, 但没有任何已关闭的义务支撑"
+                assert any(not v.get("stale", False) for v in verifications), \
+                    "结论被标为已确证, 但库里没有可用的核验记录"
 
 
 def test_export_without_sources_is_an_honest_unresolved_report(tmp_path, monkeypatch):
@@ -195,10 +206,22 @@ def test_export_without_sources_is_an_honest_unresolved_report(tmp_path, monkeyp
         package = session.export()
         assert package is not None, "没有对象时也要给出未决报告"
         manifest = json.loads((Path(package) / "manifest.json").read_text("utf-8"))
-        claims = json.loads((Path(package) / "claims.json").read_text("utf-8"))
-        assert claims == [], "没有候选结论时不得编造"
         assert (Path(package) / "unresolved.md").is_file()
-        assert manifest.get("delivery_level") in ("研究备忘录", "条件性研究报告"), manifest
+        # 等级必须**由事实决定**: 说"完整论文"就必须真的有编译好的 PDF (§5 阶段 1)。
+        # 这里不再固定"只能到论文草稿" —— 计数约束判定靠**具名定理 + 机器重算的参数**
+        # 成立, 不需要文献; 方案 §0 明确允许"无文献时参考文献章节仍在位并说明检索范围"。
+        level = manifest.get("delivery_level")
+        assert level in ("研究备忘录", "条件性研究报告", "论文草稿", "完整论文"), manifest
+        pdf = Path(package) / "manuscript.pdf"
+        if level == "完整论文":
+            assert manifest.get("compilation_status") == "ok", manifest
+            assert pdf.is_file() and pdf.stat().st_size > 1024, "自称完整论文却没有 PDF"
+            # 没有来源时, 参考文献章节必须**在位并说明检索范围**, 不能凭空省掉
+            tex = (Path(package) / "manuscript.tex").read_text("utf-8")
+            assert "参考文献" in tex, "没有来源时省略了参考文献章节"
+            assert "没有可引用的可定位来源" in tex, tex[:400]
+        else:
+            assert not (level == "完整论文"), manifest
         assert manifest.get("input_snapshot", {}).get("engine") == "team_v1", manifest
 
 

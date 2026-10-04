@@ -315,11 +315,18 @@ class AgentBase:
     def blocked(self, task: AgentTask, reason: str, *,
                 needs: list[ResearchNeed] | None = None,
                 summary: str = "", usage: UsageRecord | None = None,
-                payload: dict[str, Any] | None = None) -> AgentResult:
-        """受阻结果: 必须说明缺什么, 否则主控无从补派工。"""
+                payload: dict[str, Any] | None = None,
+                changes: list[ChangeProposal] | None = None) -> AgentResult:
+        """受阻结果: 必须说明缺什么, 否则主控无从补派工。
+
+        `changes` 必须接受: 受阻**不等于什么都没产出** —— 检索受阻时"新颖性未对照"
+        这条记录仍然要落盘 (省略它会让交付物看起来没有新颖性问题)。此前这个入参不
+        存在, 于是调用方一传就整条任务 `failed`, 而卡片上只写"成果不符合契约"。
+        """
         return AgentResult(
             task_id=task.task_id, agent=role_of(self.role) or self.role,
             outcome=TaskOutcome.blocked, summary=summary or reason,
+            proposed_changes=list(changes or []),
             failure_reason=reason, followup_needs=list(needs or []),
             usage=usage or UsageRecord(), payload=dict(payload or {}),
             replan=True,
@@ -329,13 +336,22 @@ class AgentBase:
                 changes: list[ChangeProposal] | None = None,
                 artifacts: list[ArtifactRef] | None = None,
                 unresolved: list[str] | None = None,
+                needs: list[ResearchNeed] | None = None,
                 usage: UsageRecord | None = None,
                 payload: dict[str, Any] | None = None) -> AgentResult:
+        """部分成果。
+
+        `needs` 必须接受: 部分完成往往正是"因为缺某样东西", 而那件事必须能回到主控
+        手上 (写作缺前提、检索缺口径都属此类)。此前 `partial` 没有这个参数, 写作角色
+        一旦有未决项就抛 `TypeError` 并整条失败 —— 症状是"交付形态要求未满足", 真正
+        原因埋在 `failure_reason` 里。
+        """
         return AgentResult(
             task_id=task.task_id, agent=role_of(self.role) or self.role,
             outcome=TaskOutcome.partial, summary=summary,
             proposed_changes=list(changes or []), artifact_refs=list(artifacts or []),
-            unresolved=list(unresolved or []), usage=usage or UsageRecord(),
+            unresolved=list(unresolved or []), followup_needs=list(needs or []),
+            usage=usage or UsageRecord(),
             payload=dict(payload or {}),
         )
 

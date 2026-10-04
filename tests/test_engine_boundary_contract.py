@@ -41,6 +41,10 @@ STATE_WRITERS: dict[str, str] = {
     "research/loop.py": "判定层: 执行工具 → 调内核 → 落盘 (唯一权威)",
     "research/store.py": "对象存储自身的实现",
     "research/task_store.py": "任务台账 (团队侧的任务状态, 不是研究结论)",
+    # 冻结快照: 给**已提交**的对象拍一张不可变照片, 不改任何结论状态。收在一处是为了
+    # 让"谁在写存储"可枚举 —— 它曾经只在引擎与旧流水线里被调用, 团队运行因此"看起来
+    # 冻结了"而对象库里没有快照 (派生接口直接报错)。
+    "research/snapshot.py": "冻结已提交对象的快照 (派生/交付共用; 不改结论状态)",
 }
 
 #: 明确的"写研究对象"调用。
@@ -125,28 +129,43 @@ def test_retired_writing_paths_stay_deleted():
         assert "writing_bridge" not in code, f"{path.name} 的代码仍引用已删除的桥接模块"
 
 
-def test_the_design_rationale_sits_at_the_decision_point():
-    """"为什么保留两种研究形态"必须写在 `_resolve_engine` 旁边。
+def test_single_runtime_has_no_engine_choice():
+    """**只有一张图**: 生产代码里不得再有"按 mode 分流"的入口 (G01)。
 
-    否则下一个读到这处分支的人第一反应就是"这里还没合并完", 于是要么重复清理、
-    要么草率合并掉判定层的边界。
+    这条用例过去断言"为什么保留两种研究形态必须写在 `_resolve_engine` 旁边" ——
+    那个"有意保留的分支"已经按计划删除。现在断言的是它的**反面**: 选择点不存在,
+    并且没有任何调用点在建第二张图。判据必须扫**代码**而不是注释 (解释"为什么删掉了"
+    的注释是文档, 不是分流)。
     """
+    import ast
+
     source = (SRC / "server.py").read_text(encoding="utf-8")
-    start = source.find("def _resolve_engine(")
-    assert start != -1, "找不到 _resolve_engine"
-    doc = source[start:start + 4000]
-    for needle in ("判定层", "AgentTask", "有意选择"):
-        assert needle in doc, f"_resolve_engine 的设计说明缺少「{needle}」"
+    tree = ast.parse(source)
+    # 1) `_resolve_engine` 不接受任何形参 (一旦接受, 就承认可以按它分流)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_resolve_engine":
+            assert not node.args.args and not node.args.kwonlyargs, \
+                "引擎选择点又出现了形参"
+    # 2) 代码里不得出现旧图工厂或按 mode 分流的分支
+    code = _code_only(source)
+    for needle in ("build_theory_pipeline", 'in ("theory", "team")', "SURVEY_ENGINE"):
+        assert needle not in code, f"server.py 的代码仍引用 {needle}"
+    # 3) 判定层边界本身没变: 智能体只提交候选, 唯一提交口仍在
+    from src.research import commit
+
+    assert hasattr(commit, "ResearchCommitService")
 
 
 def test_dispatch_stays_conservative_about_formal_requests():
-    """形式化请求不得被分流到综述流程 (这条判据本身就是设计说明的一部分)。"""
-    from src.research.intake import is_survey_request
-    from src.server import DEFAULT_ENGINE, _resolve_engine
+    """形式化请求不得被当成综述型画像 (判据本身是设计说明的一部分)。
 
-    assert _resolve_engine("theory") == "theory"
-    assert _resolve_engine("team") == "team"
-    assert _resolve_engine("", request="检索并总结某方向研究进展, 写一篇综述") == "team"
-    assert _resolve_engine("", request="证明 2-(211,15,1) 设计不存在") == "theory"
-    assert _resolve_engine("survey") == DEFAULT_ENGINE
+    G01 之后分类器**不再决定用哪张图** (只有一张图), 但它仍然决定任务画像与角色
+    配置 —— 把证明题当综述, 照样会让团队用错打法。因此保守性继续守住。
+    """
+    from src.research.intake import is_survey_request
+    from src.server import _resolve_engine
+
+    assert _resolve_engine() == "team"
+    assert is_survey_request("检索并总结某方向研究进展, 写一篇综述") is True
+    assert is_survey_request("证明 2-(211,15,1) 设计不存在") is False
     assert is_survey_request("综述一下 2-(211,15,1) 的设计是否存在的证明") is False

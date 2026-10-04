@@ -1000,16 +1000,20 @@ def test_gather_evidence_and_attach(tmp_path):
     assert engine._get_claim(claim.id).evidence_grade.value in ("single_source", "converging")
 
 
-def test_server_startrequest_theory_fields():
-    from src.server import StartRequest, build_theory_initial_state
+def test_server_startrequest_has_no_engine_fields():
+    """`StartRequest` 不再有引擎/预算字段: 只有一张图, 预算由团队运行决定 (G01)。
 
-    req = StartRequest(request="对所有实数 x: x**2 >= 0", mode="theory", project_id="pj")
-    state = build_theory_initial_state(req)
-    assert state["mode"] == "theory"
-    assert state["project_id"] == "pj"
-    assert state["budget_max_actions"] == 40
-    # 统一入口 (合并计划 §3 / M5): 留空不再等于"综述", 由服务端按默认引擎决定
-    from src.server import DEFAULT_ENGINE
+    这条用例过去断言"留空 mode 时按默认引擎启动" —— 引擎选择已删除, 现在断言的是
+    字段**不存在**, 且身份仍由统一入口规范化产出 (团队与工作台读同一份)。
+    """
+    from src.server import StartRequest, _normalized_input
 
-    assert StartRequest(topic="t").mode == ""
-    assert DEFAULT_ENGINE == "theory"
+    req = StartRequest(request="对所有实数 x: x**2 >= 0", project_id="pj",
+                       problem_id="p1")
+    assert not hasattr(req, "mode"), "StartRequest.mode 又回来了"
+    assert not hasattr(req, "max_actions"), "理论引擎专属预算字段又回来了"
+    snapshot = _normalized_input(req)
+    assert snapshot["project_id"] == "pj"
+    assert snapshot["problem_id"] == "p1"
+    assert snapshot["run_id"], "统一入口必须产出运行身份"
+    assert snapshot["request"] == "对所有实数 x: x**2 >= 0"

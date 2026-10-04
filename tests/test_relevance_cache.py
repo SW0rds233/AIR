@@ -154,34 +154,19 @@ def test_load_cache_filters_off_domain_refs(monkeypatch):
             pc.CACHE_DIR = orig_dir
 
 
-def test_review_anchor_warns_about_renumbered_citations():
-    """台账含 [n] 时, 复审锚点必须提醒编号每轮重排 (实测: 审稿人沿用旧台账
-    对 [34] 的主题描述, 连续 4 轮误判 Critical 未解决)"""
-    from src.agents.paper_reviewer import _build_review_anchor
+def test_review_prompt_warns_about_renumbered_citations():
+    """审阅提示词必须提醒"引用编号每轮重排"。
 
-    state = {
-        "review_dimensions": {},
-        "review_issue_ledger": [
-            {"id": "R-REF-01", "status": "未解决", "priority": "Critical",
-             "problem": "[34]为音频录音设备识别论文", "evidence": "3.3.5节引用[34]"},
-        ],
-    }
-    anchor = _build_review_anchor(state)
-    assert "引用编号每轮重排" in anchor
-    assert "已解决" in anchor
-    # 无 [n] 的台账不产生该警告
-    state2 = {"review_dimensions": {}, "review_issue_ledger": [
-        {"id": "R-ABS-01", "status": "未解决", "priority": "高",
-         "problem": "摘要超长", "evidence": "摘要章节"},
-    ]}
-    assert "引用编号每轮重排" not in _build_review_anchor(state2)
+    这条判据来自一次真实事故: 审稿人沿用旧台账里对 `[34]` 的主题描述, 而编号每轮重排,
+    于是同一个问题被连续 4 轮误判成 Critical 未解决。原断言检查旧审阅模块
+    (`agents/paper_reviewer.PAPER_REVIEWER_SYSTEM` 与其锚点构造); 该模块已退役
+    (§5.3 D1), 判据**迁移**到真正在跑的审阅智能体 (`agents/review.py::ReviewAgent.SYSTEM`)
+    —— 守护对象换成活的, 要求没有减少。
+    """
+    from src.agents.review import ReviewAgent
 
-
-def test_reviewer_prompt_has_renumber_rule():
-    from src.agents.paper_reviewer import PAPER_REVIEWER_SYSTEM
-
-    assert "引用编号每轮重新排序" in PAPER_REVIEWER_SYSTEM
-    assert "严禁沿用旧台账里对 [n] 的主题描述" in PAPER_REVIEWER_SYSTEM
+    assert "引用编号每轮重新排序" in ReviewAgent.SYSTEM
+    assert "不得沿用" in ReviewAgent.SYSTEM
 
 
 def test_writer_prompt_forbids_off_domain_citation_topics():
@@ -205,12 +190,12 @@ def test_writer_prompt_forbids_off_domain_citation_topics():
 
 def test_agent_prompts_carry_no_hardcoded_domain_vocabulary():
     """提示词不得把某一个领域的词表写死 (跨领域时会把模型带偏)。"""
-    from src.agents.paper_reviewer import PAPER_REVIEWER_SYSTEM
+    from src.agents.review import ReviewAgent
     from src.agents.writing import WritingAgent
     from src.rag.subquery_generator import SUBQUERY_SYSTEM
 
     for name, prompt in (("writing", WritingAgent.SYSTEM),
-                         ("paper_reviewer", PAPER_REVIEWER_SYSTEM),
+                         ("review", ReviewAgent.SYSTEM),
                          ("subquery_generator", SUBQUERY_SYSTEM)):
         for leaked in ("射频", "RF fingerprint", "wireless", "emitter", "RFFI"):
             assert leaked not in prompt, f"{name} 提示词含领域硬编码: {leaked}"
@@ -222,8 +207,7 @@ if __name__ == "__main__":
         test_rule_filter_excludes_off_domain_papers,
         test_rule_filter_matches_mixed_language_keywords,
         test_load_cache_filters_off_domain_refs,
-        test_review_anchor_warns_about_renumbered_citations,
-        test_reviewer_prompt_has_renumber_rule,
+        test_review_prompt_warns_about_renumbered_citations,
         test_writer_prompt_forbids_off_domain_citation_topics,
     ]
     passed = 0

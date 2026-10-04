@@ -399,19 +399,24 @@ def _stats(data_ref: str, column: str) -> str:
     return _format_verification("describe_statistics", result)
 
 
-def figure_tools() -> list[ToolSpec]:
+def figure_tools(grant: Any = None, sources: dict[str, int] | None = None) -> list[ToolSpec]:
+    """绘图工具 (声明式 FigureSpec)。
+
+    `grant` / `sources` 由调用方 (FigureAgent) 注入: 工具与服务必须用**同一套**
+    来源登记表与权限令牌, 否则模型可以通过工具绕开"来源/单位/权限先校验"
+    (§3.3 G18)。工具自身的 `read_scope`/`capability` 仍由 ToolLoop 独立检查。
+    """
+    def _render(spec: dict) -> str:
+        from src.agents.figures import render_figure_spec
+
+        outcome = render_figure_spec(dict(spec or {}), sources=sources, grant=grant)
+        return outcome.get("message", "") or str(outcome)
+
     return [
-        tool_spec("render_figure", _render_figure,
+        tool_spec("render_figure", _render,
                   description="按声明式 FigureSpec 渲染一张图 (受任务产物目录限制)",
                   read_scope="tools:figure", capability="propose_figure"),
     ]
-
-
-def _render_figure(spec: dict) -> str:
-    from src.agents.figures import render_figure_spec
-
-    outcome = render_figure_spec(dict(spec or {}))
-    return outcome.get("message", "") or str(outcome)
 
 
 def latex_tool() -> ToolSpec:

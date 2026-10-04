@@ -639,6 +639,13 @@ def _probe_counterexample(diff, variables, want_negative: bool = False) -> dict 
     if not pairs:
         pairs = [(name, sympy.Symbol(name)) for name in variables]
     grid = [sympy.Integer(v) for v in (-2, -1, 0, 1, 2)]
+    # 网格必须是**有理数**而不只是整数: `x**2 >= x` 的反例是 x=1/2, 而整数网格上
+    # 该命题处处成立 —— 只用整数采样会把一个假命题报成"未发现反例", 于是"可反驳"
+    # 这条路径在实践中永远走不到 (验收矩阵明确要求"可证明/可反驳各一例")。
+    # 仍是有界采样: 只用来构造反例, 不作为证明手段 (找不到反例不构成证明)。
+    grid += [sympy.Rational(1, 2), sympy.Rational(-1, 2),
+             sympy.Rational(3, 2), sympy.Rational(-3, 2),
+             sympy.Rational(1, 3)]
     for combo in itertools.product(grid, repeat=len(pairs)):
         sub = {sym: val for (_, sym), val in zip(pairs, combo)}
         try:
@@ -649,9 +656,19 @@ def _probe_counterexample(diff, variables, want_negative: bool = False) -> dict 
             continue
         hit = val.is_negative if want_negative else (val.is_zero is False)
         if hit:
-            # 见证必须按符号名映射, 保证可回代且不与其他变量错位
-            return {str(sym): int(val) for (_, sym), val in zip(pairs, combo)}
+            # 见证必须按符号名映射, 且保留**精确值** (写成 `1/2` 而不是取整):
+            # 取整会把反例替换成另一个点, 回代时可能根本不违反命题。
+            return {str(sym): _exact_witness(val) for (_, sym), val in zip(pairs, combo)}
     return None
+
+
+def _exact_witness(value):
+    """把网格点写成可回代的精确值 (整数保持整数, 有理数写成字符串分数)。"""
+    import sympy
+
+    if value.is_Integer:
+        return int(value)
+    return str(sympy.nsimplify(value))
 
 
 OPERATIONS = {

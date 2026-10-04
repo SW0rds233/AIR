@@ -62,15 +62,35 @@ def classify_strategy(text: str, *, has_data: bool = False) -> str:
 
     合并计划 §7.1 明确"不能把所有研究问题都强制转成 SymPy 可解的式子", 因此这里
     只在题面**确实**要求判定/证明时才选 `derivation`; 否则默认 `synthesis`。
+
+    §3.1 G06 补了一条判据: **题面能被精确形式化**时也走 `derivation`。只靠关键词会漏掉
+    真实的形式化问题 —— 实测"参数 2-(211,15,1) 的设计是否存在"没有出现"证明/推导"
+    这些词, 于是被判成综述策略, 命题停在候选状态、交付降级为研究备忘录, 而它其实
+    有唯一的确定答案。判据用的是与 `build_spec_from_input` 同一份"精确计数约束抽取",
+    不是再加一组关键词。
     """
     body = str(text or "")
     if any(hint in body for hint in _SYMBOLIC_HINTS):
+        return "derivation"
+    if _precisely_formalisable(body):
         return "derivation"
     if has_data or any(hint in body for hint in _DATA_HINTS):
         return "quantitative"
     if any(hint in body for hint in _SYNTHESIS_HINTS):
         return "synthesis"
     return "synthesis"
+
+
+def _precisely_formalisable(text: str) -> bool:
+    """题面是否含可精确抽取的约束 (如计数参数) —— 抽得出就走形式化。"""
+    if not str(text or "").strip():
+        return False
+    try:
+        from src.research.design_feasibility import formulate_from_text
+
+        return formulate_from_text(text) is not None
+    except Exception:  # noqa: BLE001 - 抽取失败按"不可精确形式化"处理, 不影响综述路径
+        return False
 
 
 class ReasoningAgent(AgentBase):
@@ -118,13 +138,13 @@ class ReasoningAgent(AgentBase):
         strategy = classify_strategy(
             f"{task.objective}\n{context.request}",
             has_data=bool(context.objects.get("dataset")) or bool(topic and _has_data(context)))
-        # 形式化推导策略先走**抽取出来的推理内核** (合并计划 M2「按职责抽取」):
-        # 团队路径与旧引擎路径共用同一份"证明计划 + 推导步骤 + 反方审查"实现,
-        # 因此两边的步骤集与待核验义务不会分叉 (用例见 tests/test_reasoning_kernel.py)。
+        # 形式化推导策略先走**闭环路径** (合并计划 §3.1 G06): 它把
+        # "候选/义务 → 工具核验 → 结构化记录 → 状态归并"整条链接进同一任务协议 ——
+        # 义务与核验记录作为候选提交, 命题状态由唯一提交口按内核判据重算。
         if strategy == "derivation":
-            kernel_result = self.derive_via_kernel(task, context, runtime, usage)
-            if kernel_result is not None:
-                return kernel_result
+            formal = self.formal_closure(task, context, runtime, usage)
+            if formal is not None:
+                return formal
         claims: list[dict[str, Any]] = []
         counterexamples: list[dict[str, Any]] = []
         missing: list[str] = []
@@ -235,24 +255,26 @@ class ReasoningAgent(AgentBase):
                               unresolved=[*missing[:4], *limitations[:4]],
                               usage=usage, payload=payload_out, replan=replan)
 
-    # ---- 形式化推导: 走抽取出来的推理内核 (M2) ----
-    def derive_via_kernel(self, task: AgentTask, context: ContextPack,
-                          runtime: AgentRuntime,
-                          usage: UsageRecord) -> AgentResult | None:
-        """用 `research/reasoning_kernel.py` 生成证明计划与推导步骤。
+    # ---- 形式化推导: 团队闭环 (合并计划 §3.1 G06) ----
+    def formal_closure(self, task: AgentTask, context: ContextPack,
+                       runtime: AgentRuntime,
+                       usage: UsageRecord) -> AgentResult | None:
+        """走完"命题/义务 → 工具核验 → 结构化记录 → 状态归并"。
 
-        为什么角色要调内核而不是自己重写一套: 合并计划 §7.1 要求把
-        `_act_plan_proof`/`_act_derive_step` 的**能力**抽到推理角色, 而 §14.3 要求
-        判定层保持零 LLM、结论只由证书与规则产生。内核正好落在这条边界上 ——
-        它做纯计算 (计划/步骤/反方审查), 把命题真值留给判定层。
+        与旧实现 (只把计划压成一条 claim 候选) 的区别就是 G06 的缺口本身:
+        核验记录与义务必须作为候选**一起提交**, 否则判定层永远看不到"这条命题
+        依据什么被支持", 团队形式化路径也就不闭环。
 
-        返回 `None` 表示"上下文里没有可形式化的命题", 调用方退回通用策略
-        (综合/量化), 而不是空转或编一条命题出来。
+        边界 (没有让步):
+        - 判定层仍是唯一状态写入点 —— 这里提交的 claim 候选**不带**科学等级,
+          状态由唯一提交口按 `reasoning_kernel.claim_state_for` 重算;
+        - 工具结果不可伪造 —— 核验由运行时 (本运行的研究存储) 真执行, 记录带
+          输入 hash 与完整 `VerificationResult`;
+        - 不能编码的义务保持未决 —— 没有可用后端时如实记 `unsupported`,
+          不把"没验"写成"验过"。
+
+        返回 `None` 表示"这条任务没有可形式化的对象", 调用方退回通用策略。
         """
-        claim, obligations, evidence = _formalisable_subject(context)
-        if claim is None:
-            return None
-
         from src.research.reasoning_kernel import (
             build_design_steps,
             derive_steps_for,
@@ -261,10 +283,23 @@ class ReasoningAgent(AgentBase):
             plan_proof_for,
         )
 
-        # 1. 证明计划 (规则路径始终计算; 有 LLM 时内核只允许它**增加**待核验内容)
+        subject = _formal_subject(task, context)
+        if subject is None:
+            return None
+        claim, obligations, evidence, form_notes = subject
+        if not obligations:
+            # 命题已在库里但没有义务: 用**同一份**形式化判据给它拆义务, 而不是让角色
+            # 自己列一份 (否则"该命题需要验什么"会有两份说法)。
+            obligations = _obligations_for_existing_claim(claim)
+            if obligations:
+                form_notes.append(
+                    f"为已有命题补齐 {len(obligations)} 条待核验义务 (形式化判据)")
+
+        # 1. 证明计划 (规则路径始终计算; 内核只允许模型**增加**待核验内容)
         try:
             plan_outcome = plan_proof_for(claim, obligations=obligations,
-                                          available=None, llm=None)
+                                          available=runtime.verification_backends(),
+                                          llm=None)
         except Exception as e:  # noqa: BLE001 - 计划失败退到通用策略, 不静默成功
             runtime.emit("reasoning_kernel_failed",
                          {"task_id": task.task_id, "stage": "plan", "reason": str(e)})
@@ -279,55 +314,96 @@ class ReasoningAgent(AgentBase):
                 claim, attempt=_attempt_from_plan(plan_outcome),
                 obligations=obligations, evidence=evidence)
 
-        changes: list[ChangeProposal] = []
-        for stage, outcome in (("plan", plan_outcome), ("derive", steps_outcome)):
-            if not outcome.ok:
-                continue
-            changes.append(build_proposal(
-                "claim",
-                payload={
-                    "id": claim.id, "version": claim.version,
-                    "statement": claim.statement,
-                    "strategy": str(outcome.payload.get("strategy") or "derivation"),
-                    "stage": stage,
-                    "steps": outcome.payload.get("steps"),
-                    "formal_gap": outcome.payload.get("formal_gap"),
-                    "review_obligations": len(outcome.payload.get("review_obligations")
-                                              or []),
-                    "subquestion": task.subquestion,
-                    "informal": False,
-                    "kernel": True,
-                },
-                rationale=f"{stage}: {outcome.summary}",
-                input_versions={claim.id: claim.version},
-            ))
-        if not changes:
-            return None
+        # 3. 义务集合: 已有 + 计划提出的 + 反方审查新增的 (去重, 按 id 与陈述)
+        proposed = [_parse(_obligation_model(), row)
+                    for row in (plan_outcome.payload.get("proposed") or [])]
+        reviewed = [_parse(_obligation_model(), row)
+                    for row in (steps_outcome.payload.get("review_obligations") or [])]
+        pending = _merge_obligations(
+            claim, [*obligations, *proposed, *reviewed])
+        # 反例搜索是**独立的一条路**: 假命题只有它会给出明确结论 (见 helper 文档)。
+        pending = _with_counterexample_obligation(claim, pending, runtime)
 
-        missing = [n for n in steps_outcome.notes if "形式化片段" in n]
+        # 4. 逐条核验: 工具/规则/独立审查由核验服务分派, 结果作为候选提交
+        changes: list[ChangeProposal] = []
+        verified = 0
+        unresolved: list[str] = []
         needs: list[ResearchNeed] = []
-        for obligation in (steps_outcome.payload.get("review_obligations") or []):
-            needs.append(ResearchNeed(
-                kind=NeedKind.clause,
-                statement=f"独立审查提出待核验义务: {clip(str(obligation.get('statement', '')), 200)}",
-                why="反方审查意见必须经核验才能关闭, 不直接改结论状态",
-                acceptance=["给出可定位依据或工具核验记录"],
-                blocking=False))
+        for obligation in pending:
+            outcome = runtime.run_verification(task, claim, obligation,
+                                               evidence=evidence)
+            usage.tool_calls += 1 if outcome.evaluated else 0
+            obligation_payload = {
+                **obligation.model_dump(mode="json"),
+                **dict(outcome.obligation_updates or {}),
+            }
+            changes.append(build_proposal(
+                "obligation", payload=obligation_payload, object_id=obligation.id,
+                rationale=f"义务核验 ({outcome.tool or '未执行'}): "
+                          f"{obligation.statement[:120]}",
+                input_versions={claim.id: claim.version}))
+            if outcome.record is not None:
+                verified += 1
+                changes.append(build_proposal(
+                    "verification",
+                    payload={"record": outcome.record.model_dump(mode="json"),
+                             "result": (outcome.result.model_dump(mode="json")
+                                        if outcome.result is not None else {}),
+                             "obligation_id": obligation.id},
+                    object_id=outcome.record.id,
+                    rationale=f"核验记录 {outcome.tool}: {outcome.record.status}",
+                    input_versions=dict(outcome.record.verification_closure or {})))
+            if not outcome.closed:
+                reason = str(outcome.obligation_updates.get("detail", "")
+                             or obligation.statement)
+                unresolved.append(f"{obligation.statement[:120]}: {reason[:200]}")
+                needs.append(ResearchNeed(
+                    kind=NeedKind.clause,
+                    statement=f"义务未关闭: {clip(obligation.statement, 160)}",
+                    why=reason[:300],
+                    acceptance=["给出可定位依据、工具核验记录或显式声明"],
+                    blocking=False))
+
+        # 5. claim 候选: 只带**结构化事实** (陈述/形式片段/步骤), 不带科学等级
+        claim_payload = claim.model_dump(mode="json")
+        for name in ("status", "assurance", "support_kind", "validation_status",
+                     "coverage", "verification_scope", "verification_closure"):
+            claim_payload.pop(name, None)
+        claim_payload["strategy"] = str(plan_outcome.payload.get("strategy")
+                                        or claim_payload.get("strategy") or "derivation")
+        if not is_design_claim(claim):
+            claim_payload["steps"] = steps_outcome.payload.get("step_items") or []
+        claim_payload["kernel"] = True
+        claim_payload["subquestion"] = task.subquestion
+        changes.append(build_proposal(
+            "claim", payload=claim_payload, object_id=claim.id,
+            rationale=(f"形式化闭环: {plan_outcome.summary}; {steps_outcome.summary}; "
+                       f"核验 {verified} 条"),
+            input_versions={claim.id: claim.version},
+            may_change_conclusion=False))
+        # 证据归属 (§6.1): 把上下文里的可用证据绑定到**本条命题的当前版本**。
+        # 没有这一步, 交付包里只有"一堆材料", 讲不出"这条结论依据哪条来源、适用条件
+        # 是什么"; 而关系强度取自材料自己的判定 (不确定就是 insufficient), 不默认支持。
+        changes.extend(_evidence_links_for(task, claim, context))
+
+        form_notes.extend(steps_outcome.notes)
+        # 摘要里保留核验与独立审查的计数: 界面与用例据此看出"到底跑过什么",
+        # 只报"闭环了"会掩盖"一条义务都没验"这种真实情况。
+        summary = (f"形式化闭环: {plan_outcome.summary}; {steps_outcome.summary}; "
+                   f"{len(pending)} 条义务, 核验 {verified} 条, "
+                   f"未关闭 {len(unresolved)} 条")
         runtime.emit("reasoning_kernel_used", {
             "task_id": task.task_id, "claim_id": claim.id,
-            "design": is_design_claim(claim),
-            "obligations": len(obligations),
-        })
+            "design": is_design_claim(claim), "obligations": len(pending),
+            "verified": verified, "unresolved": len(unresolved)})
         return self.completed(
-            task,
-            f"形式化推导 (内核): {plan_outcome.summary}; {steps_outcome.summary}",
-            changes=changes, needs=needs, unresolved=missing,
+            task, summary, changes=changes, needs=needs,
+            unresolved=[*form_notes[:4], *unresolved[:8]],
             usage=usage,
             payload={"schema": "ReasoningResult/v1", "kernel": True,
-                     "strategy": "derivation",
-                     "claim_id": claim.id,
-                     "plan": plan_outcome.payload,
-                     "steps": steps_outcome.payload},)
+                     "strategy": "derivation", "claim_id": claim.id,
+                     "plan": plan_outcome.payload, "steps": steps_outcome.payload,
+                     "obligations": len(pending), "verified": verified})
 
     def fallback_claims(self, task: AgentTask, context: ContextPack,
                         strategy: str) -> tuple[list[dict[str, Any]], str]:
@@ -441,6 +517,237 @@ def _formalisable_subject(context: ContextPack):
                             for row in context.objects.get("evidence") or [])
                 if e is not None]
     return claim, obligations, evidence
+
+
+def _formal_subject(task: AgentTask, context: ContextPack):
+    """这条任务要形式化**什么**: 上下文里已有的命题, 或从题面自己形式化出来的。
+
+    为什么角色必须能自己形式化 (合并计划 §3.1 G06 / §9 R2): 团队要接管形式化研究,
+    就不能假设"已有人把命题放好了"。此前团队路径只在上下文里找 claim, 找不到就
+    退回通用策略 → 一条纯形式化题面**永远进不了形式化闭环** (实测: 团队跑
+    `2-(211,15,1)` 那类题只有 evidence/reasoning(blocked)/writing 三个角色)。
+    返回 `(claim, obligations, evidence, notes)`; 无法形式化时返回 `None`。
+    """
+    claim, obligations, evidence = _formalisable_subject(context)
+    if claim is not None:
+        return claim, obligations, evidence, []
+
+    formulated = _formulate_from_request(task, context)
+    if formulated is None:
+        return None
+    claim, obligations, notes = formulated
+    return claim, obligations, evidence, notes
+
+
+def _formulate_from_request(task: AgentTask, context: ContextPack):
+    """把题面形式化成"命题 + 义务" (确定性路径, 零 LLM)。
+
+    形式化能力本身在 `research/formulation.py` (从旧引擎按职责抽出), 因此团队与
+    引擎对同一题面得到的是**同一批**命题与义务, 不会各写一套编码。
+
+    候选文本**逐个尝试**而不是拼在一起: 原始请求、子问题措辞、主控画像是同一道题的
+    三种说法, 拼起来会让关系符两侧混入后一种说法的文本 —— 实测 `x**2 >= x` 的右端
+    变成 `"x 存在性判定"`, 交给工具就是语法错误, 于是报告 unsupported, 而命题其实
+    完全可判定。谁先能形式化就用谁, 不混合。
+    """
+    candidates = [
+        str(context.request or ""),
+        task_intent(task),
+        str((context.objects.get("brief") or [{}])[0].get("main_question", "")
+            if context.objects.get("brief") else ""),
+    ]
+    seen: set[str] = set()
+    for text in candidates:
+        body = text.strip()
+        if not body or body in seen:
+            continue
+        seen.add(body)
+        formulated = _try_formulate(body, task)
+        if formulated is None:
+            continue
+        claim, obligations, notes = formulated
+        return claim, obligations, notes
+    return None
+
+
+def _try_formulate(text: str, task: AgentTask):
+    """对**一段**文本做形式化; 抽不出命题时返回 None。"""
+    from src.research.formulation import formulate_problem
+
+    try:
+        formulated = formulate_problem(
+            request=text, project_id=task.project_id or "research",
+            problem_id=task.problem_id or "problem",
+            available=_available_backends())
+    except Exception:  # noqa: BLE001 - 该说法形式化失败就换下一种, 不编命题
+        return None
+    if not formulated.claims:
+        return None
+    notes = list(formulated.notes)
+    claim = _first_claim(formulated)
+    if claim is None:
+        return None
+    if len(formulated.claims) > 1:
+        notes.append(f"题面抽出 {len(formulated.claims)} 条命题, 本次先处理第一条")
+    obligations = [o for o in (_parse(_obligation_model(),
+                                      o.model_dump(mode="json")
+                                      if hasattr(o, "model_dump") else o)
+                               for o in formulated.obligations) if o is not None]
+    # 义务可能没有绑定命题 (跨命题共享): 只保留指向本条命题的, 没有归属的归给本条。
+    obligations = [o for o in obligations if o.claim_id in ("", claim.id)]
+    for obligation in obligations:
+        if not obligation.claim_id:
+            obligation.claim_id = claim.id
+            obligation.claim_version = claim.version
+    return claim, obligations, notes
+
+
+def _first_claim(formulated: Any):
+    """取第一条可解析的命题; 无法解析时返回 None (不猜、不补默认语义)。"""
+    for item in formulated.claims:
+        claim = _parse(_claim_model(), item.model_dump(mode="json")
+                       if hasattr(item, "model_dump") else item)
+        if claim is not None and claim.statement:
+            return claim
+    return None
+
+
+def _available_backends() -> dict[str, bool]:
+    """形式化时用的后端可用性 (义务的 `acceptance_method` 由它决定)。"""
+    from src.verification.runner import available_tools
+
+    return available_tools()
+
+
+def _claim_model():
+    from src.research.schemas import Claim
+
+    return Claim
+
+
+def _obligation_model():
+    from src.research.schemas import ProofObligation
+
+    return ProofObligation
+
+
+def _evidence_links_for(task: AgentTask, claim: Any,
+                        context: ContextPack) -> list[ChangeProposal]:
+    """上下文证据 → **本条命题当前版本**的归属候选 (§6.1 EvidenceLink)。
+
+    只在材料确实带支持关系判定时才写"条件匹配"; 其余情况如实写 `insufficient`
+    (检索命中不等于支持)。关系的来源是材料自己的 `relation` 字段, 这里不重新判语义
+    —— 规则层判不出"这段文字支持这个论断", 编一个关系比不写更糟。
+    """
+    from src.research.schemas import (
+        EvidenceLink,
+        ObjectRef,
+        SupportKindOfEvidence,
+        ValidationStatus,
+    )
+
+    valid = {kind.value for kind in SupportKindOfEvidence}
+    out: list[ChangeProposal] = []
+    for row in (context.objects.get("evidence") or [])[:20]:
+        source_id = str(row.get("source_id") or row.get("id") or "")
+        if not source_id:
+            continue
+        relation = str(row.get("relation") or "insufficient")
+        if relation not in valid:
+            relation = "insufficient"
+        link = EvidenceLink(
+            claim_ref=ObjectRef(id=claim.id,
+                                version=int(getattr(claim, "version", 1) or 1)),
+            source_ref=ObjectRef(id=source_id,
+                                 version=int(row.get("version", 1) or 1)),
+            relation=SupportKindOfEvidence(relation),
+            excerpt=str(row.get("excerpt", "") or "")[:300],
+            locator=str(row.get("locator", "") or row.get("location", "") or ""),
+            condition_match=relation in ("supports", "partially_supports"),
+            condition_notes=str(row.get("note", "") or ""),
+            review_status=(ValidationStatus.unchecked if relation == "insufficient"
+                           else ValidationStatus.verified),
+            reviewer="reasoning",
+        )
+        out.append(build_proposal(
+            "evidence_link", payload=link.model_dump(mode="json"),
+            object_id=link.id,
+            rationale=f"命题 {claim.id} ← 证据 {source_id} ({relation})",
+            input_versions={claim.id: int(getattr(claim, "version", 1) or 1)},
+        ))
+    return out
+
+
+def _obligations_for_existing_claim(claim: Any) -> list[Any]:
+    """已有命题的义务清单 (来自唯一的形式化判据, 不是角色自己列的)。"""
+    from src.research.problem_formulator import obligations_for_claim
+    from src.research.schemas import Relation
+
+    wants_equality = getattr(claim, "relation", None) == Relation.eq
+    rows = obligations_for_claim(claim, _available_backends(),
+                                 wants_equality=wants_equality)
+    out = []
+    for row in rows:
+        parsed = _parse(_obligation_model(), row.model_dump(mode="json")
+                        if hasattr(row, "model_dump") else row)
+        if parsed is not None:
+            out.append(parsed)
+    return out
+
+
+def _with_counterexample_obligation(claim: Any, obligations: list[Any],
+                                    runtime: AgentRuntime) -> list[Any]:
+    """可编码反例搜索时，补一条**反例义务** (合并计划 §5.4 的能力)。
+
+    为什么必须独立于"命题有没有其他义务": 反例搜索回答的是"命题是否根本不成立",
+    而证明义务回答的是"命题能否被证明"。只在前者存在时才需要后者 —— 实测
+    `x**2 >= x` 这类**假命题**在只有 `prove_inequality` 义务时只会得到 unsupported,
+    结论停在"受阻", 而它其实有一个明确的反例。
+
+    反例义务的结论同样要经核验: 只有拿到**可回代的反例**才算被否决,
+    工具跑过没找到反例不构成证明 (`counterexample_verdict_for` 的判据)。
+    """
+    from src.research.schemas import ProofObligation
+
+    if any(getattr(o, "kind", "") == "refute" for o in obligations):
+        return obligations
+    try:
+        if not runtime.verification_service().has_counterexample_check(claim):
+            return obligations
+    except Exception:  # noqa: BLE001 - 不可用时不造假: 少一条义务, 不假装搜过
+        return obligations
+    obligations.append(ProofObligation(
+        statement=f"搜索反例: {clip(getattr(claim, 'statement', ''), 160)}",
+        kind="refute",
+        acceptance_method="refute",
+        claim_id=claim.id,
+        claim_version=int(getattr(claim, "version", 1) or 1),
+        # **非必要义务**: "没找到反例"不构成证明, 因此它不能挡住已证明的结论。
+        # 但一旦真的找到反例, 状态归并会把命题判为 refuted (反例不受 required 限制)。
+        required=False,
+        detail="找满足前提的反例; 找不到不等于命题成立 (只记有限测试证据)",
+    ))
+    return obligations
+
+
+def _merge_obligations(claim: Any, obligations: list[Any]) -> list[Any]:
+    """义务去重: 同 id 只留一条; 同陈述只留一条 (反方审查会重复提出同一条)。"""
+    seen_ids: set[str] = set()
+    seen_text: set[str] = set()
+    out: list[Any] = []
+    for obligation in obligations:
+        if obligation is None:
+            continue
+        if obligation.claim_id and obligation.claim_id != claim.id:
+            continue
+        key = str(getattr(obligation, "statement", "")).strip()
+        if obligation.id in seen_ids or (key and key in seen_text):
+            continue
+        seen_ids.add(obligation.id)
+        if key:
+            seen_text.add(key)
+        out.append(obligation)
+    return out
 
 
 def _parse(model: Any, row: Any) -> Any:

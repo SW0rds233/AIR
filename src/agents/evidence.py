@@ -104,6 +104,10 @@ class EvidenceAgent(AgentBase):
                 llm_note = f"工具循环不可用 ({e}); 已改用确定性检索路径"
 
         # 2. 确定性检索: 与 LLM 路径共用同一入库与去重实现 (这就是"合并"的含义)
+        # 新颖性对照在**检索之前**算: 它不依赖本次检索结果, 而且"没有检索能力/没比过"
+        # 本身就是要写进交付物的结论 —— 放在检索之后会让"检索受阻"的运行连一条
+        # `unchecked` 记录都没有, 交付物于是看起来没有新颖性问题 (§5.4 / package.py)。
+        novelty_changes = self._novelty_records(task, context, [])
         collected = self.retrieve(task, context, runtime, topic=topic, query=query,
                                   policy=policy)
         if collected is None:
@@ -118,6 +122,7 @@ class EvidenceAgent(AgentBase):
                     blocking=False)],
                 usage=usage,
                 summary="资料范围不可用",
+                changes=novelty_changes,
             )
 
         evidence_items, coverage, unresolved = collected
@@ -130,10 +135,20 @@ class EvidenceAgent(AgentBase):
                     why="需要真实检索结果才能给出依据",
                     acceptance=["检索真的执行过, 或明确说明为何无法检索"],
                     blocking=False)],
-                usage=usage)
+                usage=usage,
+                changes=novelty_changes)
 
         locatable = [e for e in evidence_items if e.get("locator")]
         changes = [self._evidence_proposal(task, e, topic) for e in evidence_items]
+        # 证据归属 (§6.1): 证据必须绑定到**具体命题版本**, 否则同一批证据会被所有命题
+        # 共享 —— "这条来源支持哪个结论、适用条件是什么"就无从回答。这里由检索角色
+        # 提交 `evidence_link` 候选 (relation 来自它自己的判定, 不是猜)。
+        changes.extend(self._evidence_links(task, evidence_items, context))
+        # 新颖性对照 (§5.4): 交付包与出版层按它决定"能不能宣称原创"。**必须留下记录**
+        # —— 没有检索能力时也落一条 `unchecked` 并写明原因, 否则交付物看起来像
+        # "没有新颖性问题"。判定由 `research/novelty.py` 做 (零 LLM), 这里只提供
+        # 对照来源 (本地库优先, 否则外部检索)。
+        changes.extend(novelty_changes)
         needs = self._needs_from(evidence_items, locatable, coverage)
         summary = (
             f"检索{kinds_note(policy)}: 命中 {coverage.hits} 条 / 入库 {coverage.ingested}, "
@@ -245,6 +260,120 @@ class EvidenceAgent(AgentBase):
             input_versions={},
         )
 
+    def _novelty_records(self, task: AgentTask, context: ContextPack,
+                         items: list[dict[str, Any]]) -> list[ChangeProposal]:
+        """为上下文里的命题落**新颖性对照记录** (零 LLM 判定)。
+
+        适用范围: 只对**结论类**命题做 (工作台与出版层关心的是"这个结论新不新"),
+        不为义务/来源做 —— 那两者的"新"没有意义。
+        """
+        from src.research.novelty_service import assess_novelty_for
+
+        rows = [row for row in (context.objects.get("claim") or []) if row.get("id")]
+        if not rows:
+            return []
+        service = self._knowledge_service(task, context)
+        out: list[ChangeProposal] = []
+        for row in rows[:4]:
+            claim = _parse_claim(row)
+            if claim is None:
+                continue
+            evidence = [e for e in items if str(e.get("claim_id", "")) == claim.id]
+            try:
+                record, scope = assess_novelty_for(
+                    claim, service=service, evidence=evidence,
+                    evidence_scope=[str(s.get("source_set_id", ""))
+                                    for s in context.sources
+                                    if s.get("source_set_id")],
+                    source_policy=task.source_policy or "user_kb")
+            except Exception:  # noqa: BLE001 - 对照失败不得吞掉检索成果
+                continue
+            # **确定性 id 必须写进记录本身**, 不只是存储键: 否则对象库里的键是
+            # `nov-<claim>-v<n>` 而载荷里的 `id` 是另一个随机值, 交付包引用哪个都说不清。
+            novelty_id = f"nov-{claim.id}-v{claim.version}"
+            record = record.model_copy(update={"id": novelty_id})
+            out.append(build_proposal(
+                "novelty",
+                payload=record.model_dump(mode="json"),
+                object_id=novelty_id,
+                rationale=(f"新颖性对照 ({scope.get('kind') or 'none'}): "
+                           f"{record.status.value}"),
+                input_versions={claim.id: claim.version},
+            ))
+        return out
+
+    def _knowledge_service(self, task: AgentTask, context: ContextPack):
+        """有可用本地知识底座时返回它 (只探测已存在的库, 不创建空库)。"""
+        topic = _topic_of(task, context)
+        if not topic:
+            return None
+        from src.kb.service import KnowledgeService
+
+        try:
+            service = KnowledgeService(topic, create_if_missing=False)
+        except Exception:  # noqa: BLE001 - 探测失败按"没有本地库"处理
+            return None
+        return service if getattr(service, "usable", False) else None
+
+    def _evidence_links(self, task: AgentTask, items: list[dict[str, Any]],
+                        context: ContextPack) -> list[ChangeProposal]:
+        """把命中材料绑定到上下文里的命题 (带版本与适用条件)。
+
+        与 `_evidence_proposal` 的分工: 前者登记**材料本身**, 这里登记**材料与本命题
+        的关系**。两者都要有 —— 只登记材料时, 同一批证据会"支持"所有命题; 只登记关系
+        时又找不到原文。关系强度按检索角色自己的判定写, 不确定就写 `insufficient`
+        (命中不等于支持), 绝不因为"是检索到的"就默认支持。
+
+        条数设上限: 命题 × 材料的笛卡尔积很容易膨胀, 而交付包里的证据链只需要
+        "每条命题有哪些可定位依据"。
+        """
+        from src.research.schemas import (
+            EvidenceLink,
+            ObjectRef,
+            SupportKindOfEvidence,
+            ValidationStatus,
+        )
+
+        claims = [row for row in (context.objects.get("claim") or [])
+                  if row.get("id")]
+        if not claims or not items:
+            return []
+        valid = {kind.value for kind in SupportKindOfEvidence}
+        out: list[ChangeProposal] = []
+        for claim_row in claims[:8]:
+            claim_id = str(claim_row.get("id", ""))
+            claim_version = int(claim_row.get("version", 1) or 1)
+            for item in items[:12]:
+                source_id = str(item.get("source_id") or "")
+                relation = str(item.get("relation", "insufficient") or "insufficient")
+                if relation not in valid:
+                    relation = "insufficient"
+                link = EvidenceLink(
+                    claim_ref=ObjectRef(id=claim_id, version=claim_version),
+                    source_ref=ObjectRef(id=source_id or str(item.get("id", "")), version=1),
+                    relation=SupportKindOfEvidence(relation),
+                    excerpt=str(item.get("excerpt", "") or "")[:300],
+                    locator=str(item.get("locator", "") or ""),
+                    # 只有真的支持本命题时才说"条件匹配"; 其余情况不得默认成立
+                    condition_match=relation in ("supports", "partially_supports"),
+                    condition_notes=str(item.get("note", "") or ""),
+                    review_status=(ValidationStatus.unchecked
+                                   if relation == "insufficient"
+                                   else ValidationStatus.verified),
+                    reviewer="evidence",
+                )
+                out.append(build_proposal(
+                    "evidence_link",
+                    payload=link.model_dump(mode="json"),
+                    object_id=link.id,
+                    rationale=(f"证据 {source_id or '-'} → 命题 {claim_id} "
+                               f"({relation})"),
+                    input_versions={claim_id: claim_version},
+                ))
+                if len(out) >= 40:
+                    return out
+        return out
+
 
 def _study_from(context: ContextPack):
     """从上下文里的模型/命题信息还原研究设计 (用于组合检索式)。
@@ -297,6 +426,17 @@ def _coverage_dict(coverage: Any) -> dict[str, Any]:
         "failures": list(getattr(coverage, "failures", []) or []),
         "scope_note": str(getattr(coverage, "scope_note", "") or ""),
     }
+
+
+def _parse_claim(row: dict[str, Any]):
+    """上下文里的命题行 → `Claim`; 结构不完整时返回 `None` (不猜)。"""
+    from src.research.schemas import Claim
+
+    try:
+        return Claim.model_validate({k: v for k, v in row.items()
+                                     if not k.startswith("_")})
+    except Exception:  # noqa: BLE001 - 不完整的行不参与新颖性对照
+        return None
 
 
 def _topic_of(task: AgentTask, context: ContextPack) -> str:

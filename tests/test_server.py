@@ -21,6 +21,12 @@ from src import server
 from src.server import Session, StartRequest, _final_summary, _run_session, build_initial_state
 
 
+def _checkpointer_of(session) -> object:
+    """会话的检查点连接 (桩图要与真实图用同一个, 否则续跑读不到状态)。"""
+    return getattr(session, "checkpointer", None)
+
+
+
 class _S(TypedDict, total=False):
     step: str
     resp: str
@@ -49,24 +55,24 @@ def _mock_graph(checkpointer=None):
 
 
 def test_build_initial_state():
-    req = StartRequest(topic="测试主题", keywords=["k1"], subtopics=["s1"],
-                       max_revisions=5, skip_retrieval=False)
+    req = StartRequest(topic="测试主题", keywords=["k1"], subtopics=["s1"])
     s = build_initial_state(req)
     assert s["interactive"] is True
     assert s["research_topic"] == "测试主题"
     assert s["topic_keywords"] == ["k1"]
     assert s["sub_topics"] == ["s1"]
-    assert s["max_revisions"] == 5
-    assert s["skip_retrieval"] is False
+    # R5: 旧修订循环的旋钮已退役 —— 初始状态里不得再出现"没人读的拨盘"
+    assert "max_revisions" not in s
+    assert "skip_retrieval" not in s
 
 
-def test_build_initial_state_request_and_skip_flag():
-    """自然语言请求与 skip-retrieval 请求标志透传; 缓存解析已迁移至 planner"""
-    req = StartRequest(topic="", request="我想研究射频指纹识别", skip_retrieval=True)
+def test_build_initial_state_carries_the_request_text():
+    """自然语言请求必须原样进入初始状态 (缓存/修订旋钮已退役, 不再透传)。"""
+    req = StartRequest(topic="", request="我想研究射频指纹识别")
     s = build_initial_state(req)
     assert s["research_request"] == "我想研究射频指纹识别"
     assert s["research_topic"] == ""
-    assert s["skip_retrieval"] is True  # 请求标志透传, 缓存加载移至 research_planner_node
+    assert "skip_retrieval" not in s
 
 
 def test_final_summary():
@@ -81,8 +87,8 @@ def test_final_summary():
 
 def test_session_interrupt_resume_roundtrip():
     """会话在 interrupt 暂停 → respond 续跑 → done"""
-    orig = server.build_theory_pipeline
-    server.build_theory_pipeline = _mock_graph
+    orig = server._build_team_app
+    server._build_team_app = lambda session: _mock_graph(_checkpointer_of(session))
     try:
         session = Session("t-test", mode="theory")
         t = threading.Thread(target=_run_session, args=(session, {"interactive": True}))
@@ -111,13 +117,13 @@ def test_session_interrupt_resume_roundtrip():
         t.join(timeout=10)
         assert not t.is_alive()
     finally:
-        server.build_theory_pipeline = orig
+        server._build_team_app = orig
 
 
 def test_session_stop_unblocks_interrupt():
     """stop 解除 interrupt 阻塞并发出 stopped 事件"""
-    orig = server.build_theory_pipeline
-    server.build_theory_pipeline = _mock_graph
+    orig = server._build_team_app
+    server._build_team_app = lambda session: _mock_graph(_checkpointer_of(session))
     try:
         session = Session("t-stop", mode="theory")
         t = threading.Thread(target=_run_session, args=(session, {"interactive": True}))
@@ -141,7 +147,7 @@ def test_session_stop_unblocks_interrupt():
         t.join(timeout=10)
         assert not t.is_alive()
     finally:
-        server.build_theory_pipeline = orig
+        server._build_team_app = orig
 
 
 def test_session_streams_stdout_as_log_events():
@@ -160,8 +166,8 @@ def test_session_streams_stdout_as_log_events():
         g.add_edge("node", END)
         return g.compile(checkpointer=checkpointer)
 
-    orig = server.build_theory_pipeline
-    server.build_theory_pipeline = _mock_graph
+    orig = server._build_team_app
+    server._build_team_app = lambda session: _mock_graph(_checkpointer_of(session))
     try:
         session = server.Session("t-log", mode="theory")
         t = threading.Thread(target=server._run_session, args=(session, {"interactive": False}))
@@ -176,7 +182,7 @@ def test_session_streams_stdout_as_log_events():
         t.join(timeout=5)
         assert any("子智能体进度" in l for l in log_lines)
     finally:
-        server.build_theory_pipeline = orig
+        server._build_team_app = orig
 
 
 def test_http_validation_and_static():
@@ -238,8 +244,8 @@ def test_run_session_persists_conversation():
     tmp = Path(tempfile.mkdtemp())
     orig_dir = store.CONVERSATIONS_DIR
     store.CONVERSATIONS_DIR = tmp
-    orig_bp = server.build_theory_pipeline
-    server.build_theory_pipeline = _mock_graph
+    orig_bp = server._build_team_app
+    server._build_team_app = lambda session: _mock_graph(_checkpointer_of(session))
     try:
         session = Session("t-persist", topic="持久化测试", mode="theory")
         server.SESSIONS[session.thread_id] = session
@@ -273,7 +279,7 @@ def test_run_session_persists_conversation():
         assert "user" in roles
         assert "interrupt" in roles
     finally:
-        server.build_theory_pipeline = orig_bp
+        server._build_team_app = orig_bp
         server.SESSIONS.pop("t-persist", None)
         store.CONVERSATIONS_DIR = orig_dir
 
@@ -331,8 +337,8 @@ def test_resume_from_interrupt_after_restart():
     store.CONVERSATIONS_DIR = tmp
     orig_ckpt_dir = server.CHECKPOINT_DIR
     server.CHECKPOINT_DIR = tmp / "checkpoints"
-    orig_bp = server.build_theory_pipeline
-    server.build_theory_pipeline = _mock_graph
+    orig_bp = server._build_team_app
+    server._build_team_app = lambda session: _mock_graph(_checkpointer_of(session))
     try:
         session_id = "resume-1"
         checkpointer, conn = server._make_checkpointer(session_id)
@@ -370,7 +376,7 @@ def test_resume_from_interrupt_after_restart():
                 break
         assert resumed.status == "done"
     finally:
-        server.build_theory_pipeline = orig_bp
+        server._build_team_app = orig_bp
         server.CHECKPOINT_DIR = orig_ckpt_dir
         server.SESSIONS.clear()
         store.CONVERSATIONS_DIR = orig_dir
@@ -544,7 +550,7 @@ def test_delete_session_keeps_shared_vector_store_across_projects(monkeypatch):
 if __name__ == "__main__":
     tests = [
         test_build_initial_state,
-        test_build_initial_state_request_and_skip_flag,
+        test_build_initial_state_carries_the_request_text,
         test_final_summary,
         test_session_interrupt_resume_roundtrip,
         test_session_stop_unblocks_interrupt,

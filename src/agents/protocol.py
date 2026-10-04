@@ -230,13 +230,19 @@ class UsageRecord(BaseModel):
         )
 
     def to_dict(self) -> dict[str, Any]:
+        # `cost_usd` 的 None 表示"未知"; 但**没有发生过模型调用时花费必然是 0**, 那是
+        # 已知事实而不是未知 —— 交付清单里 `llm_calls: 0` 配 `cost_usd: null` 会让人
+        # 以为"花了多少钱不知道", 而离线运行的花费恰恰是确定的 0。
+        cost = self.cost_usd
+        if cost is None and self.llm_calls == 0:
+            cost = 0.0
         return {
             "llm_calls": self.llm_calls,
             "tool_calls": self.tool_calls,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "total_tokens": self.total_tokens,
-            "cost_usd": self.cost_usd,
+            "cost_usd": cost,
             "models": list(self.models),
             "price_notes": list(self.price_notes),
             "unknown_parts": list(self.unknown_parts),
@@ -592,9 +598,18 @@ AGENT_CAPABILITIES: dict[str, dict[str, Any]] = {
 #: "不能只靠 `may_change_conclusion=False` 布尔标记", 工具注册与存储入口必须
 #: 实际限制写入)。放在协议层是为了让角色实现与运行时校验引用同一份真相源。
 WRITABLE_KINDS: dict[str, frozenset[str]] = {
-    "evidence": frozenset({"evidence", "source", "card", "case", "dataset"}),
+    # `evidence_link` 也是检索/证据角色的可写种类: 它登记的是"材料与本命题的关系"
+    # (§6.1 EvidenceLink), 与材料本身同属证据侧职责。缺了它就只剩"一堆材料",
+    # "这条来源支持哪个结论、适用条件是什么"无从回答。
+    "evidence": frozenset({"evidence", "source", "card", "case", "dataset",
+                           "evidence_link", "novelty"}),
     "modeling": frozenset({"model", "assumption", "definition"}),
-    "reasoning": frozenset({"claim", "obligation", "verification", "gap"}),
+    "reasoning": frozenset({"claim", "obligation", "verification", "gap",
+                            # 证据与命题的关系由**推理角色**也登记一份: 检索角色派工时
+                            # 常常还没有命题 (依赖顺序: 先检索再推理), 只有推理角色
+                            # 同时看得到"命题"和"可用证据"。两边都能写同一张表,
+                            # 因此不会出现"材料有了、归属永远空着"。
+                            "evidence_link"}),
     "validation": frozenset({"validation_plan"}),
     "writing": frozenset({"manuscript", "block"}),
     "figures": frozenset({"figure"}),
@@ -731,6 +746,14 @@ OBJECT_KINDS: frozenset[str] = frozenset({
     "card",
     "case",
     "dataset",
+    # 证据归属 (§6.1 EvidenceLink): "材料 × 命题"的关系对象。它是一个如实存在的
+    # 研究对象 (带版本、可查询、可追溯), 因此必须在这个封闭集合里 —— 否则
+    # `ChangeProposal` 会在构造时把它当成拼错种类拒掉, 而症状是**整条推理任务失败**。
+    "evidence_link",
+    # 新颖性对照记录 (§5.4): 交付包与出版层按它决定"能否宣称原创"。不登记这个种类就
+    # 无法把"还没比过"写进交付物 —— 省略记录会让成果看起来没有新颖性问题; 而构造
+    # 候选时它会被当成拼错种类**整条拒掉** (证据任务因此失败, 实测)。
+    "novelty",
     "snapshot",
     "manuscript",
     "block",

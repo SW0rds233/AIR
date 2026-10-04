@@ -1,13 +1,17 @@
 /**
- * 会话操作单一入口 (合并计划 §9.5 `session-controller.ts`) 的行为测试。
+ * 会话操作单一入口 (合并计划 §9.5 `session-controller.ts`, G19 后经唯一 store) 的行为测试。
  *
  * 迁移的关键风险是"会话切换串号", 因此这些用例盯的是语义而不是实现:
  * - 新建会话必须清空**所有**身份 (线程/会话/项目/问题) 并整体重置团队视图;
+ * - 身份切换必须让在途的工作台请求作废 (迟到回包不得覆盖新会话) —— 迁移前靠页面上的
+ *   `workbenchSeqBump()`, 现在由唯一状态的加载代号 (`ui.loadToken`) 承担;
  * - 切换历史会话必须整体恢复项目与问题 (**统一入口后不再有"模式恢复"**);
- * - 已完成的会话恢复后不得再连事件流 (查看不触发运行);
- * - 在途的工作台请求必须被作废 (迟到回包不得覆盖新会话)。
+ * - 已完成的会话恢复后不得再连事件流 (查看不触发运行)。
+ *
+ * G19 迁移说明: 断言不再读 `deps.applyResearch` 捕获的补丁对象 (那个写入口已删除),
+ * 而是读**唯一状态** `state/research-store.ts` 的 `selection` —— 判据逐条保留。
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   createSessionController,
@@ -15,12 +19,20 @@ import {
   type SessionDeps,
 } from '../src/session-controller';
 import { createResearchClient } from '../src/api/research-client';
+import { dispatch, getState, resetStore } from '../src/state/research-store';
 
 interface Harness {
   controller: SessionController;
   calls: string[];
-  research: Record<string, any>;
   deps: SessionDeps;
+}
+
+function selection(): Record<string, any> {
+  const s = getState().selection;
+  return {
+    threadId: s.threadId, sessionId: s.sessionId, projectId: s.projectId,
+    problemId: s.problemId, runId: s.runId, mode: s.mode, runStatus: s.runStatus,
+  };
 }
 
 function harness(overrides: Partial<SessionDeps> = {}): Harness {
@@ -40,7 +52,6 @@ function harness(overrides: Partial<SessionDeps> = {}): Harness {
     <button id="btn-history-back"></button>
   `;
   const calls: string[] = [];
-  const research: Record<string, any> = {};
   const deps: SessionDeps = {
     connectStream: (tid) => { calls.push('connect:' + tid); },
     closeStream: () => { calls.push('close'); },
@@ -61,10 +72,6 @@ function harness(overrides: Partial<SessionDeps> = {}): Harness {
     refreshContexts: () => { calls.push('refreshContexts'); },
     refreshHistorySelect: () => { calls.push('refreshHistorySelect'); },
     loadArtifact: (name) => { calls.push('loadArtifact:' + name); },
-    applyResearch: (patch) => { Object.assign(research, patch); },
-    threadId: () => '',
-    sessionId: () => '',
-    workbenchSeqBump: () => { calls.push('seqBump'); },
     resetTeam: () => { calls.push('resetTeam'); },
     // HTTP 出口走 `api/` 层 (§9.5): 控制器本身不拼 URL, 因此这里注入一个客户端。
     // `fetchImpl` 每次请求时才解析, 于是用例里的 `vi.stubGlobal('fetch', ...)`
@@ -77,7 +84,7 @@ function harness(overrides: Partial<SessionDeps> = {}): Harness {
     }),
     ...overrides,
   };
-  return { controller: createSessionController(deps), calls, research, deps };
+  return { controller: createSessionController(deps), calls, deps };
 }
 
 function jsonResponse(body: any, status = 200): Promise<any> {
@@ -85,6 +92,10 @@ function jsonResponse(body: any, status = 200): Promise<any> {
 }
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+beforeEach(() => {
+  resetStore();
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -94,12 +105,17 @@ afterEach(() => {
 describe('新建会话 (newSession)', () => {
   it('清空全部身份、清空日志与工作台, 并整体重置团队视图', () => {
     const h = harness();
-    // 上一个会话留下的消息必须消失 (新会话不能沿用旧日志)
+    // 上一个会话留下的身份与消息都必须消失 (新会话不能沿用旧上下文)
+    dispatch({ type: 'selection/patch', patch: {
+      threadId: 't-old', sessionId: 's-old', projectId: 'p-old', problemId: 'q-old', runId: 'r-old',
+    } });
     document.getElementById('log')!.innerHTML = '<div class="msg msg-user">上一轮输入</div>';
     h.controller.newSession();
-    expect(h.research).toEqual({threadId: '', sessionId: '', projectId: '', problemId: '', runId: ''});
+    expect(selection()).toEqual({
+      threadId: '', sessionId: '', projectId: '', problemId: '', runId: '',
+      mode: '', runStatus: 'idle',
+    });
     expect(h.calls).toContain('close');
-    expect(h.calls).toContain('seqBump');
     expect(h.calls).toContain('resetTeam');
     expect(document.getElementById('team-section')).toBeNull();
     expect(document.getElementById('log')!.textContent).not.toContain('上一轮输入');
@@ -107,6 +123,16 @@ describe('新建会话 (newSession)', () => {
     expect(document.getElementById('workbench')!.innerHTML).toContain('新会话');
     expect(h.calls.filter((c) => c.startsWith('msg:msg-agent:欢迎'))).toHaveLength(1);
     expect(h.calls).toContain('mode:idle');
+  });
+
+  it('新建会话让在途的工作台请求作废 (加载代号前进)', () => {
+    const h = harness();
+    dispatch({ type: 'selection/patch', patch: { projectId: 'p-old' } });
+    const before = getState().ui.loadToken;
+    h.controller.newSession();
+    // 迁移前这里靠页面 `workbenchSeqBump()`; 现在身份整体重置本身就推进代号,
+    // 因此任何以旧代号发出的回包都会被丢弃。
+    expect(getState().ui.loadToken).toBeGreaterThan(before);
   });
 
   it('欢迎语不再区分"模式", 而是说明统一入口', () => {
@@ -143,12 +169,13 @@ describe('切换历史会话 (switchToConversation)', () => {
     await flush();
     await flush();
     await flush();
-    expect(h.research.sessionId).toBe('s1');
-    expect(h.research.projectId).toBe('proj-x');
-    expect(h.research.problemId).toBe('q1');
-    expect(h.research.threadId).toBe('t-9');
+    const sel = selection();
+    expect(sel.sessionId).toBe('s1');
+    expect(sel.projectId).toBe('proj-x');
+    expect(sel.problemId).toBe('q1');
+    expect(sel.threadId).toBe('t-9');
     // 服务端记录的引擎标识如实带入 (只用于显示)
-    expect(h.research.mode).toBe('theory');
+    expect(sel.mode).toBe('theory');
     expect((document.getElementById('projid') as HTMLInputElement).value).toBe('proj-x');
     // 统一入口: 不再有模式回放 (onModeChange 已删除), 直接进入工作台
     expect(h.calls).not.toContain('onModeChange');
@@ -159,6 +186,23 @@ describe('切换历史会话 (switchToConversation)', () => {
     expect(logText).toContain('历史主题');
     expect(logText).toContain('之前的输入');
     expect(logText).not.toContain('等待确认');
+  });
+
+  it('历史记录缺少 request 字段时按空上下文打开, 不抛异常', async () => {
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      const path = String(url).replace(/^https?:\/\/[^/]+/, '');
+      if (path.startsWith('/api/conversations/')) {
+        return jsonResponse({ session_id: 's9', topic: '无请求记录', status: 'done' });
+      }
+      return jsonResponse({});
+    }));
+    const h = harness();
+    h.controller.switchToConversation('s9');
+    await flush();
+    await flush();
+    expect(selection().projectId).toBe('');
+    expect(selection().mode).toBe('');
+    expect(selection().sessionId).toBe('s9');
   });
 
   it('已完成的会话只查看: 不连事件流, 状态标记为已完成', async () => {
@@ -180,7 +224,7 @@ describe('切换历史会话 (switchToConversation)', () => {
     expect(h.calls).toContain('status:已完成');
     // 统一入口: 不论历史会话是哪种引擎, 都进同一个工作台
     expect(h.calls).toContain('tab:workbench');
-    expect(h.research.threadId).toBe('');
+    expect(selection().threadId).toBe('');
   });
 });
 
@@ -191,7 +235,8 @@ describe('停止与结束', () => {
     const idle = harness();
     idle.controller.stopSession();
     expect(fetchMock).not.toHaveBeenCalled();
-    const running = harness({ threadId: () => 't-1' });
+    dispatch({ type: 'selection/patch', patch: { threadId: 't-1' } });
+    const running = harness();
     running.controller.stopSession();
     await flush();
     // 客户端把路径解析成绝对 URL (base), 因此断言**路径**而不是整串
@@ -203,8 +248,14 @@ describe('停止与结束', () => {
 
   it('finishRun 清线程、关连接并刷新上下文 (不清项目/问题)', () => {
     const h = harness();
+    dispatch({ type: 'selection/patch', patch: {
+      threadId: 't-1', projectId: 'p7', problemId: 'q7',
+    } });
     h.controller.finishRun();
-    expect(h.research.threadId).toBe('');
+    expect(selection().threadId).toBe('');
+    // 结束的只是本次运行的线程: 项目与问题仍是当前上下文
+    expect(selection().projectId).toBe('p7');
+    expect(selection().problemId).toBe('q7');
     expect(h.calls).toContain('close');
     expect(h.calls).toContain('refreshContexts');
     expect(h.calls).toContain('refreshHistorySelect');
@@ -219,7 +270,7 @@ describe('停止与结束', () => {
       delivery_level: 'manuscript', gate_passed: false,
       snapshot_id: 'snap-1', package_dir: '/tmp/pkg', project_id: 'p7',
     });
-    expect(h.research.projectId).toBe('p7');
+    expect(selection().projectId).toBe('p7');
     expect(h.calls.some((c) => c.includes('交付门槛: 未通过'))).toBe(true);
     expect(h.calls).toContain('tab:workbench');
     expect(h.calls).toContain('refreshArtifacts');
@@ -257,11 +308,12 @@ describe('删除会话', () => {
     option.textContent = '会话三';
     sel.appendChild(option);
     sel.value = 's3';
+    dispatch({ type: 'selection/patch', patch: { threadId: 't-3', sessionId: 's3' } });
     h.controller.deleteSession();
     await flush();
     expect(requests[0]).toBe('/api/sessions/s3');
-    expect(h.research.threadId).toBe('');
-    expect(h.research.sessionId).toBe('');
+    expect(selection().threadId).toBe('');
+    expect(selection().sessionId).toBe('');
     expect(h.calls.some((c) => c.includes('已删除会话: s3'))).toBe(true);
     expect(sel.querySelector('option[value="s3"]')).toBeNull();
   });
@@ -270,7 +322,8 @@ describe('删除会话', () => {
     const fetchMock = vi.fn(() => jsonResponse({}));
     vi.stubGlobal('fetch', fetchMock);
     vi.stubGlobal('confirm', () => false);
-    const h = harness({ sessionId: () => 's4' });
+    dispatch({ type: 'selection/patch', patch: { sessionId: 's4' } });
+    const h = harness();
     h.controller.deleteSession();
     await flush();
     expect(fetchMock).not.toHaveBeenCalled();
@@ -317,6 +370,3 @@ describe('历史回看抽屉', () => {
     expect(overlay.style.display).toBe('none');
   });
 });
-
-
-

@@ -91,26 +91,27 @@ def test_problem_attachment_text_enters_problem_statement_and_is_deduplicated():
     text = up.problem_text([attachment_id], project_id="up2")
     assert "2.4GHz" in text and "sha256=" in text
 
-    # 启动会话: 附件文本并入问题陈述
+    # 启动会话: 附件文本随输入快照进入团队 (R4: 与主请求**分离**, 不提升为主请求)
     from src import server
     from src.server import StartRequest
 
-    state = server.build_theory_initial_state(StartRequest(
-        request="分析信道变化对可分性的影响", project_id="up2", problem_id="p1",
-        mode="theory", attachment_ids=[attachment_id]))
+    req = StartRequest(request="分析信道变化对可分性的影响", project_id="up2",
+                       problem_id="p1", attachment_ids=[attachment_id])
+    # G03: **唯一**输入快照 —— 身份、附件与策略都从它取 (团队装配与 initial_state 同源)
+    snapshot = server._normalized_input(req)
+    state = server.build_initial_state(req, snapshot)
     # R4: 附件不得被提升为主请求 —— 主请求只有用户自己写的那句话
-    assert state["request"] == "分析信道变化对可分性的影响"
-    assert "2.4GHz" not in state["request"]
+    assert snapshot["request"] == "分析信道变化对可分性的影响"
+    assert "2.4GHz" not in snapshot["request"]
     # 附件作为"候选要求"单独保存, 且带外部资料定界
-    assert "2.4GHz" in state["attachment_candidates"]
-    assert "<<<EXTERNAL_DATA_BEGIN>>>" in state["attachment_candidates"]
+    assert "2.4GHz" in snapshot["attachment_text"]
+    assert "<<<EXTERNAL_DATA_BEGIN>>>" in snapshot["attachment_text"]
+    assert snapshot["attachment_ids"] == [attachment_id]
+    assert state["attachment_candidates"] == snapshot["attachment_text"]
     assert state["attachment_ids"] == [attachment_id]
     # R6: 不可变启动输入快照 (续跑与交付清单基于它)
-    snapshot = state["input_snapshot"]
     assert snapshot["source_policy"] == "user_kb"
-    assert snapshot["attachment_ids"] == [attachment_id]
     assert snapshot["attachments"][0]["sha256"] == first["attachment"]["sha256"]
-    assert snapshot["request"] == state["request"]
 
 
 def test_unparsable_attachment_keeps_file_and_reports_failure():
@@ -176,19 +177,21 @@ def test_r5_source_policy_is_validated_and_recorded():
     from src.server import StartRequest
 
     with pytest.raises(HTTPException) as err:
-        server.build_theory_initial_state(StartRequest(
-            request="分析信道影响", project_id="pol", mode="theory",
-            source_policy="whatever"))
+        server._normalized_input(StartRequest(
+            request="分析信道影响", project_id="pol", source_policy="whatever"))
     assert err.value.status_code == 400
     assert "资料授权策略" in str(err.value.detail)
 
     for policy in ("user_kb", "autonomous", "both"):
-        state = server.build_theory_initial_state(StartRequest(
-            request="分析信道影响", project_id="pol", mode="theory",
-            source_policy=policy, source_set_id="RF-A"))
+        req = StartRequest(request="分析信道影响", project_id="pol",
+                           source_policy=policy, source_set_id="RF-A")
+        snapshot = server._normalized_input(req)
+        state = server.build_initial_state(req, snapshot)
+        assert snapshot["source_policy"] == policy
+        assert snapshot["source_set_id"] == "RF-A"
+        # 初始状态与快照同源 (团队装配读同一份)
         assert state["source_policy"] == policy
-        assert state["input_snapshot"]["source_policy"] == policy
-        assert state["input_snapshot"]["source_set_id"] == "RF-A"
+        assert state["source_set_id"] == "RF-A"
 
 
 def test_r6_manifest_records_input_context(tmp_path):
@@ -279,11 +282,13 @@ def test_r3_ids_do_not_collide_across_projects_and_binding_is_scoped():
     assert id_a != id_b, "同内容不同项目必须得到不同附件 ID"
 
     # A 的 ID 挂不到 B: 启动时被拒绝, 且明确记录
-    state = server.build_theory_initial_state(server.StartRequest(
-        request="分析信道影响", project_id="projB", problem_id="p1", mode="theory",
-        attachment_ids=[id_a]))
+    req = server.StartRequest(request="分析信道影响", project_id="projB",
+                              problem_id="p1", attachment_ids=[id_a])
+    snapshot = server._normalized_input(req)
+    state = server.build_initial_state(req, snapshot)
+    assert id_a in snapshot["attachment_rejected"]
     assert id_a in state["attachment_rejected"]
-    assert "同样的说明文本" not in state["request"]
+    assert "同样的说明文本" not in snapshot["request"]
 
     # 越权删除: 用错误项目删除 A 的附件必须失败
     client = TestClient(server.app)

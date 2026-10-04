@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import queue
 import re
 import shutil
 import threading
@@ -30,19 +29,15 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 from pydantic import BaseModel
 
-from src.config import DATA_DIR, MAX_REVISIONS, OUTPUT_DIR
+from src.config import DATA_DIR, OUTPUT_DIR
 
-#: 统一入口的默认研究引擎 (合并计划 §3: 主控 + 功能子智能体)。
-#: 界面不再提供"综述/理论"选择; 需要旧引擎的旧客户端仍可显式传 `mode`。
-DEFAULT_ENGINE = "theory"
+#: **唯一运行时形态**: 团队会话引擎 (主控 + 七类角色)。
+#: 合并计划 §3/M5 要消除的就是"用户或客户端选引擎"这件事 —— 选择一旦存在, 两条路径
+#: 就会各自漂移 (G01 的成因)。这个常量只用于**如实标注**会话由谁服务, 代码里不再有
+#: 任何"按 mode 分流"的分支: 所有研究请求都进同一张团队图。
+TEAM_ENGINE = "team"
 
-#: 是否把**综述型**请求自动交给团队会话引擎 (合并计划 §15.2/§15.3)。
-#: 关掉它只是回到"综述请求走默认真式引擎并请求澄清"的旧边界, 便于出问题时快速回退。
-SURVEY_ENGINE_ENABLED = True
 from src.graph.node_progress import describe_node as _describe_node
-# 理论引擎的建图入口: 放在模块级, 使调用方/测试可以替换它注入假图
-# (`monkeypatch.setattr(server, "build_theory_pipeline", stub)`)。
-from src.graph.theory_pipeline import build_theory_pipeline
 from src.utils.console import ensure_utf8_console
 from src.utils.conversation_store import (
     delete_conversation,
@@ -158,98 +153,42 @@ def _make_checkpointer(session_id: str):
         return MemorySaver(), None
 
 
-def _resolve_engine(mode: str, *, request: str = "") -> str:
-    """**唯一**的引擎选择点: 从请求语义/遗留字段决定用哪张图。
+def _resolve_engine() -> str:
+    """**没有选择**了: 所有研究请求都进团队会话引擎 (合并计划 §3 / M5 / G01)。
 
-    为什么要有这个函数 (合并计划 §3 / M5): 用户界面已经不再提供"综述/理论"选择,
-    但服务端内部仍有两张图 —— 一张负责**形式化研究**(TheoryEngine: 命题/义务/验证/
-    交付包), 一张负责**检索综述**(PipelineState: 检索→笔记综合→长文→配图)。把选择
-    写成一个具名函数, 是为了让"哪里决定了引擎"只有一处、可单测, 而不是散落在
-    端点里靠 `if mode == ...` 猜。
-
-    取值:
-    - 显式 `theory` / `team` → 尊重调用方;
-    - 留空 → 按请求类型: **综述型**交给团队会话引擎, 其余走默认真式引擎。
-
-    **已完成的收敛 (2026-10-04)**: 旧的 `survey` stage 图已删除; 综述型请求由
-    `research.intake.is_survey_request` 识别并交给团队会话引擎 —— 判据刻意保守:
-    出现形式化意图词时**不**按综述处理, 免得把证明题送进综述流程。
-
-    因此这里不再有"第二个综述引擎"这回事: `_resolve_engine` 只在
-    "形式化研究"与"团队会话"之间选择, 且用户界面从不暴露这个选择。
-
-    **为什么保留两种**研究形态 (有意选择, 不是待清理的冗余)
-    ------------------------------------------------------
-    这一处分支看起来像"还没合并完", 因此写清它为什么**不该**被合并掉:
-
-    1. **判定层必须保持零 LLM 且是唯一状态写入点** (`research/kernel`、
-       `verification/**`、`acceptance.py`)。形式化研究的一步是"选义务 → 跑工具
-       (SAT/符号计算) → 按结果落盘判定"; 这条链路里**没有**可供智能体"提议"的位置。
-    2. **`AgentTask` 的契约是"只提交候选、不做判断"**。把理论引擎的动作改造成任务,
-       等于让候选结果绕回判定层再判一次 —— 要么多一层无意义的转发, 要么把判定权
-       交给智能体, 后者正是这套设计要防的事。
-    3. 两者**已经共用**真正该共用的部分: 冻结快照与研究对象存储、`research/` 判定层、
-       会话与事件层 (`sessions/`)、写作入口 (`agents/writing.write_main_manuscript`)、
-       交付包导出 (`research/package.py`)、预算与用量计量。剩下的差别是**研究形态**
-       (形式化推导 vs 逐个角色的协作综述), 而不是"新旧两套实现"。
-
-    历史包袱确实存在过并已清除: 旧的 stage 综述图 (`graph/pipeline.py`)、旧的撰写路径
-    (`agents/paper_writer.py` + `research/writing_bridge.py`)、GUI 与交互式 CLI 都已删除。
-    现在这两个引擎没有一行是"旧实现"。
+    这里保留一个返回常量的函数, 只是为了让调用点读起来仍然明确"当前由谁服务",
+    它不接收 `mode` —— 一旦接收, 就等于承认"可以按 mode 分流", 而分流的另一条路
+    (旧形式化引擎的图) 已经删除。旧客户端传来的 `mode` 会被 Pydantic 忽略。
     """
-    chosen = str(mode or "").strip().lower()
-    if chosen in ("theory", "team"):
-        return chosen
-    from src.research.intake import is_survey_request
-
-    if SURVEY_ENGINE_ENABLED and is_survey_request(request):
-        return "team"
-    return DEFAULT_ENGINE
+    return TEAM_ENGINE
 
 
-def _build_app_for_mode(checkpointer, mode: str, *, session=None):
-    """按**已解析的引擎**构建该会话的图应用 (或团队会话)。
+def _build_app_for_mode(checkpointer, mode: str = "", *, session=None):
+    """构建会话的图应用 —— 只有**一张图**: 团队会话引擎 (主控 + 七类角色)。
 
-    **建图的决策留在入口层**: `Session` (src/sessions/controller.py) 只关心会话
-    生命周期, 图由这里构建后注入。这样 `sessions/` 不 import LangGraph 的图工厂,
-    也就不会在"哪张图服务哪个会话"上形成第二份权威。
+    参数 `mode` 仍然接受, 但**不再影响结果**: 合并计划 §3/M5 要求消除"选引擎", 而
+    保留一个"看起来还能选"的形参正是分流的入口。这里显式忽略它, 并把理由写下来,
+    免得下次有人以为"传 theory 还能走旧图"。旧会话记录里残留的 `mode` 字段因此不会
+    让续跑悄悄换引擎 —— 它本来也换不了, 因为那条路径已经删除。
     """
-    engine = str(mode or "").strip().lower()
-    if engine == "theory":
-        # 通过**模块属性**取工厂: 调用方与测试可以替换它来注入假图
-        # (`monkeypatch.setattr(server, "build_theory_pipeline", stub)`)。
-        return build_theory_pipeline(checkpointer)
-    # 统一入口的默认形态: 团队会话引擎 (主控 + 七类角色)。
     return _build_team_app(session)
 
 
 def _team_llm_factory(stage: str = ""):
     """按角色取一个模型实例 (团队会话的角色模型接线, §3.1 G02)。
 
-    为什么必须有这一层: 团队入口此前**完全没有注入** `llm_factory`, 于是
-    `AgentRuntime.llm_available()` 恒为 `False` —— 主控与七类角色全都退化成规则模板,
-    却照样能跑出一份"完整"交付包。审计复现的正是这一条。
+    实现只有一份, 在 `src/bootstrap.py` —— 这一层保留名字是因为会话装配按名称取它
+    (`_build_team_app`), 而 CLI/脚本走 `run_team_session` 用的是**同一个**函数。
+    接线写两遍就会漂移: 某个角色在一条路径上有模型、在另一条路径上静默退化成规则
+    模板, 两边看起来都"跑通了"。
 
-    离线约定: `THEORY_LLM=0` 时返回 `None` (沿用项目既有的离线开关, 不再造第二个),
-    此时角色走确定性实现 —— 这是**显式**离线, 而不是"忘了接线"。
-
-    取模型失败时**如实抛错**, 不返回 None: 把"模型不可用"混进"离线模式"会让
-    "自主科研没跑成"看起来像"故意离线", 那正是要防的含糊。
+    离线约定: `THEORY_LLM=0` 时返回 `None` (沿用项目既有的离线开关)。取模型失败时
+    **如实抛错**, 不返回 None: 把"模型不可用"混进"离线模式"会让"自主科研没跑成"
+    看起来像"故意离线"。
     """
-    import os
+    from src.bootstrap import role_llm_factory
 
-    from src.agents.registry import AGENT_ROLES  # noqa: F401  (导入即校验角色表)
-
-    if os.getenv("THEORY_LLM", "").strip() == "0":
-        return None
-    from src.config import build_llm
-
-    # 角色 -> 模型配置键; 未登记的角色用主模型
-    key = {"writing": "main", "review": "reviewer", "reasoning": "theorist",
-           "modeling": "theorist", "validation": "verifier",
-           "evidence": "cheap", "figures": "main", "supervisor": "coordinator"}.get(
-        str(stage or ""), "main")
-    return build_llm(key)
+    return role_llm_factory(stage)
 
 
 def _build_team_app(session):
@@ -257,6 +196,10 @@ def _build_team_app(session):
 
     需要 `session` 才能把事件接到会话出口 —— 团队进度 (主控决策、角色成果) 必须
     出现在 SSE 里, 否则界面又回到"正在思考"。
+
+    **输入必须整份进入团队** (合并计划 §3.1 G03): 研究身份 (project/problem/run)、
+    附件 (id/hash/文本) 与资料策略都在 `session.request` 里, 因此这里逐一取用;
+    此前只取了 project/problem/request 三项, 附件与资料范围实际从未进团队。
     """
     from src.graph.research_graph import TeamRun
     from src.graph.team_session import TeamApp, TeamSession
@@ -265,12 +208,16 @@ def _build_team_app(session):
         team = TeamRun(project_id="", request="", max_rounds=1)
         return TeamApp(TeamSession(team))
     request = session.request or {}
-    run_id = session.run_id or ""
+    run_id = session.run_id or str(request.get("run_id", "") or "")
     team = TeamRun(
         project_id=str(request.get("project_id", "") or session.session_id),
         problem_id=str(request.get("problem_id", "") or ""),
         run_id=run_id,
         request=str(request.get("request") or request.get("topic") or session.topic),
+        # 附件: 把**已规范化**的清单与文本一起交给团队 (文本是外部资料, 已在入口
+        # 做过定界与越权扫描), 团队据此理解"题面在附件里"这件事。
+        attachments=list(request.get("attachments") or []),
+        attachment_text=str(request.get("attachment_text") or ""),
         source_set_ids=[str(request.get("source_set_id", "") or "")],
         source_policy=str(request.get("source_policy", "user_kb") or "user_kb"),
         max_rounds=int(request.get("max_rounds", 24) or 24),
@@ -282,7 +229,7 @@ def _build_team_app(session):
 
 def _make_session(thread_id: str, *, topic: str = "", session_id: str,
                   checkpointer=None, checkpoint_conn=None, run_id: str = "",
-                  mode: str = "") -> Session:
+                  mode: str = "", request: dict[str, Any] | None = None) -> Session:
     """构造一个会话 (显式注入按模式构建的图应用)。
 
     这是**唯一**的会话装配入口: 新建与续跑都走这里, 避免两处各写一遍建图逻辑
@@ -290,6 +237,10 @@ def _make_session(thread_id: str, *, topic: str = "", session_id: str,
 
     `Session` 也保留了缺省建图能力 (直接 `Session(...)` 仍然可用), 但那会绕过
     "模式 → 图"的唯一决策点; 入口一律显式注入。
+
+    **`request` 必须在建图之前落位** (合并计划 §3.1 G03): 团队装配 (`_build_team_app`)
+    从 `session.request` 读研究身份 (project/problem/run) 与资料 (附件、资料源策略),
+    先建图再回填就会让团队拿到空身份和默认策略 —— 这正是审计复现的那条。
     """
     session = Session(
         thread_id,
@@ -298,12 +249,13 @@ def _make_session(thread_id: str, *, topic: str = "", session_id: str,
         checkpointer=checkpointer,
         checkpoint_conn=checkpoint_conn,
         run_id=run_id,
-        mode=mode,
+        mode=_resolve_engine(),
         # 先不给 app: 团队引擎需要会话对象才能把进度接到会话出口 (SSE), 因此
-        # 两段式装配 —— 先构造会话, 再按引擎注入 app。
+        # 两段式装配 —— 先构造会话并落位输入快照, 再注入 app。
         app=None,
     )
-    session.app = _build_app_for_mode(checkpointer, mode, session=session)
+    session.request = dict(request or {})
+    session.app = _build_app_for_mode(checkpointer, session=session)
     return session
 
 
@@ -313,16 +265,16 @@ class StartRequest(BaseModel):
     keywords: list[str] = []
     subtopics: list[str] = []
     time_range: str = "2019-2026"
-    max_revisions: int | None = None
-    skip_retrieval: bool = False
     # 遗留兼容字段 (合并计划 §3 / M5: 统一入口不要求用户选模式)。
-    # 留空时按 `DEFAULT_ENGINE` 启动; 界面不再提供该选择。
-    mode: str = ""
+    # 统一入口 (合并计划 §3 / M5 / G01): **没有模式选择**。旧客户端可能仍带 `mode`
+    # 字段, 它会被 Pydantic 忽略 —— 所有研究请求都进同一张团队图。
+    # 旧的 `mode` 参数保留在建会话签名里只为兼容既有调用点, 不再参与分流。
     project_id: str = ""
     problem_id: str = "problem"
     research_spec: dict = {}
-    max_actions: int | None = None
-    max_tool_calls: int | None = None
+    # `max_actions`/`max_tool_calls` 已删除: 那是**旧理论引擎**的动作预算旋钮, 团队运行
+    # 的预算是轮次与任务额度 (由 `TeamRun` 决定)。旧客户端仍可传这两个键 —— Pydantic
+    # 忽略未声明字段, 因此不会报错, 但也不会再影响任何东西 (而不是"看起来设置了").
     # 显式续研同一问题: 与 start 分开语义 (计划书 §9.1)。
     # resume=true 时复用已落盘规格, 即使本次请求文本不同也不报冲突。
     resume: bool = False
@@ -362,64 +314,6 @@ class ForkRequest(BaseModel):
 # 这里不再保留第二份实现 —— 两份状态各自漂移正是 P0 类缺陷的成因。
 
 
-def _research_progress(session, node_name: str, node_state: dict) -> dict | None:
-    """理论研究模式的进度摘要: 当前动作 + 待处理缺口 + 已关闭/未决计数。
-
-    只读取已落盘的研究状态, 失败一律返回 None (进度显示不得影响研究本身)。
-    """
-    project_id = (session.request or {}).get("project_id", "")
-    if session.mode != "theory" or not project_id:
-        return None
-    info = (node_state or {}).get("action") or {}
-    try:
-        from src.research.loop import ResearchBudget, TheoryEngine
-        from src.research.schemas import ResearchSpec
-        from src.research.store import KIND_SPEC, ResearchStore, default_db_path
-
-        # 进度查询不得建库: 没有该项目时直接返回 None (避免留下空 sqlite 垃圾)
-        if not default_db_path(project_id).exists():
-            return None
-        store = ResearchStore(project_id)
-        spec_data = None
-        for obj_id in store.version_index(KIND_SPEC):
-            spec_data = store.get(KIND_SPEC, obj_id)
-            break
-        if not spec_data:
-            return None
-        engine = TheoryEngine(ResearchSpec.model_validate(spec_data), store=store,
-                              budget=ResearchBudget())
-        engine.load_runtime()
-        claims = engine._claims()
-        obligations = engine._obligations()
-        return {
-            "action": info.get("action", ""),
-            "reason": info.get("reason", ""),
-            "target_gap": info.get("target_gap", ""),
-            "object_id": info.get("object_id", ""),
-            "available_actions": info.get("available_actions", []),
-            "claims_supported": len([c for c in claims if c.status.value == "supported"]),
-            "claims_refuted": len([c for c in claims if c.status.value == "refuted"]),
-            "claims_open": len([c for c in claims
-                                if c.status.value in ("proposed", "in_progress")]),
-            "claims_blocked": len([c for c in claims if c.status.value == "blocked"]),
-            "obligations_open": len([o for o in obligations if o.status.value == "open"]),
-            "obligations_blocked": len([o for o in obligations if o.status.value == "blocked"]),
-            "evidence": len(engine._evidence()),
-            "actions_used": engine._actions,
-            "max_actions": engine.budget.max_actions,
-            "tool_calls_used": engine._tool_calls,
-            "events": engine.event_digest(limit=8),
-            "needs_confirmation": bool((node_state or {}).get("needs_confirmation")),
-            "delivery_level": (node_state or {}).get("delivery_level", ""),
-            "gate_passed": (node_state or {}).get("gate_passed"),
-        }
-    except Exception:  # noqa: BLE001 - 进度显示失败不得影响研究
-        return None
-
-
-# ----------------------------------------------------------------------
-# 科研工作台: 把研究状态读成前端可渲染的结构 (计划书 §9.5)
-# ----------------------------------------------------------------------
 def problem_index(store) -> list[dict]:
     """项目下的所有研究问题 (计划书 F0-2 / R6: 问题是一等身份)。
 
@@ -513,11 +407,10 @@ def _claims_of_problem(claims: list, problem_id: str, problem_ids: set[str]) -> 
 def _research_state(project_id: str, problem_id: str = "") -> dict:
     """汇总**单个研究问题**的对象状态。
 
-    只读: 只从版本化存储取最新版本, 不触发任何研究动作, 也不改变任何结论状态。
-    全部对象都按当前问题过滤 —— 同项目多问题时不得互相串数据 (F0-2 / R6)。
+    只读: 从存储读出对象与派生值, **不建研究引擎**、不触发任何研究动作、不改结论状态
+    (合并计划 §5.5: 只读端点不该依赖"能执行研究动作"的组件)。全部对象按当前问题过滤
+    —— 同项目多问题时不得互相串数据 (F0-2 / R6)。
     """
-    from src.research.loop import OBLIGATION_PRIORITY, TheoryEngine
-
     # 只读接口: 打开前先确认库文件存在, 避免"查询不存在的项目"顺手建出空库
     # (否则工作台的一次 404 查询就会在 data/research/ 留下垃圾文件)
     from src.research.store import (
@@ -541,12 +434,12 @@ def _research_state(project_id: str, problem_id: str = "") -> dict:
         store.close()
         raise HTTPException(409, {"message": str(e), "problems": e.problems}) from e
 
-    engine = TheoryEngine(spec, store=store, budget=__import__(
-        "src.research.loop", fromlist=["ResearchBudget"]).ResearchBudget())
-    engine.load_runtime()
+    # ---- 只读检视: 对象与派生值都从存储读出 (没有引擎, 也没有执行能力) ----
+    from src.research.inspection import StoreInspection
 
-    # ---- 问题级作用域: 结论/义务/证据/验证/路线只取当前问题的对象 (F0-2 / R6) ----
-    all_claims = engine._claims()
+    view = StoreInspection(store, spec,
+                           knowledge_available=_knowledge_available_for(spec))
+    all_claims = view.claims(problem_id)
     # 项目里**全部**命题 id (含别的问题的): 未知 id 与"别的问题的对象"必须区分,
     # 否则别的问题的实验建议会因为 id 不在本问题里而被当成"未知"照旧展示。
     known_claim_ids = {str(d.get("id", "")) for d in store.list_latest("claim")}
@@ -573,13 +466,14 @@ def _research_state(project_id: str, problem_id: str = "") -> dict:
             return False
         return not multi_problem
 
-    obligations = sorted([o for o in engine._obligations() if _owned(o.claim_id)],
-                         key=lambda o: OBLIGATION_PRIORITY.get(o.kind, 9))
-    verifications = [v for v in engine._verifications() if _owned(v.claim_id)]
-    evidence = [e for e in engine._evidence() if _owned(e.claim_id)]
-    routes = [r for r in engine.routes.routes
+    obligations = sorted([o for o in view.obligations() if _owned(o.claim_id)],
+                         key=lambda o: _obligation_sort_key(o.kind))
+    verifications = [v for v in view.verifications() if _owned(v.claim_id)]
+    evidence = [e for e in view.evidence() if _owned(e.claim_id)]
+    routes = view.routes()
+    routes = [r for r in routes
               if _owned(r.target_ref.id if r.target_ref else "")]
-    models = [m for m in engine._models()]
+    models = view.models()
 
     # 实验中引用**别的问题**命题的建议不得出现在本问题的工作台 (R6)
     foreign_claim_ids = known_claim_ids - scoped_ids
@@ -591,8 +485,18 @@ def _research_state(project_id: str, problem_id: str = "") -> dict:
     payload = reporting.workbench_projection(
         project_id=project_id, problem_id=problem_id,
         claims=claims, obligations=obligations, verifications=verifications,
-        evidence=evidence, routes=routes, models=models, engine=engine, store=store,
+        evidence=evidence, routes=routes, models=models, store=store,
         problems=problems, spec=spec,
+        run_id=view.identity()["run_id"], branch_id=view.identity()["branch_id"],
+        metrics=view.metrics(claims, problem_id=problem_id),
+        model_selection=view.model_selection(claims, available=None),
+        modeling=next((view.model_comparison(c) for c in claims
+                       if view.model_comparison(c)), {}),
+        assumptions=view.assumptions(),
+        decisions=view.decisions()[-30:],
+        events=view.event_digest(claims, problem_id=problem_id, limit=40),
+        gaps=view.gaps(claims, obligations),
+        budget=view.budget_payload(),
         experiment_specs=[d for d in store.list_latest(KIND_GAP)
                           if str(d.get("id", "")).startswith("exp-")],
         novelty_records=[n for n in store.list_latest(KIND_NOVELTY)
@@ -603,6 +507,27 @@ def _research_state(project_id: str, problem_id: str = "") -> dict:
     )
     store.close()
     return payload
+
+
+def _knowledge_available_for(spec) -> bool:
+    """该问题是否已有**非空**知识底座 (只探测已存在的库, 不创建空库)。"""
+    from src.kb.service import KnowledgeService
+
+    topic = getattr(spec, "domain", "") or getattr(spec, "original_request", "") or ""
+    if not topic:
+        return False
+    try:
+        service = KnowledgeService(topic, create_if_missing=False)
+        return bool(service and service.available)
+    except Exception:  # noqa: BLE001 - 探测失败按"不可用"处理, 不影响只读呈现
+        return False
+
+
+def _obligation_sort_key(kind: str) -> int:
+    """义务排序优先级 (唯一口径在 `loop.OBLIGATION_PRIORITY`)。"""
+    from src.research.loop import OBLIGATION_PRIORITY
+
+    return OBLIGATION_PRIORITY.get(kind, 9)
 
 
 def objects_counts(claims, obligations, evidence, verifications,
@@ -625,13 +550,207 @@ def _uncovered_factors(claim) -> list[str]:
     return reporting.uncovered_factors(claim)
 
 
-def build_initial_state(req: StartRequest) -> dict:
+def _normalized_input(req: StartRequest) -> dict:
+    """规范化输入与文件, 并**在创建任何运行之前**分配研究身份 (合并计划 §3.1 G03)。
+
+    计划要求的顺序是硬要求: 规范化输入与文件 → 校验资料授权 → 分配身份 → 创建
+    run/session → 注入同一输入快照 → 启动。此前 `start_session` 先 `_make_session()`
+    (其中已经建好 `TeamRun`) 再回填 `session.request`/`run_id`, 于是团队拿到的是
+    自动 problem 与空 run 身份、默认资料策略, 附件也从未进团队 —— HTTP 返回的 ID
+    与任务/SQLite/事件/包里的 ID 因此可能不是同一个。
+
+    这里产出的字典是**唯一**输入快照: `initial_state`、`session.request` 与团队装配
+    都从它取, 不再各自重新推导 (重新推导就是身份漂移的来源)。
+    """
+    from src.research.schemas import SourcePolicy
+
+    request_text = (req.request or "").strip() or (req.topic or "").strip()
+    topic_or_request = (req.topic or req.request).strip() or request_text
+    topic_text = (req.topic or "").strip()
+    if not topic_text:
+        from src.utils.file_utils import derive_topic
+
+        topic_text = derive_topic(request_text) or request_text
+    project_id = (req.project_id or "").strip() or (
+        sanitize_filename(topic_or_request)[:30].strip("_") or "research")
+    problem_id = (req.problem_id or "").strip() or "problem"
+    base = sanitize_filename(topic_or_request)[:20].strip("_") or "research"
+    # **运行身份必须真的唯一**: 此前是"主题 + 秒级时间戳", 同一秒内用同一主题启动两次
+    # 会得到**同一个 run_id**, 而所有对象都按 run 归属 —— 于是第二次运行会看到第一次
+    # 运行的对象、复用它们的命题 (实测: 同项目两个问题的结论集合完全相同)。加一个
+    # 短随机后缀, 既保持可读, 又让"两次运行"永远是两次。
+    run_id = (f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+              f"_{uuid.uuid4().hex[:4]}")
+
+    policy = str(getattr(req, "source_policy", "") or "user_kb").strip()
+    allowed_policies = {p.value for p in SourcePolicy}
+    if policy not in allowed_policies:
+        raise HTTPException(400, f"未知的资料授权策略: {policy} (可选: {sorted(allowed_policies)})")
+
+    # 附件: 只认属于本项目/本问题的问题说明附件 (A 的附件不得挂到 B), 文本按有界
+    # 长度传入并显式标注为外部资料 (其中的指令不得执行)。
+    rejected: list[str] = []
+    hashes: list[dict] = []
+    attachment_text = ""
+    if getattr(req, "attachment_ids", None):
+        from src.utils import uploads
+        from src.utils.external_data import wrap_external_with_scan
+
+        allowed, denied = uploads.resolve_problem_attachments(
+            list(req.attachment_ids), project_id, problem_id)
+        rejected = [str(i) for i in denied]
+        hashes = [{"attachment_id": i.get("attachment_id"),
+                   "filename": i.get("filename"),
+                   "sha256": i.get("sha256"),
+                   "parse_quality": i.get("parse_quality"),
+                   "visibility_flags": i.get("visibility_flags") or []}
+                  for i in allowed]
+        raw = uploads.problem_text([i.get("attachment_id") for i in allowed],
+                                   project_id, problem_id)
+        if raw:
+            bounded = raw[: uploads.MAX_ATTACHMENT_CHARS]
+            attachment_text, scan = wrap_external_with_scan(bounded, source="问题说明附件")
+            if scan.suspicious:
+                rejected.extend(["scan:" + flag for flag in scan.flags])
+
+    return {
+        "topic": topic_text,
+        "request": request_text,
+        "project_id": project_id,
+        "problem_id": problem_id,
+        "run_id": run_id,
+        "keywords": list(req.keywords or []),
+        "subtopics": list(req.subtopics or []),
+        "time_range": req.time_range,
+        "attachment_ids": list(getattr(req, "attachment_ids", None) or []),
+        "attachments": hashes,
+        "attachment_text": attachment_text,
+        "attachment_rejected": rejected,
+        "source_set_id": str(getattr(req, "source_set_id", "") or ""),
+        "source_set_kind": str(getattr(req, "source_set_kind", "") or "kb"),
+        "source_policy": policy,
+    }
+
+
+def _session_request(snapshot: dict) -> dict:
+    """会话落盘的请求快照 (续跑要能重建同一身份与同一资料范围)。
+
+    字段集合必须能被 `StartRequest(**request)` 还原 (`resume_session` 依赖这一点),
+    因此这里只加键, 不改既有键的含义。
+
+    **不再写入 `mode`**: 引擎选择已删除 (G01)。旧会话记录里可能仍有 `mode`, 它既不被
+    `StartRequest` 接受 (字段已删除, Pydantic 忽略), 也不影响续跑走哪张图 —— 只有一张。
+    """
+    return {
+        "topic": snapshot["topic"],
+        "request": snapshot["request"],
+        "keywords": list(snapshot["keywords"]),
+        "subtopics": list(snapshot["subtopics"]),
+        "time_range": snapshot["time_range"],
+        "project_id": snapshot["project_id"],
+        "problem_id": snapshot["problem_id"],
+        "attachment_ids": list(snapshot["attachment_ids"]),
+        "source_set_id": snapshot["source_set_id"],
+        "source_set_kind": snapshot["source_set_kind"],
+        "source_policy": snapshot["source_policy"],
+        # 只读的规范化结果 (团队装配读它们; `StartRequest` 会忽略未声明字段)
+        "run_id": snapshot["run_id"],
+        "attachments": list(snapshot["attachments"]),
+        "attachment_text": snapshot["attachment_text"],
+        "attachment_rejected": list(snapshot["attachment_rejected"]),
+    }
+
+
+def _validate_source_binding(snapshot: dict) -> list[str]:
+    """校验资料源绑定可用 (在创建 run 之前), 返回警告。
+
+    不可用时**明确告知**而不是静默退回"无知识库": 后者会让一次绑定错误的运行看起来
+    像"没检索到资料"。
+    """
+    source_set_id = str(snapshot.get("source_set_id") or "").strip()
+    if not source_set_id:
+        return []
+    from src.kb.sources import validate_binding
+
+    check = validate_binding(source_set_id)
+    if not check["ok"]:
+        raise HTTPException(409, {
+            "message": f"资料源不可用, 请重新选择: {check['reason']}",
+            "source_set_id": source_set_id,
+            "reason": check["reason"],
+        })
+    return list(check["warnings"])
+
+
+def _ensure_problem_spec(snapshot: dict, *, resume: bool = False) -> tuple[
+        dict | None, bool, dict | None]:
+    """在创建运行之前把**问题规格**落盘, 并判定身份冲突 (F0-4 / P0-2)。
+
+    为什么放在入口而不是等团队自己落盘:
+    - **冲突必须能被拒绝**: 同一个 `problem_id` 已研究另一个请求时必须 409, 让用户
+      选择 `resume=true` 继续原题, 或换 `problem_id` 研究新题。此前只有旧引擎入口做了
+      这件事, 团队入口会静默沿用旧规格 —— 用户看到的是"我改了问题, 但研究结果没变"。
+    - **规格必须先于运行存在**: 工作台、问题列表与交付清单都按 `problem_id` 找规格。
+
+    返回 `(conflict, spec_reused, contract)`; `conflict` 非空表示必须由调用方决定
+    继续还是换题 (本函数**不**自行覆盖)。
+    """
+    from src.kb.sources import build_source_summary
+    from src.research.question_planner import build_spec_from_input
+    from src.research.schemas import ResearchSpec, SourcePolicy
+    from src.research.store import KIND_SPEC, ResearchStore
+
+    project_id = str(snapshot["project_id"])
+    problem_id = str(snapshot["problem_id"])
+    request_text = str(snapshot["request"] or snapshot["topic"] or "")
+    source_summary = build_source_summary(
+        source_set_id=snapshot["source_set_id"],
+        source_set_kind=snapshot["source_set_kind"] or "kb",
+        request=request_text)
+    # 授权自主检索时, 没有预建资料库也算合法输入 (P0-1 场景 ②)
+    source_summary.autonomous_retrieval = snapshot["source_policy"] in ("autonomous", "both")
+    store = ResearchStore(project_id)
+    try:
+        conflict = _existing_spec_conflict(store, problem_id, request_text,
+                                          source_summary=source_summary)
+        stored = store.get(KIND_SPEC, problem_id)
+        if stored:
+            if conflict is not None and not resume:
+                # 不覆盖已确认的问题: 交给调用方返回 409, 让用户选择
+                try:
+                    contract = ResearchSpec.model_validate(stored).contract
+                except Exception:  # noqa: BLE001
+                    contract = None
+                return (conflict, True,
+                        contract.model_dump(mode="json") if contract else None)
+            try:
+                spec = ResearchSpec.model_validate(stored)
+            except Exception:  # noqa: BLE001 - 坏规格: 重建而不是继续用坏的
+                spec = None
+            if spec is not None:
+                return (None, True,
+                        spec.contract.model_dump(mode="json") if spec.contract else None)
+        spec = build_spec_from_input(
+            request=request_text, topic=str(snapshot["topic"]), project_id=project_id,
+            problem_id=problem_id, source_summary=source_summary)
+        if snapshot["source_set_id"]:
+            spec.source_set_id = snapshot["source_set_id"]
+            spec.source_set_kind = snapshot["source_set_kind"] or "kb"
+        spec.source_policy = SourcePolicy(snapshot["source_policy"])
+        store.put(KIND_SPEC, problem_id, spec.model_dump(mode="json"))
+        contract_row = (spec.contract.model_dump(mode="json") if spec.contract else None)
+        return (conflict, False, contract_row)
+    finally:
+        store.close()
+
+
+def build_initial_state(req: StartRequest, snapshot: dict | None = None) -> dict:
     # 自然语言请求与检索缓存加载均由入口 research_planner_node 处理,
     # 此处仅透传原始输入 (主题可能为空, 待 Planner 提取)。
     # run_id 用作 outputs/{run_id}/ 产物子目录名, 使不同对话产物隔离、便于查看;
     # 存进 state 后经 checkpoint 持久化, 断点续跑也能沿用同一目录。
-    base = sanitize_filename((req.topic or req.request).strip())[:20].strip("_") or "research"
-    run_id = f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    # `snapshot` 由入口传入 (同一份输入快照); 直接调用时按请求现场规范化。
+    snap = snapshot or _normalized_input(req)
     return {
         "messages": [],
         "research_topic": req.topic.strip(),
@@ -639,101 +758,29 @@ def build_initial_state(req: StartRequest) -> dict:
         "topic_keywords": req.keywords or [],
         "sub_topics": req.subtopics or [],
         "time_range": req.time_range,
-        "run_id": run_id,
+        "run_id": snap["run_id"],
+        "project_id": snap["project_id"],
+        "problem_id": snap["problem_id"],
+        # G03: 附件与资料范围随初始状态一起进入团队 (此前它们不进团队)
+        "attachment_ids": list(snap["attachment_ids"]),
+        "attachment_candidates": snap["attachment_text"],
+        "attachment_rejected": list(snap["attachment_rejected"]),
+        "source_set_id": snap["source_set_id"],
+        "source_policy": snap["source_policy"],
+        # `revision_count` / `current_phase` / `interactive` 由会话装配与前端读取;
+        # `max_revisions` 与 `skip_retrieval` 已删除 (R5): 修订轮次现在由主控按轮次与
+        # "写作缺口回流"驱动, 检索与否由资料授权策略 + 覆盖记录决定 —— 这两个旋钮
+        # 此前只是被透传, 没有任何模块读, 留着会让使用者以为"设了就生效"。
         "revision_count": 0,
-        "max_revisions": req.max_revisions if req.max_revisions is not None else MAX_REVISIONS,
         "retrieved_papers": [],
         "current_phase": "start",
-        "skip_retrieval": bool(req.skip_retrieval),
         "interactive": True,
     }
 
 
-def build_theory_initial_state(req: StartRequest) -> dict:
-    """理论研究模式初始状态 (对象存于 SQLite, 状态只带指针)。"""
-    project_id = req.project_id.strip() or sanitize_filename(
-        (req.topic or req.request).strip())[:30].strip("_") or "research"
-    # R6: 理论研究也必须带运行身份。此前它不设 run_id, 于是 `session.run_id` 恒为空:
-    # 启动响应无法告诉前端"这是哪一次运行", 产物清单也没法按 run 过滤 ——
-    # 引擎内部另起的 run_id 与产物目录就对不上。这里与 survey 模式一样先定身份,
-    # 引擎通过 `_engine_from_state` 采用同一个值。
-    base = sanitize_filename((req.topic or req.request).strip())[:20].strip("_") or "theory"
-    run_id = f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    # R4: 顶层用户陈述与附件**保持分离** —— 附件文本不再拼进 request,
-    # 而是作为"候选要求"(外部资料定界 + 有界长度)随状态保存, 由用户确认后才写入契约。
-    from src.research.schemas import SourcePolicy, utcnow
-
-    request_text = req.request.strip() or req.topic.strip()
-    rejected_attachments: list[str] = []
-    attachment_candidates = ""
-    attachment_hashes: list[dict] = []
-    if getattr(req, "attachment_ids", None):
-        from src.utils import uploads
-        from src.utils.external_data import wrap_external_with_scan
-
-        # R3: 只认属于本项目的问题说明附件 (A 的附件不得挂到 B)
-        allowed, rejected = uploads.resolve_problem_attachments(
-            list(req.attachment_ids), project_id, req.problem_id or "problem")
-        rejected_attachments = [str(i) for i in rejected]
-        attachment_hashes = [{"attachment_id": i.get("attachment_id"),
-                              "filename": i.get("filename"),
-                              "sha256": i.get("sha256"),
-                              "parse_quality": i.get("parse_quality"),
-                              "visibility_flags": i.get("visibility_flags") or []}
-                             for i in allowed]
-        raw = uploads.problem_text([i.get("attachment_id") for i in allowed],
-                                   project_id, req.problem_id or "problem")
-        if raw:
-            # 按相关片段有界传入 + 显式标注为外部资料 (其中的指令不得执行)
-            bounded = raw[: uploads.MAX_ATTACHMENT_CHARS]
-            attachment_candidates, scan = wrap_external_with_scan(
-                bounded, source="问题说明附件")
-            if scan.suspicious:
-                rejected_attachments.extend(["scan:" + flag for flag in scan.flags])
-    policy = str(getattr(req, "source_policy", "") or "user_kb").strip()
-    allowed_policies = {p.value for p in SourcePolicy}
-    if policy not in allowed_policies:
-        raise HTTPException(400, f"未知的资料授权策略: {policy} (可选: {sorted(allowed_policies)})")
-    # 请求常是整段问题描述: 主题必须是可读短标题, 否则交付物标题会变成一整段
-    # 粘贴文本 (含公式与"请判断…"), 而 project_id 仍用文件系统安全的写法。
-    from src.utils.file_utils import derive_topic
-
-    topic_text = req.topic.strip() or derive_topic(req.request) or req.request.strip()
-    return {
-        "project_id": project_id,
-        "problem_id": req.problem_id or "problem",
-        "topic": topic_text,
-        "request": request_text,
-        "attachment_ids": list(getattr(req, "attachment_ids", None) or []),
-        # R3/R4: 被拒绝的附件 id 与扫描告警; 候选要求 (未确认前的草稿)
-        "attachment_rejected": rejected_attachments,
-        "attachment_candidates": attachment_candidates,
-        # R6: 不可变启动输入快照 —— 续跑与交付清单都基于它, 而不是残缺的 request
-        "input_snapshot": {
-            "request": request_text,
-            "topic": req.topic.strip(),
-            "source_set_id": str(getattr(req, "source_set_id", "") or ""),
-            "source_set_kind": str(getattr(req, "source_set_kind", "") or "kb"),
-            "source_policy": policy,
-            "attachment_ids": list(getattr(req, "attachment_ids", None) or []),
-            "attachments": attachment_hashes,
-            "budget": {"max_actions": req.max_actions, "max_tool_calls": req.max_tool_calls},
-            "created_at": utcnow(),
-        },
-        "mode": "theory",
-        "run_id": run_id,
-        "source_policy": policy,
-        "budget_max_actions": req.max_actions if req.max_actions is not None else 40,
-        "budget_max_tool_calls": req.max_tool_calls if req.max_tool_calls is not None else 60,
-        "step_index": 0,
-        "interactive": True,
-        "current_phase": "theory_start",
-    }
-
-
-# `_StdoutBridge` / 派发器 / 按线程绑定 (含会话级用量与运行身份作用域) 已移到
-# `src/sessions/runtime.py`。这里保留这些名字是为了不破坏既有调试/测试入口
-# (`server._STDOUT_BRIDGES` / `server._StdoutDispatcher`), 实现只有一份。
+# 会话运行时的 stdout 桥/运行作用域: 这些名字此前在**旧引擎分支**里定义, 与引擎
+# 是否使用无关 (团队会话同样要按 run 归属日志)。删除旧分支时一并搬到这里, 保持
+# "实现只有一份在 `sessions/runtime`" 的约定。
 from src.sessions import runtime as _session_runtime  # noqa: E402
 
 _StdoutBridge = _session_runtime.StdoutBridge
@@ -806,7 +853,10 @@ def _run_session(session: Session, initial_state: dict | None = None):
                             "type": "node",
                             "name": node_name,
                             "text": _describe_node(node_name, node_state),
-                            "research": _research_progress(session, node_name, node_state),
+                            # 研究进度已由团队事件 (`team_event` → SSE) 携带: 每个角色
+                            # 的派工/成果/缺口都从图里发出。此前这里另外建一个研究引擎
+                            # 去"补一份进度摘要"—— 那是**第二个读模型的入口**, 也是
+                            # 只读接口依赖引擎的又一处 (G01)。
                         })
             if session.stop_flag.is_set():
                 session.emit({"type": "stopped"})
@@ -951,12 +1001,23 @@ def describe_source(source_set_id: str):
 def start_session(req: StartRequest):
     if not (req.topic and req.topic.strip()) and not (req.request and req.request.strip()):
         raise HTTPException(400, "研究主题或自然语言描述至少填写一项")
+    # ---- §3.1 G03 的固定顺序 ----
+    # ① 规范化输入与文件 + ② 分配身份: 都在创建任何运行之前完成。
+    snapshot = _normalized_input(req)
     thread_id = sanitize_filename((req.topic or req.request).strip()) + "_" + uuid.uuid4().hex[:6]
     session_id = uuid.uuid4().hex
-    # 统一入口 (合并计划 §3 / M5): 用户**不再选择模式**。没有显式给出 `mode` 时
-    # 由 `_resolve_engine` 按默认引擎启动; `mode` 仅作为遗留兼容字段被接受
-    # (旧客户端/旧会话), 不出现在界面上, 也不作为用户可见的选择。
-    mode = _resolve_engine(req.mode, request=req.request or req.topic)
+    # 统一入口 (合并计划 §3 / M5 / G01): **用户不选引擎**。旧客户端若仍带 `mode`,
+    # 它会被 Pydantic 忽略 (字段已从 `StartRequest` 删除); 所有研究请求都进同一张团队图。
+    mode = _resolve_engine()
+    # ③ 校验资料授权 (在创建 run 之前): 绑定不可用就明确拒绝, 不让研究静默退回"无资料"
+    source_warnings = _validate_source_binding(snapshot)
+    # ③b 规格与冲突判定也必须在**创建运行之前**: 身份相同但问题不同时直接 409, 不留下
+    # 一个"建了会话却立刻失败"的悬挂记录, 也不让用户看到"我改了问题但结果没变"。
+    conflict, spec_reused, contract = _ensure_problem_spec(snapshot,
+                                                           resume=bool(req.resume))
+    if conflict is not None and not req.resume:
+        raise HTTPException(409, conflict)
+    # ④ 创建 run/session: 初始状态与会话请求是**同一份快照**, 身份因此不会漂移
     checkpointer, conn = _make_checkpointer(session_id)
     session = _make_session(
         thread_id,
@@ -964,104 +1025,19 @@ def start_session(req: StartRequest):
         session_id=session_id,
         checkpointer=checkpointer,
         checkpoint_conn=conn,
+        run_id=snapshot["run_id"],
         mode=mode,
+        request=_session_request(snapshot),
     )
-    session.request = {
-        "topic": req.topic,
-        "request": req.request,
-        "keywords": req.keywords or [],
-        "subtopics": req.subtopics or [],
-        "time_range": req.time_range,
-        "max_revisions": req.max_revisions,
-        "skip_retrieval": req.skip_retrieval,
-        "mode": mode,
-        "project_id": req.project_id,
-        "problem_id": req.problem_id,
-        "max_actions": req.max_actions,
-        "max_tool_calls": req.max_tool_calls,
-        # R2/R6: 附件 id 必须随会话落盘 —— 否则续跑/历史回看只能看到一句自由请求,
-        # "题面在附件里"这件事就无法复现 (附件本体也无法重新读取)。
-        "attachment_ids": list(req.attachment_ids or []),
-        "source_set_id": req.source_set_id,
-        "source_set_kind": req.source_set_kind,
-        "source_policy": req.source_policy,
-    }
-    if mode == "theory":
-        initial_state = build_theory_initial_state(req)
-        # R0: 资料源绑定必须在确认研究之前校验 —— 绑定不可用时要明确告知,
-        # 而不是让研究静默退回"无知识库"
-        if (req.source_set_id or "").strip():
-            from src.kb.sources import validate_binding
-
-            check = validate_binding(req.source_set_id.strip())
-            if not check["ok"]:
-                raise HTTPException(409, {
-                    "message": f"资料源不可用, 请重新选择: {check['reason']}",
-                    "source_set_id": req.source_set_id,
-                    "reason": check["reason"],
-                })
-            initial_state["source_set_id"] = req.source_set_id.strip()
-            initial_state["source_set_warnings"] = check["warnings"]
-        # 落盘 spec 供图节点重建 (自动区分明确问题与研究方向)。
-        try:
-            from src.kb.sources import build_source_summary
-            from src.research.schemas import SourcePolicy
-            from src.research.store import KIND_SPEC, ResearchStore
-
-            request_text = (initial_state.get("request") or initial_state.get("topic") or "")
-            source_summary = build_source_summary(
-                source_set_id=initial_state.get("source_set_id", ""),
-                source_set_kind=req.source_set_kind or "kb",
-                request=request_text,
-            )
-            # 授权自主检索时, 没有预建资料库也算合法输入 (P0-1 场景 ②)
-            source_summary.autonomous_retrieval = (
-                (req.source_policy or "user_kb") in ("autonomous", "both"))
-            store = ResearchStore(initial_state["project_id"])
-            try:
-                conflict = _existing_spec_conflict(
-                    store, initial_state["problem_id"], request_text,
-                    source_summary=source_summary)
-                if conflict is not None and not req.resume:
-                    # 不覆盖已确认的问题: 让用户选择继续还是另建
-                    store.close()
-                    raise HTTPException(409, conflict)
-                if conflict is not None:
-                    initial_state["spec_reused"] = True
-                stored = store.get(KIND_SPEC, initial_state["problem_id"])
-                if stored:
-                    # 已有规格: 契约随之复用, 不重新判定研究类型
-                    initial_state["contract"] = stored.get("contract")
-                else:
-                    from src.research.question_planner import build_spec_from_input
-
-                    spec = build_spec_from_input(
-                        request=initial_state.get("request", ""),
-                        topic=initial_state.get("topic", ""),
-                        project_id=initial_state["project_id"],
-                        problem_id=initial_state["problem_id"],
-                        source_summary=source_summary,
-                    )
-                    # 绑定资料源写进规格: 研究图据此找到用户选定的资料库
-                    if initial_state.get("source_set_id"):
-                        spec.source_set_id = initial_state["source_set_id"]
-                        spec.source_set_kind = req.source_set_kind or "kb"
-                        spec.source_set_note = "; ".join(
-                            initial_state.get("source_set_warnings") or [])
-                    spec.source_policy = SourcePolicy(req.source_policy or "user_kb")
-                    store.put(KIND_SPEC, initial_state["problem_id"],
-                              spec.model_dump(mode="json"))
-                    initial_state["contract"] = spec.contract.model_dump(mode="json")
-            finally:
-                store.close()
-        except HTTPException:
-            raise
-        except Exception as e:  # noqa: BLE001
-            print(f"  [warning] theory spec 落盘失败: {e}")
-    else:
-        initial_state = build_initial_state(req)
+    # ⑤ 注入同一输入快照并启动
+    initial_state = build_initial_state(req, snapshot)
+    if source_warnings:
+        initial_state["source_set_warnings"] = source_warnings
+    if spec_reused:
+        initial_state["spec_reused"] = True
+    if contract:
+        initial_state["contract"] = contract
     SESSIONS[thread_id] = session
-    session.run_id = initial_state.get("run_id", "")
     # 立即落盘一条 running 记录, 保证"未跑到 interrupt 就关闭"的会话也能在历史列表被看到并续跑
     _persist_session(session)
     worker = threading.Thread(target=_run_session, args=(session, initial_state), daemon=True)
@@ -1074,8 +1050,8 @@ def start_session(req: StartRequest):
         "session_id": session_id,
         "mode": mode,
         "run_id": session.run_id,
-        "project_id": initial_state.get("project_id", ""),
-        "problem_id": initial_state.get("problem_id", ""),
+        "project_id": snapshot["project_id"],
+        "problem_id": snapshot["problem_id"],
         "contract": initial_state.get("contract"),
         "spec_reused": bool(initial_state.get("spec_reused")),
         "resumed": bool(req.resume),
@@ -1084,62 +1060,91 @@ def start_session(req: StartRequest):
 
 @app.get("/api/sessions/{thread_id}/events")
 async def session_events(thread_id: str, last_event_id: int = 0):
-    """SSE 事件流 (计划书 F2)。
+    """SSE 事件流 (计划书 F2 / 合并计划 §3.3 G15)。
 
-    - 每个事件带 `id:` (递增序号) 与 data 里的 `_seq`;
-    - `last_event_id` 给定时先**回放**缺失事件 (断线重连不丢中断/完成事件);
-    - 事件同时保留在 `session.event_log`, 多标签页各自读日志, 不再争抢同一队列。
+    三条不可让步的规则 (每一条都对应一个实测缺陷):
+
+    1. **每个订阅者有自己的游标**, 事件从**持久日志**按游标读 —— 不是从共享队列里
+       `get()`。共享队列只能被一个读者取走一条, 两个页面同时订阅就是互相抢事件
+       (旧实现的症状: 一个页面收到的 task 事件在另一个页面里凭空消失)。
+    2. **`connected` / 心跳 / 合成终止帧不占业务序号**: 它们的 SSE `id:` 沿用当前
+       游标 (或不带 id), 否则客户端记下的最后一个 id 会比真实事件序号大 1, 下一条
+       真实事件就被它当成"重复"丢掉。
+    3. **缺口如实报告**: 游标早于日志保留窗口时发 `event_log_truncated`, 让前端
+       重新加载投影, 而不是假装补齐。
     """
     session = SESSIONS.get(thread_id)
     if not session:
         raise HTTPException(404, "会话不存在")
 
-    def _frame(event: dict, seq: int) -> str:
+    def _frame(event: dict, seq: int = 0) -> str:
         payload = {k: v for k, v in event.items() if k != "_seq"}
-        return (f"id: {seq}\n"
-                f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
+        # `seq<=0` = 非业务帧: 不写 `id:`, 客户端的游标因此保持不变。
+        head = f"id: {seq}\n" if seq and seq > 0 else ""
+        return head + f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     async def gen():
+        log = session.event_stream
+        # 订阅者自己的游标: 起点是客户端给的 last_event_id。
+        try:
+            cursor = int(last_event_id or 0)
+        except (TypeError, ValueError):
+            cursor = 0
         with session.event_lock:
-            replayed, truncated = session.event_stream.replay(last_event_id)
-            current_seq = session.event_seq
+            pending, truncated = log.replay(cursor)
+            latest = log.snapshot_seq()
         if truncated:
-            # M4: 请求的游标早于日志里最早的记录 —— 那部分已经被裁掉。此时**不能**
+            # 请求的游标早于日志里最早的记录 —— 那部分已经被裁掉。此时**不能**
             # 假装补齐: 如实告知客户端"日志截断", 让它重新加载投影 (前端把未知事件
             # 类型当作 resync 信号, 见 events/session-events.ts)。
             yield _frame({"type": "event_log_truncated",
-                          "message": replay_gap_note(True)}, current_seq)
-        if replayed:
-            for event in replayed:
-                seq = event.get("_seq", 0)
+                          "message": replay_gap_note(True)}, latest)
+        for event in pending:
+            yield _frame(event, int(event.get("_seq", 0) or 0))
+            cursor = max(cursor, int(event.get("_seq", 0) or 0))
+            if event.get("type") in ("done", "stopped", "error"):
+                return
+        if not pending:
+            # 会话已结束且客户端 (重)连接 → 立即补发终止帧, 避免空转。
+            # 这些是**非业务帧**: 不占序号 (见本函数的规则 2)。
+            if session.status == "done" and session.final_state is not None:
+                yield _frame({"type": "done",
+                              "state": _final_summary(session.final_state)}, 0)
+                return
+            if session.status in ("stopped", "error"):
+                kind = "stopped" if session.status == "stopped" else "error"
+                yield _frame({"type": kind, "message": session.error or ""}, 0)
+                return
+        yield _frame({"type": "connected",
+                      "cursor": cursor,
+                      "event_seq": session.event_seq}, 0)
+        while True:
+            if not await asyncio.to_thread(log.wait_for, cursor, 0.5):
+                yield ": keep-alive\n\n"
+                # 断线/停止之后仍然继续等: "断开连接"不等于"研究停止"; 只有会话
+                # 进入终态且已交付到游标才结束。
+                continue
+            with session.event_lock:
+                fresh, gap = log.replay(cursor)
+            if gap:
+                yield _frame({"type": "event_log_truncated",
+                              "message": replay_gap_note(True)}, session.event_seq)
+                with session.event_lock:
+                    fresh, _ = log.replay(session.event_seq)
+            for event in fresh:
+                seq = int(event.get("_seq", 0) or 0)
                 yield _frame(event, seq)
+                cursor = max(cursor, seq)
                 if event.get("type") in ("done", "stopped", "error"):
                     return
-        # 会话已结束且客户端 (重)连接 → 立即补发终止事件, 避免空转
-        if session.status == "done" and session.final_state is not None:
-            current_seq += 1
-            yield _frame({"type": "done",
-                          "state": _final_summary(session.final_state)}, current_seq)
-            return
-        if session.status in ("stopped", "error"):
-            kind = "stopped" if session.status == "stopped" else "error"
-            current_seq += 1
-            yield _frame({"type": kind, "message": session.error or ""}, current_seq)
-            return
-        current_seq += 1
-        yield _frame({"type": "connected"}, current_seq)
-        while True:
-            try:
-                event = await asyncio.to_thread(session.events.get, True, 0.5)
-            except queue.Empty:
-                yield ": keep-alive\n\n"
-                continue
-            if event is None:
-                break
-            seq = event.get("_seq", 0)
-            yield _frame(event, seq)
-            if event.get("type") in ("done", "stopped", "error"):
-                break
+            if session.status in ("done", "stopped", "error") and not fresh:
+                kind = {"done": "done", "stopped": "stopped",
+                        "error": "error"}[session.status]
+                payload = ({"type": kind, "state": _final_summary(session.final_state)}
+                           if kind == "done" else
+                           {"type": kind, "message": session.error or ""})
+                yield _frame(payload, 0)
+                return
 
     return StreamingResponse(
         gen(),
@@ -1230,11 +1235,16 @@ def resume_session(session_id: str):
 
     checkpointer, conn = _make_checkpointer(session_id)
     stored_request = dict(record.get("request") or {})
-    # 续跑用的引擎必须与**启动时**同一条判据: 落盘里有 mode 就用它, 没有 (旧记录)
-    # 就按请求/主题重新解析。只看 mode 会让"落盘早于 mode 字段"的会话续跑时悄悄
-    # 换成另一个引擎 (实测: 一个形式化研究会话被当综述交给团队引擎)。
-    resume_request = str(stored_request.get("request") or "")
-    resume_topic = str(record.get("topic") or stored_request.get("topic") or "")
+    # 旧会话属于已退役的形式化研究入口 (落盘记录里带 `mode="theory"`): 那条路径已删除,
+    # 它的 checkpoint 里是旧图的节点, 用团队图续跑只会得到一张读不懂的状态。**如实拒绝**
+    # 并给出可执行的下一步, 而不是"看起来在续跑"。
+    if str(stored_request.get("mode") or "") == "theory":
+        raise HTTPException(409, {
+            "message": ("该会话由已退役的形式化研究入口创建, 无法用团队引擎续跑: "
+                        "请以同一 project_id/problem_id 重新启动一次研究"),
+            "session_id": session_id, "retired_engine": "theory",
+            "retryable": True,
+        })
     session = _make_session(
         thread_id,
         topic=record.get("topic", ""),
@@ -1242,38 +1252,20 @@ def resume_session(session_id: str):
         checkpointer=checkpointer,
         checkpoint_conn=conn,
         run_id=record.get("run_id", ""),
-        mode=_resolve_engine(str(stored_request.get("mode") or ""),
-                             request=resume_request or resume_topic),
+        mode=_resolve_engine(),
+        # G03: 续跑也必须**先**把落盘请求快照交给会话, 再建图 —— 团队装配从
+        # `session.request` 读身份与资料, 先建图会让续跑的团队拿到空身份。
+        request=stored_request,
     )
-    session.request = stored_request
     session.created_at = record.get("created_at", session.created_at)
     # 恢复历史对话, 避免续跑落盘时用空 messages 覆盖历史记录
     session.messages = list(record.get("messages", []))
     SESSIONS[thread_id] = session
 
-    # 判断是否有 checkpoint 可续跑 (无 checkpoint 说明尚未执行任何节点就关闭)
-    has_checkpoint = False
-    try:
-        snap = session.app.get_state(session.config)
-        has_checkpoint = bool(snap.values or snap.next)
-    except Exception:
-        has_checkpoint = False
-
+    # 没有 checkpoint 也能续: 团队应用把落盘请求快照重新走一遍画像/计划 (G16 的
+    # `resume` 语义)。因此这里不再需要"有 checkpoint 才敢续"的判断, 也不需要构造
+    # 引擎专属的初始状态 —— 输入快照本身就在 `session.request` 里。
     initial_state = None
-    if not has_checkpoint:
-        req = session.request
-        if req.get("topic") or req.get("request"):
-            try:
-                start_req = StartRequest(**req)
-                engine = _resolve_engine(session.mode,
-                                         request=req.get("request") or req.get("topic") or "")
-                initial_state = (build_theory_initial_state(start_req)
-                                 if engine == "theory" else None)
-            except Exception:
-                initial_state = None
-        if initial_state is None and _resolve_engine(
-                session.mode, request=req.get("request") or req.get("topic") or "") == "theory":
-            raise HTTPException(400, "无 checkpoint 且缺少启动参数, 无法恢复")
 
     worker = threading.Thread(target=_run_session, args=(session, initial_state), daemon=True)
     session.worker_thread = worker  # 续跑同样要登记, 关闭连接前需等它退出
@@ -1430,8 +1422,12 @@ def research_feedback(project_id: str, req: RespondRequest, problem_id: str = ""
     反馈必须落到具体 assumption_id / claim_id / step_id; 无法确定对象时不猜,
     返回 `needs_clarification` 与澄清问题, 研究状态保持不变。
     作用对象限定在当前研究问题内 —— 不得改到同项目的另一个问题。
+
+    **只有团队路径**: 反馈必须落到具体对象上, 而"落到对象上"要有一条**运行中的研究**
+    来承接 (需求 → 主控派工 → 唯一提交口)。旧引擎的 `submit_feedback` 已随引擎退役
+    删除, 因此没有团队运行状态的问题会得到**可恢复**的 409 与下一步说明, 而不是
+    "看起来处理了"。
     """
-    from src.research.loop import ResearchBudget, TheoryEngine
     from src.research.store import ResearchStore, default_db_path
 
     if not default_db_path(project_id).exists():
@@ -1439,18 +1435,54 @@ def research_feedback(project_id: str, req: RespondRequest, problem_id: str = ""
     store = ResearchStore(project_id)
     try:
         try:
-            _, spec = resolve_problem(store, problem_id or req.problem_id)
+            resolved, spec = resolve_problem(store, problem_id or req.problem_id)
         except ProblemNotFound as e:
             raise HTTPException(404, str(e)) from e
         except ProblemAmbiguous as e:
             raise HTTPException(409, {"message": str(e), "problems": e.problems}) from e
-        engine = TheoryEngine(spec, store=store, budget=ResearchBudget())
-        engine.load_runtime()
-        outcome = engine.submit_feedback(req.response, target_object_id=req.object_id)
+
+        from src.research.feedback import find_latest_team_run
+
+        team_state = find_latest_team_run(store, resolved)
+        if not team_state:
+            raise HTTPException(409, {
+                "message": ("该问题还没有团队运行状态, 反馈无法落到对象上: "
+                            "请先以同一 project_id/problem_id 启动一次团队研究"),
+                "problem_id": resolved, "retryable": True,
+                "how_to_fix": "POST /api/sessions (同一 project_id 与 problem_id)",
+            })
+        outcome = _team_feedback(store, spec, resolved, team_state, req, project_id)
     finally:
         store.close()
     status = 200 if outcome.get("ok") else 400
     return JSONResponse(content=outcome, status_code=status)
+
+
+def _team_feedback(store, spec, problem_id: str, team_state: dict,
+                   req: RespondRequest, project_id: str) -> dict:
+    """团队路径的反馈处理: 需求 → 主控派工 → 唯一提交口落盘。"""
+    from src.graph.research_graph import TeamRun
+    from src.research.feedback import feedback_need_for
+
+    need, info = feedback_need_for(project_id=project_id, problem_id=problem_id,
+                                   text=req.response,
+                                   target_object_id=req.object_id, store=store)
+    if need is None:
+        return info
+    with TeamRun(project_id=project_id, problem_id=problem_id,
+                 run_id=str(team_state.get("run_id", "") or ""),
+                 request=str(team_state.get("request", "") or spec.original_request),
+                 source_set_ids=list(team_state.get("source_set_ids") or []),
+                 source_policy=str(team_state.get("source_policy", "user_kb")),
+                 attachments=list(team_state.get("attachments") or []),
+                 attachment_text=str(team_state.get("attachment_text", "") or ""),
+                 max_rounds=int(team_state.get("max_rounds", 12) or 12)) as team:
+        result = team.submit_feedback(
+            statement=need.statement, owner=need.owner,
+            target_ref=(need.blocked_refs[0] if need.blocked_refs else None),
+            why=need.why, acceptance=list(need.acceptance), kind=need.kind)
+    result.update({k: v for k, v in info.items() if k != "ok"})
+    return result
 
 
 @app.post("/api/research/fork")
@@ -1466,7 +1498,7 @@ def fork_research(req: ForkRequest):
     project_id = (req.project_id or "").strip()
     if not project_id:
         raise HTTPException(400, "缺少 project_id")
-    from src.research.loop import ResearchBudget, TheoryEngine
+    from src.research.forking import fork_from_snapshot
     from src.research.store import ResearchStore, default_db_path
 
     if not default_db_path(project_id).exists():
@@ -1479,12 +1511,11 @@ def fork_research(req: ForkRequest):
             raise HTTPException(404, str(e)) from e
         except ProblemAmbiguous as e:
             raise HTTPException(409, {"message": str(e), "problems": e.problems}) from e
-        engine = TheoryEngine(spec, store=store, budget=ResearchBudget())
-        # 载入路线与失败档案, 保证派生问题继承失败记忆 (不重复犯错)
-        engine.load_runtime()
-        outcome = engine.fork_from_snapshot(
-            source_snapshot_id=req.snapshot_id, claim_ids=req.claim_ids or None,
-            problem_id=req.new_problem_id)
+        # 派生只需要**存储 + 输入规格**: 它是用户可见功能, 不该因为引擎退役而消失,
+        # 因此不再建 `TheoryEngine` (§5.5)。旧引擎的路线记账由引擎自己的同名方法追加。
+        outcome = fork_from_snapshot(
+            store, spec, source_snapshot_id=req.snapshot_id,
+            claim_ids=req.claim_ids or None, new_problem_id=req.new_problem_id)
     finally:
         store.close()
     if not outcome.get("ok"):

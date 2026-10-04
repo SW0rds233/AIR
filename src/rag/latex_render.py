@@ -22,53 +22,14 @@ CITE_LIST_RE = _re.compile(r"\[([\d,\s]+)\]")
 FIG_PLACEHOLDER_RE = _re.compile(r"\[图\s*(\d+)\s*[:：]\s*(.+?)\]")
 TABLE_PLACEHOLDER_RE = _re.compile(r"\[表\s*\d+\s*[:：]\s*.*\]")
 
-LATEX_PREAMBLE = r"""\documentclass[UTF8,a4paper,12pt]{ctexart}
-\usepackage[hmargin=1.2in,vmargin=1in]{geometry}
-\usepackage{amsmath,amssymb}
-\usepackage{graphicx}
-\usepackage{booktabs}
-\usepackage{array}
-\usepackage{tabularx}
-\usepackage{hyperref}
-\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
-% 可自动换行的 X 列 (左对齐), 用于宽表格撑满 \textwidth 而不越界
-\newcolumntype{L}{>{\raggedright\arraybackslash}X}
-
-\title{__TITLE__}
-\author{AI Survey Pipeline}
-\date{__DATE__}
-
-\begin{document}
-\maketitle
-"""
-
-LATEX_POSTAMBLE = r"""
-\end{document}
-"""
-
-
-def _escape_latex(text: str) -> str:
-    """转义 LaTeX 特殊字符（保持数学公式 $...$ 与 LaTeX 命令不变）
-
-    只转义普通文本中危险且常见的字符: _ & % #。
-    - 下划线 _ 未转义会触发 "Missing $ inserted" (如 "Raw_I_Q")
-    - 反斜杠 \\ 和花括号 {} 是命令结构, 不能转义, 否则破坏 \\textbf{} 等
-    - 数学公式 $...$ 内部不转义 (如 $x_i$)
-    """
-    # 先保护数学公式 $...$
-    math_blocks = []
-    def _protect(m):
-        math_blocks.append(m.group(0))
-        return f"\x00MATH{len(math_blocks) - 1}\x00"
-    text = _re.sub(r"\$[^$]*\$", _protect, text)
-
-    for ch in ("_", "&", "%", "#"):
-        text = text.replace(ch, "\\" + ch)
-
-    # 恢复数学公式
-    for i, blk in enumerate(math_blocks):
-        text = text.replace(f"\x00MATH{i}\x00", blk)
-    return text
+# 前言与转义的**唯一定义**在 `publication/render_latex.py` (合并计划 §5.5:
+# 通用渲染/转义迁 publication/render_*)。这里保留名字是因为既有调用方与用例按名取,
+# 但不再各写一份 —— 两份 preamble 迟早会漂移成"两个格式"。
+from src.publication.render_latex import (  # noqa: E402
+    LATEX_POSTAMBLE,
+    LATEX_PREAMBLE,
+    escape_latex as _escape_latex,
+)
 
 
 def _md_to_latex_inline(md_text: str) -> str:

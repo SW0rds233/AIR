@@ -64,12 +64,16 @@ def test_team_run_executes_and_reports_unresolved(client):
     assert response.status_code == 200
     body = response.json()
     assert body["run_id"]
-    assert body["status"] != "completed"
     assert body["stop_reason"]
     assert body["brief"]["main_question"]
     assert body["unresolved_report"]["deliverables_requested"]
     # 任务摘要里保留失败原因 (不是空壳)
     assert all("outcome" in t for t in body["tasks"])
+    # 交付级别的判据是**门槛**, 不是"角色跑过没有": 状态 completed 必须对应门槛通过,
+    # 且交付评估本身要随响应返回 (界面/复核据此解释"为什么是这一级")。
+    assert "delivery" in body, body.keys()
+    if body["status"] == "completed":
+        assert body["delivery"].get("accepted") is True, body["delivery"]
 
 
 def test_team_run_registers_objects_for_a_usable_library(client, tmp_path):

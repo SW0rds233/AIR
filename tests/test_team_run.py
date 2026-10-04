@@ -337,9 +337,16 @@ def test_team_run_reports_unavailable_sources_without_pretending(tmp_path, monke
                  request="判断参数为 2-(211,15,1) 的设计是否存在",
                  source_policy="user_kb", max_rounds=12) as team:
         out = team.run()
-    assert out.status != TaskStatus.completed.value
+    # 没有资料范围 ≠ 研究做不出来: 纯自足判定可以无文献完成 (§3.1 G05 的例外),
+    # 因此这里不再固定"状态必须不是 completed" —— 那会把"团队能自己判定"当成错误。
+    # 要守的是**不许伪造检索**: 检索角色必须如实说"资料范围不可用", 且交付必须过门槛。
     summaries = " ".join(r.summary for r in out.results.values())
-    assert "资料范围不可用" in summaries or "检索未执行" in summaries
+    assert "资料范围不可用" in summaries or "检索未执行" in summaries, summaries
+    assert "命中" not in summaries or "命中 0 条" in summaries or "可引用" in summaries, \
+        f"检索角色报告了未发生的命中: {summaries}"
+    if out.status == TaskStatus.completed.value:
+        assert out.delivery.get("accepted") is True, (
+            "状态 completed 必须等于交付门槛通过 (否则就是'角色跑过即交付')")
 
 
 def test_team_run_records_task_lifecycle_and_is_bounded(tmp_path, monkeypatch):
@@ -410,9 +417,10 @@ def test_math_request_uses_the_formal_derivation_kernel(tmp_path, monkeypatch):
                  request="对所有实数 x 证明: x**2 >= 0, 并给出严格证明",
                  source_policy="user_kb", max_rounds=12) as team:
         # 给角色一个可形式化的命题 (团队 пути的上下文来自投影层)
-        from src.research.schemas import Claim
+        from src.research.schemas import Claim, Relation
 
         claim = Claim(id="clm-team", statement="对所有实数 x: x**2 >= 0",
+                      lhs="x**2", rhs="0", relation=Relation.ge,
                       variables=["x"], variable_domains={"x": "real"})
         team.projection.store.put("claim", claim.id,
                                   {**claim.model_dump(mode="json"), "status": "proposed"})
@@ -429,6 +437,14 @@ def test_math_request_uses_the_formal_derivation_kernel(tmp_path, monkeypatch):
     # 反方审查必须真的跑过 (计划书 §7.2 的八项清单)
     summary = used_kernel[0].summary
     assert "反方审查" in summary
+    # §3.1 G06: 闭环必须真的走到底 —— 义务与核验记录作为候选一并提交,
+    # 命题候选则不带科学等级 (状态由唯一提交口按内核判据重算)。
+    kinds = {p.kind for p in used_kernel[0].proposed_changes}
+    assert "obligation" in kinds, f"闭环没有提交义务候选: {kinds}"
+    claim_changes = [p for p in used_kernel[0].proposed_changes if p.kind == "claim"]
+    assert claim_changes
+    for name in ("status", "assurance", "support_kind", "validation_status"):
+        assert name not in claim_changes[0].payload, f"命题候选自报了 {name}"
     # 角色仍只提交候选, 不得声明改变结论
     assert all(p.may_change_conclusion is False
                for p in used_kernel[0].proposed_changes)

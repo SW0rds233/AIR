@@ -11,10 +11,12 @@ from __future__ import annotations
 而 SQLite 再保存另一份, 就会出现两个真相源 —— 同一条结论在两边版本不一致时,
 判定层读哪一个都不对。因此这里只放**引用**。
 
-与旧状态的关系 (§7.4)
----------------------
-`graph/state.py` (`PipelineState`) 与 `graph/theory_state.py` (`TheoryState`) 继续服务
-迁移前的会话; 本模块是新任务的统一状态。旧 checkpoint 保持可读, 不强制原地转换。
+与旧状态的关系 (§7.4 / R5 清仓)
+-------------------------------
+旧综述流水线的状态 (`graph/state.py::PipelineState`) **已随该流水线删除** —— 它最后的使用者
+是引用守门/预检的旧 Agent, 那些能力已迁到 `publication/citation_checks` 与
+`publication/evidence_ledger`。旧理论图的状态 (`graph/theory_state.py::TheoryState`) 仍在,
+只为尚未退役的形式化流水线服务, 与本模块无关。旧 checkpoint 保持可读, 不强制原地转换。
 """
 
 from typing import Any, TypedDict

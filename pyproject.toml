@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "langgraph-survey-pipeline"
+name = "air-research-team"
 version = "0.1.0"
-description = "多智能体综述论文撰写流水线 - 基于 LangGraph + RAG (ChromaDB)"
+description = "统一的多智能体学术科研系统 (一个主控 + 七类角色) - LangGraph + RAG (ChromaDB)"
 requires-python = ">=3.10"
 dependencies = [
     "langgraph>=0.2.0",

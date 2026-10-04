@@ -32,7 +32,11 @@ from typing import Any
 from src.agents.protocol import AgentResult, TaskStatus
 from src.graph.research_graph import TeamRun
 
-__all__ = ["TeamApp", "TeamSession", "run_team_session"]
+__all__ = ["ExportError", "TeamApp", "TeamSession", "run_team_session"]
+
+
+class ExportError(RuntimeError):
+    """交付包导出失败 (可恢复: 修好原因后重试导出, 不重跑研究)。"""
 
 
 class _Interrupt:
@@ -80,25 +84,49 @@ class TeamApp:
                 return
             if not keep_going:
                 break
-        # 收尾: 交付包在这里导出 (与团队会话的 export 同一实现)
-        package = None
+        # 收尾: 交付包在这里导出 (与团队会话的 export 同一实现)。
+        # **导出失败不得静默** (G12): 之前这里 `except: package = None`, 于是"导出失败"
+        # 在界面上与"没跑过"完全一样。现在如实发一条可恢复错误事件。
         try:
             package = self.session.export()
-        except Exception:  # noqa: BLE001 - 导出失败不得让会话卡死
-            package = None
-        self.session.package_dir = str(package) if package else ""
+            self.session.package_dir = str(package) if package else ""
+        except ExportError as e:
+            self.session.package_error = str(e)
+            yield {"research_team_export_failed": {
+                "node": "research_team_export_failed",
+                "recoverable": True,
+                "message": str(e),
+                "summary": self.session.outcome_summary(),
+            }}
+            return
         yield {"research_team_done": {
             "node": "research_team_done",
             "summary": self.session.outcome_summary(),
             "package_dir": self.session.package_dir,
+            "delivery": (self.session.delivery.to_dict()
+                         if self.session.delivery is not None else {}),
         }}
 
     def get_state(self, config: Any = None) -> Any:
         """终态视图: `_run_session` 只读 `values`, 因此这里给一个最小对象。"""
         summary = self.session.outcome_summary()
+        package = Path(getattr(self.session, "package_dir", "") or "")
+        # 交付包目录名就是冻结快照 id (`snap-…`); 会话终态要把它交出去, 否则
+        # "HTTP 返回的运行身份 → 交付包 → 快照"这条链在界面上断掉 (G03 要求三处
+        # 是同一个 id)。清单里也有 `snapshot_id`, 但只有跑到导出之后才有。
+        snapshot_id = ""
+        if package.name.startswith("snap-"):
+            snapshot_id = package.name
+        else:
+            try:
+                manifest = json.loads((package / "manifest.json").read_text("utf-8"))
+                snapshot_id = str(manifest.get("snapshot_id") or "")
+            except Exception:  # noqa: BLE001 - 没有包时如实留空
+                snapshot_id = ""
         return _TeamState({
             "engine": "team_v1",
             "package_dir": getattr(self.session, "package_dir", ""),
+            "snapshot_id": snapshot_id,
             "summary": summary,
             "project_id": self.session.team.project_id,
             "problem_id": self.session.team.problem_id,
@@ -213,6 +241,10 @@ class TeamSession:
         team.runtime.sink = self._fanout
         self.pending_interrupt: dict[str, Any] | None = None
         self.responses: list[str] = []
+        #: 最近一次交付评估 (等级 + 门槛理由); 界面与用例据此看到"为什么是这一级"。
+        self.delivery: Any = None
+        #: 导出失败原因 (可恢复: 修好原因重试导出即可, 不重跑研究)。
+        self.package_error: str = ""
 
     # ------------------------------------------------------------------
     # 驱动
@@ -316,7 +348,7 @@ class TeamSession:
         }
 
     # ------------------------------------------------------------------
-    # 交付包 (§15.3 第 3 步)
+    # 交付包 (§15.3 第 3 步 / §3.2 G12)
     # ------------------------------------------------------------------
     def export(self, *, run_id: str = "") -> Path | None:
         """把团队产出导出为交付包 (复用既有 `export_package` 与门槛判定)。
@@ -325,14 +357,47 @@ class TeamSession:
         同一个 `ResearchStore`; 因此交付包只要按同一套 `ResearchSnapshot` + 门槛 +
         出版层渲染即可, 不需要为团队另造一份报告格式。
 
-        没有可导出内容时返回 `None` 并如实记在 `stop_reason` 里, 不产出空包。
+        **G12**: 导出必须带上完整的研究/出版门槛结论 (此前一个都没传), 失败时抛
+        `ExportError` 让调用方看到"为什么没有包", 而不是静默返回 `None` 让界面把
+        "导出失败"显示成"没跑过"。
         """
+        from src.research.delivery import assess_delivery
         from src.research.package import export_package
 
         store = self.team.task_store.store
+        manuscript_md = _manuscript_markdown(store)
+        # 先渲染 .tex 并**真编译**: 出版门槛要的是"能不能交付 .pdf"这个事实,
+        # 不能用"尚未尝试"占位 (§3.3 G17: 预览/Markdown/PDF 同源同版)。
+        manuscript_obj = _manuscript_object(store)
+        tex_text = ""
+        compile_status = "not_attempted"
+        compile_log = ""
+        if manuscript_obj is not None:
+            from src.publication.render_latex import render_latex
+
+            tex_text = render_latex(manuscript_obj,
+                                    references=_reference_labels(store))
+        assessment = assess_delivery(
+            store, project_id=self.team.project_id, problem_id=self.team.problem_id,
+            run_id=run_id or self.team.run_id, manuscript_md=manuscript_md,
+            references=_reference_rows(store),
+            compile_status="deferred" if not tex_text else "not_attempted",
+            on_skip=lambda payload: self.team.runtime.emit(
+                "snapshot_export_incomplete", payload))
+        self.delivery = assessment
         snapshot = _snapshot_from_store(store, self.team)
-        if snapshot is None:
-            return None
+        if snapshot is None:                          # pragma: no cover - 契约保证
+            raise ExportError("无法组装研究快照")
+        # **冻结快照必须落盘**: 交付包目录名就是快照 id, 而 `fork`/历史对比/`load_snapshot`
+        # 都从对象库里按 id 取快照 —— 只写目录不写库时, 派生接口会报"未找到可派生的快照"
+        # (实测), 界面又因为目录存在而显示"已冻结"。冻结的唯一入口在 `research/snapshot.py`
+        # (它不改任何结论状态, 只是给已提交对象拍照)。
+        from src.research.snapshot import freeze_snapshot
+
+        try:
+            freeze_snapshot(store, snapshot, run_id=run_id or self.team.run_id)
+        except Exception as e:  # noqa: BLE001 - 落盘失败必须可见, 不能静默
+            raise ExportError(f"冻结快照落盘失败: {type(e).__name__}: {e}") from e
         spec = None
         try:
             from src.research.store import KIND_SPEC
@@ -344,221 +409,211 @@ class TeamSession:
                 spec = ResearchSpec.model_validate(raw)
         except Exception:  # noqa: BLE001 - 规格缺失不阻断导出
             spec = None
-        manuscript_md = _manuscript_markdown(store)
-        return export_package(
-            snapshot, spec, [], manuscript_md,
-            notes=[self.team.outcome.stop_reason] if self.team.outcome.stop_reason else [],
-            run_id=run_id or self.team.run_id,
-            usage=self.team.outcome.usage.to_dict(),
-            input_snapshot={"request": self.team.request,
-                            "source_set_ids": list(self.team.source_set_ids),
-                            "source_policy": self.team.source_policy,
-                            "engine": "team_v1"},
-        )
+        try:
+            package = export_package(
+                snapshot, spec, [], manuscript_md,
+                notes=list(self.team.outcome.unresolved_report.get("unresolved") or []),
+                gate=assessment.theory,
+                delivery=assessment.delivery,
+                delivery_level=assessment.level,
+                run_id=run_id or self.team.run_id,
+                usage=self.team.outcome.usage.to_dict(),
+                input_snapshot={"request": self.team.request,
+                                "problem_id": self.team.problem_id,
+                                "run_id": run_id or self.team.run_id,
+                                # 输入快照必须记下**问题说明附件** (R6): 交付清单要能区分
+                                # "用户交来的题面/要求"与"研究检索到的证据文献", 否则事后
+                                # 无法判断研究是在什么约束下做的 (旧路径记了, 团队路径漏了)。
+                                "attachment_ids": [str(a.get("attachment_id", ""))
+                                                   for a in (self.team.attachments or [])],
+                                "attachments": list(self.team.attachments or []),
+                                "source_set_ids": list(self.team.source_set_ids),
+                                "source_policy": self.team.source_policy,
+                                "engine": "team_v1"},
+            )
+        except Exception as e:  # noqa: BLE001 - 导出失败必须**可见且可重试**
+            raise ExportError(f"交付包导出失败: {type(e).__name__}: {e}") from e
+        if tex_text:
+            compile_status, compile_log = self._compile_package(package, tex_text)
+            # 编译结论要**回头改写**交付等级: 出版层产物是在第一次评估之后才落盘的,
+            # 不重评就会让 manifest 停在"尚未尝试编译"的等级上 (实测过这种不一致)。
+            self.delivery = assess_delivery(
+                store, project_id=self.team.project_id,
+                problem_id=self.team.problem_id, run_id=run_id or self.team.run_id,
+                manuscript_md=manuscript_md, references=_reference_rows(store),
+                compile_status=compile_status,
+                on_skip=None)
+            _rewrite_manifest(package, self.delivery, compile_status, compile_log)
+        return package
+
+    def _compile_package(self, package: Path, tex_text: str) -> tuple[str, str]:
+        """把 `.tex` 写进交付包并编译为 PDF; 返回 `(编译状态, 日志)`。
+
+        状态取值与出版门槛的约定一致: `ok` / `unavailable` / `failed: …`。
+        编译失败**不抛异常** —— 交付包本身仍然有效, 只是等级降为"论文草稿";
+        这一点必须写进 manifest, 而不是让人以为有 PDF。
+        """
+        from src.publication.compiler import compile_latex
+
+        tex_path = Path(package) / "manuscript.tex"
+        tex_path.write_text(tex_text, encoding="utf-8")
+        ok, log = compile_latex(str(tex_path), workdir=str(package))
+        pdf_path = Path(package) / "manuscript.pdf"
+        # 编译器的"成功"以**PDF 真的存在**为准: 只信返回值会让 manifest 写
+        # `compilation ok` 而包里没有 PDF (实测出现过一次), 那正是"看起来完整"。
+        has_pdf = pdf_path.is_file() and pdf_path.stat().st_size > 1024
+        if ok and has_pdf:
+            return "ok", log[-2000:]
+        if "未安装" in (log or ""):
+            return "unavailable", log[-2000:]
+        if ok and not has_pdf:
+            return "failed: 编译器报告成功但未生成 PDF", log[-2000:]
+        return f"failed: {(log or '')[-400:]}", log[-2000:]
 
 
 def _snapshot_from_store(store, team: TeamRun):
-    """由存储里的团队候选组装 `ResearchSnapshot` (只带已登记对象, 不造结论)。
+    """由存储里的团队候选组装 `ResearchSnapshot` (薄包装, 映射只有一份实现)。
 
-    关键限制: 团队只**提交候选**。因此这里的命题不带 `supported/refuted` 判定 ——
-    真值只能由判定层写。交付包里呈现的是"候选 + 证据 + 稿件 + 未决项"。
-
-    即使**什么都还没登记**也要返回快照: 那种情况下交付包本身就是"未决报告"
-    (如实写清缺什么、下一步怎么办), 而不是"没有可交付物"。把它当作空包丢掉,
-    会让"研究没做出来"在界面上与"没跑过"无法区分 —— 交付级别里的"研究备忘录"
-    正是为这种情形准备的。
-
-    两条**不得静默**的规则 (§3.2 G11):
-    1. 单条坏数据不阻断整次导出, 但必须**记下是哪条、为什么** (以前是裸 `continue`,
-       于是"库里 3 条证据、包里 0 条"这种情况完全无声);
-    2. 只汇集 evidence/claim/model 是不够的 —— 义务、验证方案、图表、审阅问题同样属于
-       引用闭包, 缺了它们交付包讲不出"结论依赖什么"。
+    真正的映射在 `research/snapshot.py` —— 交付评估 (`research/delivery.py`) 也要用它,
+    两处各写一份就是两处丢字段的机会 (§3.2 G11)。
     """
-    from src.research.schemas import ResearchSnapshot
+    from src.research.snapshot import snapshot_from_store
 
-    snapshot = ResearchSnapshot(
-        project_id=team.project_id, problem_id=team.problem_id, run_id=team.run_id)
-    #: 存储 kind -> (目标字段, 映射函数)
-    plan = (
-        ("evidence", snapshot.evidence, _evidence_of),
-        ("claim", snapshot.claims, _claim_of),
-        ("model", snapshot.models, _model_of),
-        ("obligation", snapshot.obligations, _obligation_of),
-        ("assumption", snapshot.assumptions, _assumption_of),
-        ("definition", snapshot.definitions, _definition_of),
-        ("validation_plan", snapshot.experiment_specs, _validation_plan_of),
-    )
-    skipped: list[dict[str, Any]] = []
-    counts: dict[str, int] = {}
-    for kind, target, mapper in plan:
-        try:
-            rows = store.list_latest(kind) or []
-        except Exception as e:  # noqa: BLE001 - 某类对象读不出来要如实记, 不是当没有
-            skipped.append({"kind": kind, "reason": f"读取失败: {type(e).__name__}: {e}"})
-            continue
-        counts[kind] = len(rows)
-        for row in rows:
-            try:
-                target.append(mapper(row))
-            except Exception as e:  # noqa: BLE001 - 单条坏数据不阻断导出, 但要可见
-                skipped.append({
-                    "kind": kind,
-                    "object_id": str(row.get("id", "")) or "(无 id)",
-                    "reason": f"{type(e).__name__}: {e}",
-                })
-    if skipped:
-        # 写进快照的缺口列表: 交付包必须能回答"有多少登记对象没能进包、为什么"。
-        # `GapType` 里没有"导出映射"这一类, 用 `encoding_mismatch` (字段/结构对不上)
-        # 最贴近, 并在 statement 里写清具体原因, 不另造枚举值。
-        from src.research.schemas import GapType, ObjectRef, ResearchGap
-
-        for item in skipped:
-            snapshot.gaps.append(ResearchGap(
-                gap_type=GapType.encoding_mismatch,
-                target_ref=ObjectRef(id=str(item.get("object_id", "")) or "export"),
-                statement=(f"{item['kind']} 对象未能进入交付快照: "
-                           f"{item.get('reason', '')}"),
-                blocking=["交付包缺少这部分依据"],
-                resolving_actions=["修正字段映射或补全该对象的必填字段后重新导出"],
-                resolution_criteria="该对象出现在快照对应列表里, 且没有 export 缺口",
-            ))
-        team.runtime.emit("snapshot_export_incomplete",
-                          {"skipped": skipped, "registered": counts})
-    return snapshot
+    return snapshot_from_store(
+        store, project_id=team.project_id, problem_id=team.problem_id,
+        run_id=team.run_id,
+        on_skip=lambda payload: team.runtime.emit("snapshot_export_incomplete", payload))
 
 
-#: 存储行的字段名与领域 schema 的差异表 (§6.1 "统一领域 schema、显式映射并校验")。
-#:
-#: 为什么要显式映射而不是直接 `model_validate(row)`: 存储行用的是**投影层写入时的
-#: 字段名**, 领域 schema 用的是自己的名字。靠"名字碰巧一样"就会静默丢数据 ——
-#: 实测 `locator` 进不了 `location` (定位变空)、`relation` 进不了 `support`
-#: (支持关系退化成 insufficient)、`version` 被 `pop` 掉 (版本回到 1)。
-EVIDENCE_FIELD_ALIASES: dict[str, str] = {
-    "locator": "location",
-    "relation": "support",
-}
-#: 投影层写入的支持关系取值 -> `SourceEvidence.support` 的取值。
-SUPPORT_RELATION_MAP: dict[str, str] = {
-    "supports": "supports",
-    "support": "supports",
-    "refutes": "contradicts",
-    "contradicts": "contradicts",
-    "context": "context",
-    "insufficient": "insufficient",
-    "": "insufficient",
-}
+#: 兼容再导出: 字段差异表与支持关系映射的**唯一定义**在 `research/snapshot.py`,
+#: 这里保留名字是因为既有用例直接读它们 (改判据时要改的是那边)。
+from src.research.snapshot import (  # noqa: E402
+    EVIDENCE_FIELD_ALIASES,
+    SUPPORT_RELATION_MAP,
+)
 
-
-def _row_payload(row: dict[str, Any]) -> dict[str, Any]:
-    """去掉投影层加的元数据字段 (`_` 前缀), **保留** `version`。"""
-    return {k: v for k, v in row.items() if not k.startswith("_")}
-
-
-def _evidence_of(row: dict[str, Any]):
-    from src.research.schemas import SourceEvidence
-
-    data = _row_payload(row)
-    for stored_name, schema_name in EVIDENCE_FIELD_ALIASES.items():
-        if stored_name in data and schema_name not in data:
-            data[schema_name] = data.pop(stored_name)
-    if "support" in data:
-        data["support"] = SUPPORT_RELATION_MAP.get(str(data["support"]).lower(),
-                                                  str(data["support"]))
-    return SourceEvidence.model_validate(data)
-
-
-def _claim_of(row: dict[str, Any]):
-    from src.research.schemas import Claim
-
-    data = _row_payload(row)
-    # 团队提交的是**候选**: 没有判定层结论时一律按 proposed, 不得冒充已确证
-    data.setdefault("status", "proposed")
-    return Claim.model_validate(data)
-
-
-def _model_of(row: dict[str, Any]):
-    """模型候选 -> `ResearchModel`。
-
-    这里曾 import 一个**不存在**的 `ModelRecord`, 抛出的 `ImportError` 又被上层的
-    裸 `except` 吞掉 —— 于是"模型一个都没进包"完全无声 (§3.2 G11)。真实类名是
-    `ResearchModel`。
-    """
-    from src.research.schemas import ResearchModel
-
-    return ResearchModel.model_validate(_row_payload(row))
-
-
-def _obligation_of(row: dict[str, Any]):
-    from src.research.schemas import ProofObligation
-
-    return ProofObligation.model_validate(_row_payload(row))
-
-
-def _assumption_of(row: dict[str, Any]):
-    from src.research.schemas import Assumption
-
-    return Assumption.model_validate(_row_payload(row))
-
-
-def _definition_of(row: dict[str, Any]):
-    from src.research.schemas import Definition
-
-    return Definition.model_validate(_row_payload(row))
-
-
-def _validation_plan_of(row: dict[str, Any]) -> dict[str, Any]:
-    """验证方案以 dict 形式进入 `experiment_specs` (schema 未定义专门类型)。
-
-    补上 `executed=False`: 本轮**不运行**仿真/实验, 方案不是成功证据 (§4 角色表)。
-    """
-    data = _row_payload(row)
-    data.setdefault("executed", False)
-    data.setdefault("status", "proposed")
-    return data
+__all__ += ["EVIDENCE_FIELD_ALIASES", "SUPPORT_RELATION_MAP"]
 
 
 def _manuscript_markdown(store) -> str:
-    """取团队登记的稿件 Markdown (渲染器认的结构化块优先)。"""
-    try:
-        rows = store.list_latest("manuscript") or []
-    except Exception:  # noqa: BLE001
-        return ""
-    if not rows:
-        return ""
-    row = rows[-1]
-    from src.agents.writing import render_markdown
+    """取团队登记的稿件 Markdown (实现只有一份, 见 `research/snapshot.py`)。"""
+    from src.research.snapshot import manuscript_markdown
+
+    return manuscript_markdown(store)
+
+
+def _manuscript_object(store):
+    """取唯一稿件 IR (渲染 `.tex` 与算 `writing_map` 用的是同一份对象)。"""
     from src.publication.schemas import Manuscript
 
+    try:
+        rows = store.list_latest("manuscript") or []
+    except Exception:  # noqa: BLE001 - 读不出来就没有可渲染的稿件
+        return None
+    if not rows:
+        return None
+    row = rows[-1]
     payload = row.get("manuscript") if isinstance(row.get("manuscript"), dict) else row
     try:
-        manuscript = Manuscript.model_validate(payload)
-        return render_markdown(manuscript)
-    except Exception:  # noqa: BLE001 - 结构不完整时退回已有文本
-        text = str(row.get("markdown") or row.get("text") or "")
-        if text:
-            return text
-        return json.dumps(payload, ensure_ascii=False)[:2000]
+        return Manuscript.model_validate({k: v for k, v in payload.items()
+                                          if not k.startswith("_")})
+    except Exception:  # noqa: BLE001 - 结构不完整的稿件不参与排版
+        return None
+
+
+def _evidence_rows(store) -> list[dict[str, Any]]:
+    try:
+        return list(store.list_latest("evidence") or [])
+    except Exception:  # noqa: BLE001 - 读不出来按"没有来源"处理 (门槛会如实报缺)
+        return []
+
+
+def _reference_labels(store) -> dict[str, str]:
+    """`{来源对象 id: 参考文献条目文本}` —— 只由**已登记来源**拼出, 不编造。"""
+    labels: dict[str, str] = {}
+    for row in _evidence_rows(store):
+        source_id = str(row.get("id") or "")
+        if not source_id:
+            continue
+        parts = [str(row.get("authors") or "").strip(),
+                 str(row.get("title") or "").strip(),
+                 str(row.get("year") or "").strip()]
+        entry = ". ".join(part for part in parts if part) or source_id
+        locator = str(row.get("location") or row.get("locator") or "").strip()
+        if locator:
+            entry += f". 定位: {locator}"
+        labels[source_id] = entry
+    return labels
+
+
+def _reference_rows(store) -> list[dict[str, Any]]:
+    """交付门槛要的文献表形态 (编号在渲染时分配, 这里只给条目)。"""
+    rows: list[dict[str, Any]] = []
+    for index, row in enumerate(_evidence_rows(store), 1):
+        source_id = str(row.get("id") or "")
+        rows.append({"index": index, "source_id": source_id,
+                     "title": row.get("title", ""), "authors": row.get("authors", ""),
+                     "year": row.get("year", ""),
+                     "locator": row.get("location") or row.get("locator", "")})
+    return rows
+
+
+def _rewrite_manifest(package: Path, assessment, compile_status: str,
+                      compile_log: str) -> None:
+    """编译之后刷新 manifest 的门槛/等级 (否则它会停在编译前的等级上)。"""
+    import json
+
+    path = Path(package) / "manifest.json"
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - manifest 读不出来不阻断交付
+        return
+    manifest["delivery_level"] = assessment.level
+    manifest["compilation_status"] = compile_status
+    if compile_status == "ok":
+        manifest["compilation_log_tail"] = ""
+    else:
+        manifest["compilation_log_tail"] = compile_log[-800:]
+    manifest["publication_gate_passed"] = bool(assessment.publication
+                                               and assessment.publication.passed)
+    manifest["publication_gate_reasons"] = list(
+        (assessment.publication.reasons if assessment.publication else []))
+    if compile_status == "ok" and (Path(package) / "manuscript.pdf").is_file():
+        manifest["pdf"] = "manuscript.pdf"
+    try:
+        path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+    except Exception:  # noqa: BLE001 - 写不回 manifest 不阻断交付
+        pass
 
 
 def run_team_session(request: str, *, project_id: str = "", problem_id: str = "",
                      run_id: str = "", max_rounds: int = 24,
                      source_set_ids: Iterable[str] = (),
                      source_policy: str = "user_kb",
-                     emit=None) -> dict[str, Any]:
+                     emit=None, llm_factory=None) -> dict[str, Any]:
     """跑一个团队会话并返回终态摘要 (CLI/测试的便捷入口)。
 
     注意: 摘要与交付包必须在团队存储**仍打开时**取 —— `TeamRun.close()` 会关掉
     `TaskStore` 的连接, 之后再读对象只会得到空列表 (实测过, 那会让"有证据却报 0 条")。
+
+    `llm_factory` 缺省走**唯一装配** (`bootstrap.role_llm_factory`): 于是 CLI 与 Web
+    用的是同一份角色模型接线, 而 `THEORY_LLM=0` 仍然是显式离线。此前这个入口根本
+    不注入模型, CLI 上的"团队研究"永远只跑规则模板, 却看不出这一点。
     """
+    from src.bootstrap import role_llm_factory
     from src.graph.research_graph import TeamRun
 
     with TeamRun(project_id=project_id or "proj-team", problem_id=problem_id,
                  run_id=run_id, request=request,
                  source_set_ids=list(source_set_ids), source_policy=source_policy,
-                 max_rounds=max_rounds) as team:
+                 max_rounds=max_rounds,
+                 llm_factory=llm_factory or role_llm_factory) as team:
         session = TeamSession(team, emit=emit)
         session.run_to_completion()
         package = session.export()
         summary = session.outcome_summary()
         summary["package_dir"] = str(package) if package else ""
+        summary["delivery"] = (session.delivery.to_dict()
+                               if session.delivery is not None else {})
         return summary

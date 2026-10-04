@@ -64,6 +64,11 @@ class TheoryState(TypedDict, total=False):
     # 资料授权与绑定: 入口写入, 引擎/交付包读取 (未声明同样会被图丢掉)
     source_policy: str
     source_set_id: str
+    # 资料源类型 (kb/files/dataset): `theory_pipeline` 用 `state.get("source_set_kind")`
+    # 决定交付清单里的资料集描述。未声明时图状态里不会保留它, 于是清单只能写默认 `kb`
+    # —— 与 input_snapshot/attachment_ids 同一类"未声明即静默丢失"的坑,
+    # 由 `tests/test_theory_state_contract.py` 的契约用例把守。
+    source_set_kind: str
     source_set_warnings: list[str]
     # 已落盘的问题契约 (续跑时复用, 不重新判定研究类型)
     contract: dict

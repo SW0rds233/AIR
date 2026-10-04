@@ -37,6 +37,10 @@ KIND_MODEL = "model"
 KIND_ROUTE = "route"
 KIND_GAP = "gap"
 KIND_RUNTIME = "runtime"
+#: 团队运行的**可恢复循环状态** (合并计划 §3.3 G16): 画像/计划/已交回成果/派工历史。
+#: 与 `KIND_RUNTIME` 分开: 后者是旧理论引擎的运行计数 (动作数/用量/路由状态),
+#: 两者字段与语义都不同, 混用会让"恢复到哪一步"说不清。
+KIND_TEAM_RUN = "team_run"
 
 
 class RevisionConflict(RuntimeError):
@@ -341,6 +345,12 @@ class ResearchStore:
         返回 {obj_id: version}。
 
         幂等: 若 idempotency_key 已登记, 抛 StepAlreadyApplied, 调用方不得重复执行。
+
+        事件幂等键的分配 (实测踩过): `events` 的唯一索引是
+        `(project_id, idempotency_key)`, 而一个步骤可以带**多条**事件 —— 若每条都用
+        同一个基键, 第二条就会撞唯一索引, 整个步骤被回滚 (表现为"提交失败但看不出
+        为什么")。因此只有**第一条**事件带基键 (它同时就是"这一步已提交"的判据),
+        其余带 `基键#序号`。`_event_exists(基键)` 仍然等价于"该步骤已提交"。
         """
         events = events or []
         with self._lock:
@@ -357,14 +367,26 @@ class ResearchStore:
                          json.dumps(data, ensure_ascii=False), utcnow()),
                     )
                     versions[obj_id] = ver
-                for type_, payload in events:
-                    self._insert_event(type_, payload, idempotency_key or None)
-                # 统一日志键: 同事务记录契约异常 (缺必需键/未登记类型)
+                for index, (type_, payload) in enumerate(events):
+                    key = None
+                    if idempotency_key:
+                        key = idempotency_key if index == 0 else f"{idempotency_key}#{index}"
+                    self._insert_event(type_, payload, key)
+                # 统一日志键: 同事务记录契约异常 (缺必需键/未登记类型)。
+                # 用 `INSERT OR IGNORE`: 同一条契约异常会被**重复**观察到, 而它的
+                # 键是按内容算的 —— 若让重复插入抛错, 第二次提交就整个回滚了。
+                # 异常日志的设计原则是"记录而不是阻断", 因此这里只记一次。
                 for type_, payload in events:
                     anomaly = self._anomaly_of(type_, payload)
                     if anomaly is not None:
-                        self._insert_event("log_anomaly", anomaly,
-                                           f"anomaly:{type_}:{hash_payload(anomaly)}")
+                        self._conn.execute(
+                            "INSERT OR IGNORE INTO events"
+                            "(project_id, type, payload, idempotency_key, created_at)"
+                            " VALUES (?,?,?,?,?)",
+                            (self.project_id, "log_anomaly",
+                             json.dumps(anomaly, ensure_ascii=False),
+                             f"anomaly:{type_}:{hash_payload(anomaly)}", utcnow()),
+                        )
                 self._conn.commit()
             except Exception:
                 self._conn.rollback()
