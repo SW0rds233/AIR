@@ -17,7 +17,6 @@ import argparse
 import sys
 
 from src.config import MAX_REVISIONS
-from src.graph.pipeline import run_pipeline
 from src.utils.console import ensure_utf8_console
 
 
@@ -153,8 +152,9 @@ def main():
                         help="断点续跑: 恢复同一主题上次中断的会话")
     parser.add_argument("--skip-retrieval", action="store_true",
                         help="跳过文献检索/摄入/预验证, 复用 data/pipeline_cache 的检索产物; 大纲/草稿/审稿循环仍重新生成")
-    parser.add_argument("--mode", choices=["survey", "theory"], default="survey",
-                        help="运行模式: survey=综述写作 (默认), theory=理论研究循环")
+    parser.add_argument("--mode", choices=["survey", "theory", "team"], default="team",
+                        help="研究形态: team=团队会话引擎 (默认, 综述/机理/验证建议), "
+                             "theory=形式化研究循环")
     parser.add_argument("--project-id", default="", help="理论研究项目 ID (默认由主题生成)")
     parser.add_argument("--problem-id", default="problem", help="理论研究问题 ID")
     parser.add_argument("--source-set-id", default="",
@@ -197,55 +197,52 @@ def main():
     if args.mode == "theory":
         return _run_theory_mode(args)
 
-    if args.skip_retrieval:
-        print("启动流水线: 初稿撰写 -> 论文审阅 -> [修改循环] (跳过检索阶段)")
-    else:
-        print("启动流水线: 文献查阅 -> 初稿撰写 -> 论文审阅 -> [修改循环]")
-    print("-" * 60)
+    # 统一入口 (合并计划 §3 / §15.2): 综述型请求由**团队会话引擎**承担 —— 主控派工给
+    # 检索/推理/写作/审图角色, 结束后导出交付包。旧的 stage 流水线已不再作为入口。
+    from src.research.intake import is_survey_request
+    from src.graph.team_session import run_team_session
 
+    request = args.request or args.topic
+    if not is_survey_request(request, args.topic):
+        print("  [提示] 该请求不像文献综述; 如需形式化研究请加 --mode theory")
+    print("启动团队研究: 主控画像/计划 → 检索 → 综合 → 写作 → 配图 → 审阅 → 交付包")
+    print("-" * 60)
     try:
-        final_state = run_pipeline(
-            topic=args.topic,
-            keywords=args.keywords,
-            sub_topics=args.subtopics,
-            time_range=args.time_range,
-            max_revisions=args.max_revisions,
-            resume=args.resume,
-            skip_retrieval=args.skip_retrieval,
-            request=args.request,
+        summary = run_team_session(
+            request,
+            project_id=args.project_id or "",
+            problem_id=args.problem_id or "problem",
+            source_set_ids=[getattr(args, "source_set_id", "") or ""],
+            source_policy="user_kb",
         )
     except KeyboardInterrupt:
-        print("\n\n流水线已中断。")
+        print("\n\n团队研究已中断。")
         sys.exit(1)
-    except Exception as e:
-        print(f"\n流水线执行出错: {e}")
+    except Exception as e:  # noqa: BLE001 - CLI 出错要给可读信息
+        print(f"\n团队研究执行出错: {e}")
         sys.exit(1)
 
     print("-" * 60)
-    print()
     print("=" * 60)
-    print("  流水线执行完成")
+    print("  团队研究完成")
     print("=" * 60)
+    print(f"  状态:     {summary.get('status')} ({summary.get('rounds')} 轮, "
+          f"{summary.get('tasks')} 个任务)")
+    print(f"  停止原因: {summary.get('stop_reason')}")
+    objects = summary.get("objects", {})
+    print(f"  登记对象: 来源 {objects.get('evidence', 0)} / 结论候选 "
+          f"{objects.get('claim', 0)} / 稿件 {objects.get('manuscript', 0)}")
+    print(f"  交付包:   {summary.get('package_dir') or '(未产出)'}")
+    if summary.get("unresolved"):
+        print("  未决事项:")
+        for item in summary["unresolved"][:6]:
+            print(f"    - {item}")
+    return 0
 
-    if final_state.get("error"):
-        print(f"  错误: {final_state['error']}")
-        sys.exit(1)
 
-    review_path = final_state.get("review_report_path", "")
-    draft_path = final_state.get("draft_path", "")
-    tex_path = final_state.get("paper_tex_path", "")
-    notes_path = final_state.get("literature_notes_path", "")
-
-    print(f"  文献综述素材: {notes_path}")
-    print(f"  论文初稿(md): {draft_path}")
-    if tex_path:
-        print(f"  论文初稿(tex):{tex_path}")
-    print(f"  审稿报告:     {review_path}")
-    print(f"  审稿评分:     {final_state.get('review_score', 'N/A')}/50")
-    print(f"  审稿建议:     {final_state.get('review_recommendation', 'N/A')}")
-    print(f"  修改轮次:     {final_state.get('revision_count', 0)}")
-    print(f"  总字数:       {final_state.get('total_words', 'N/A')}")
-    print("=" * 60)
+def _legacy_cli_report(final_state: dict) -> None:
+    """(已退役) 旧 stage 流水线的报告打印 —— 保留签名以便外部脚本调用时报错清晰。"""
+    raise SystemExit("旧的综述流水线入口已退役: 请使用统一入口 (默认团队会话引擎)")
 
 
 if __name__ == "__main__":

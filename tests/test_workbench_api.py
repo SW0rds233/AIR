@@ -26,27 +26,59 @@ def theory_project(tmp_path, monkeypatch):
 
 
 def _frontend_source() -> str:
-    """前端页面逻辑 (F4 已从内联脚本迁到 src/web/src/app.ts)。"""
+    """前端全部源码 (按 §9.5 拆分后, 契约是"整个前端源码", 不是某一个文件)。
+
+    合并计划 §9.5 把 `app.ts` 的页面逻辑拆到 `session-controller.ts`、
+    `features/intake/controller.ts`、`events/*` 与 `views/*`: 断言"某个 needle 在
+    app.ts 里"会把拆分本身当成回归, 因此统一看 `src/web/src` 下的全部 .ts。
+    """
     from src import server
 
-    return (server.WEB_DIR / "src" / "app.ts").read_text(encoding="utf-8")
+    sources = sorted((server.WEB_DIR / "src").rglob("*.ts"))
+    assert sources, "找不到前端源码"
+    return "\n".join(p.read_text(encoding="utf-8") for p in sources)
+
+
+def _frontend_code_only() -> str:
+    """前端源码去掉注释行后的正文 (判据要落在实现上, 不能落在解释上)。
+
+    说明"为什么删掉模式分支"的注释里会出现 `runMode` 这类旧名字, 那是解释而非实现;
+    用整份源码做"不得含旧实现"的判据会逼着作者删掉解释。
+    """
+    from src import server
+
+    lines: list[str] = []
+    for path in sorted((server.WEB_DIR / "src").rglob("*.ts")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith(("*", "/*", "//")):
+                continue
+            lines.append(line)
+    return "\n".join(lines)
 
 
 def test_index_contains_workbench_controls():
-    """DOM 控件在模板里, 控件逻辑在 app.ts 里 (不再检查内联脚本)。"""
+    """DOM 控件在模板里, 控件逻辑在前端源码里 (不再检查内联脚本)。"""
     from fastapi.testclient import TestClient
 
     from src import server
 
     client = TestClient(server.app)
     html = client.get("/").text
-    for needle in ('id="runmode"', 'data-tab="workbench"', 'id="workbench"',
-                   'id="files"'):
+    # 统一入口: 模板里**不再有**模式选择器 (`#runmode`), 也不再有按模式隐藏的行
+    assert 'id="runmode"' not in html, "模式选择器应已删除 (统一入口)"
+    assert 'id="surveyrow"' not in html, "按模式分组的行应已删除"
+    for needle in ('data-tab="workbench"', 'id="workbench"',
+                   'id="files"', 'id="projid"', 'id="sourceset"', 'id="pathrow"'):
         assert needle in html, needle
     source = _frontend_source()
     for needle in ("refreshWorkbench", "submitWorkbenchFeedback", "forkFromWorkbench",
-                   "renderWorkbench", "/api/research/", 'id="wbfeedback"'):
+                   "renderResearchOverview", "/api/research/", 'id="wbfeedback"',
+                   'data-action="refreshWorkbench"'):
         assert needle in source, needle
+    # 前端源码不得再有模式分支或模式选择器读取 (只看代码正文, 注释里可以解释历史)
+    code = _frontend_code_only()
+    for gone in ("runmode", "onModeChange", "setRunMode", "surveyrow"):
+        assert gone not in code, f"前端仍残留模式相关实现: {gone}"
 
 
 def test_research_state_contract(theory_project):
@@ -406,7 +438,7 @@ def test_session_state_endpoint_reports_wait_state():
     """F2: 状态补偿接口 —— 重连后据 status/pending interrupt 校正页面。"""
     from src import server
 
-    session = server.Session("t-state", mode="survey")
+    session = server.Session("t-state", mode="team", app=None)
     server.SESSIONS[session.thread_id] = session
     try:
         session.emit({"type": "node", "text": "步骤"})
@@ -428,7 +460,7 @@ def test_session_event_log_is_replayable():
     """F2: 事件必须带递增序号并保留在日志里, 供断线重连回放。"""
     from src import server
 
-    session = server.Session("t-replay", mode="survey")
+    session = server.Session("t-replay", mode="team", app=None)
     try:
         for i in range(5):
             session.emit({"type": "node", "text": f"步骤 {i}"})
@@ -448,7 +480,7 @@ def test_respond_requires_waiting_state_and_is_idempotent():
 
     from src import server
 
-    session = server.Session("t-respond", mode="survey")
+    session = server.Session("t-respond", mode="team", app=None)
     server.SESSIONS[session.thread_id] = session
     client = TestClient(server.app)
     try:
@@ -521,16 +553,27 @@ def test_state_payload_exposes_feedback_targets(theory_project):
 
 
 def test_frontend_has_single_state_object_and_resume_semantics():
-    """F1: 前端必须有统一的研究状态对象, 且不再各处直接改全局变量。"""
+    """F1: 前端必须有统一的研究状态对象, 且不再各处直接改全局变量。
+
+    §9.5 拆分后: 唯一状态对象仍在页面装配层 (`app.ts`), 而会话生命周期、输入与
+    事件流分别在 `session-controller.ts` / `features/intake/controller.ts` /
+    `events/session-stream.ts` —— 因此断言按前端源码集合, 不绑定单个文件。
+    """
     source = _frontend_source()
     assert "const currentResearch = {" in source
     assert "function syncResearchGlobals()" in source
-    # 新会话必须清空项目/问题绑定
-    assert "projectId: '', problemId: ''" in source
+    # 新会话必须清空项目/问题绑定 (`session-controller.ts` 的 newSession)
+    assert "applyResearch({threadId: '', sessionId: '', projectId: '', problemId: '', runId: ''})" in source
+    # 统一入口: 前端不再有"运行模式"这条状态分支 (mode 只作显示用)
+    code = _frontend_code_only()
+    for gone in ("runMode", "setRunMode", "onModeChange", "topicForRequest",
+                 "RunMode", "mode === 'theory'", "mode === 'survey'"):
+        assert gone not in code, f"前端仍残留模式分支: {gone}"
     # 续研与启动分开
     assert "startWithResume" in source and "interrupt_id" in source
-    # 事件重连: 记录序号并回放
+    # 事件重连: 记录序号并回放 (游标按会话保存, 见 events/session-stream.ts)
     assert "lastEventId" in source and "last_event_id=" in source
+    assert "nextReconnectDelay" in source
     # 反馈对象选择器
     assert "buildObjectPicker" in source and "feedbackObjectOptions" in source
     # 提交响应前先确认 HTTP 成功

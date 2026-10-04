@@ -14,6 +14,8 @@ from __future__ import annotations
 import logging
 import re
 import textwrap
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 import matplotlib
@@ -40,20 +42,57 @@ if _CN_FONT:
     plt.rcParams["axes.unicode_minus"] = False
 
 
+#: 当前产物归属 (会话/运行的 run_id)。为空表示"没有运行身份", 沿用旧的扁平目录。
+#: 用 ContextVar 而不是参数: 绘图函数有 8 个入口, 每个都加一个 scope 参数会把
+#: 归属信息散到调用链上; 而 run 身份本来就是"当前在跑哪次运行"的环境事实。
+_FIGURE_SCOPE: ContextVar[str] = ContextVar("air_figure_scope", default="")
+
+
+def figure_scope() -> str:
+    """当前图表产物归属的 run 身份 (空表示未绑定)。"""
+    return _FIGURE_SCOPE.get()
+
+
+@contextmanager
+def figure_scope_bound(scope: str):
+    """在 `with` 块内把图表产物归到该 run 名下 (合并计划 §7.4 / M4)。
+
+    为什么必须做: 图表文件名是**局部序号** (`taxonomy_0.png`、`framework_0.png`),
+    此前所有会话共用 `outputs/figures/`, 于是两个会话同时画图会互相覆盖对方的产物
+    ("两任务不串图表"是 M4 的退出条件之一)。绑定 run 身份后各自独立。
+    """
+    token = _FIGURE_SCOPE.set(str(scope or "").strip())
+    try:
+        yield
+    finally:
+        _FIGURE_SCOPE.reset(token)
+
+
 def _ensure_figure_dir() -> Path:
-    """图表输出目录 (**调用时**读取配置)。
+    """图表输出目录 (**调用时**读取配置 + 当前 run 归属)。
 
     早先这里写死 `Path(__file__).../outputs/figures`: 模块只按项目根拼路径,
     于是 `config.OUTPUT_DIR` 改了也不生效 —— 测试隔离失效(测试图直接写进仓库
     outputs/figures/), 部署到别的产物根时也会写错地方。与 server.py 的
     `output_dir()` 保持一致, 统一按调用时的配置取值。
+
+    M4: 目录再按 `figure_scope()` 分一层 (`figures/<run_id>/`), 使并发运行的图表
+    不互相覆盖; 未绑定 run 身份时保持原来的扁平目录 (向后兼容旧调用点与测试)。
     """
     from src import config
 
-    d = Path(getattr(config, "OUTPUT_DIR", Path(__file__).resolve().parent.parent.parent
-                                         / "outputs")) / "figures"
+    base = Path(getattr(config, "OUTPUT_DIR", Path(__file__).resolve().parent.parent.parent
+                                              / "outputs")) / "figures"
+    scope = _sanitize_scope(figure_scope())
+    d = (base / scope) if scope else base
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _sanitize_scope(scope: str) -> str:
+    """run 身份用作目录名: 只留安全字符, 空/异常一律回退为不分子目录。"""
+    text = "".join(ch for ch in str(scope or "") if ch.isalnum() or ch in "-_.")
+    return text.strip("._-")[:64]
 
 
 def generate_taxonomy_tree(

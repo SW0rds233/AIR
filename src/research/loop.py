@@ -1739,71 +1739,69 @@ class TheoryEngine:
         return plan
 
     def _act_plan_proof(self, action: ResearchAction) -> bool:
+        """制定证明计划 (计划书 §7.1) 并登记路线。
+
+        计算在 `reasoning_kernel.plan_proof_for` (合并计划 M2「按职责抽取」): 内核给出
+        "规则路径始终计算 + 有 LLM 时只增加待核验内容" 的计划与事件载荷, 引擎只负责
+        **路线记账与落盘**。这样团队路径 (`ReasoningAgent`) 与旧引擎路径共用同一份
+        计划实现, 差异测试才有意义。
+        """
+        from src.research.reasoning_kernel import plan_proof_for
+
         claim = self._get_claim(action.object_id)
         if claim is None:
             return False
         obligations = [o for o in self._obligations()
                        if o.claim_id == claim.id and o.status == ObligationStatus.open]
-        plan = self.plan_for_claim(claim, obligations)
-        attempt = plan.attempt
-        attempt.id = f"pf-{claim.id}-v{claim.version}"
-        self._plans[claim.id] = plan
-        route = self.routes.ensure_route(claim.id, goal=claim.statement, strategy=plan.strategy)
+        # LLM 计划同一命题版本只调用一次 (引擎侧去重)。**复用引擎缓存的那份计划**:
+        # 若让内核自己再算一份, 引擎 `_plans` 与内核结果会在步骤上分叉。
+        cached = self._plans.get(claim.id)
+        reuse = cached if (cached is not None
+                           and cached.attempt.target_version == claim.version) else None
+        key = self._llm_plan_key(claim)
+        already_planned = key in self._llm_planned
+        if self.llm is not None and not already_planned:
+            self._llm_planned.add(key)
+        outcome = plan_proof_for(
+            claim, obligations=obligations, available=self.available,
+            llm=(self.metered_llm("theorist_derivation") if self.llm is not None
+                 and not already_planned and reuse is None else None),
+            budget_exhausted=self._budget_exhausted,
+            already_planned=already_planned, reuse_plan=reuse,
+            on_plan=lambda p: self._plans.__setitem__(claim.id, p))
+        if not outcome.ok:
+            return False
+        # 内核算出的计划已通过 `on_plan` 写回缓存; 这里取回同一对象供路线记账用
+        plan = self._plans.get(claim.id)
+        if plan is None:
+            return False
+        route = self.routes.ensure_route(claim.id, goal=claim.statement,
+                                         strategy=str(outcome.payload.get("strategy")
+                                                      or plan.strategy))
         route.attempts += 1
-        writes = [(KIND_ATTEMPT, attempt.id, attempt.model_dump(mode="json")),
-                  (KIND_ROUTE, route.id, route.model_dump(mode="json"))]
-        writes += [(KIND_OBLIGATION, o.id, o.model_dump(mode="json")) for o in plan.proposed]
-        self.append_step(writes,
-                         [("plan_proof", {"claim_id": claim.id, "strategy": plan.strategy,
-                                          "source": plan.source,
-                                          "steps": len(attempt.steps),
-                                          "subgoals": len(plan.proposed),
-                                          "route_id": route.id})],
-                         idempotency_key=f"plan:{claim.id}:{plan.strategy}")
-        if plan.notes:
-            self._notes.append(f"{claim.id}: {plan.notes}")
+        writes = list(outcome.writes) + [
+            (KIND_ROUTE, route.id, route.model_dump(mode="json"))]
+        events = [(kind, {**payload, "route_id": route.id})
+                  for kind, payload in outcome.events]
+        self.append_step(writes, events, idempotency_key=outcome.idempotency_key)
+        self._notes.extend(outcome.notes)
         return True
 
     def _derive_design_steps(self, claim: Claim) -> bool:
         """设计/计数存在性命题的推导步骤 = 证书判定链 (S1)。
 
-        步骤内容为**确定性重算**的判定链, 不含自由生成的数学步骤; 因此不产生新的
-        "反方审查"义务 (审查清单针对的是陈述强度与前提缺失, 而参数的适用性已由
-        `design_necessity` 义务的证书逐条覆盖)。
+        计算已抽到 `research/reasoning_kernel.py` (合并计划 §7.1「按职责抽取」):
+        引擎只负责落盘, 因此团队路径与旧引擎路径共用同一份推导实现。
         """
-        from src.research import design_feasibility as df
+        from src.research.reasoning_kernel import build_design_steps, design_steps_for
 
-        params = df.DesignParams(v=claim.design_v or 0, k=claim.design_k or 0,
-                                 lam=claim.design_lambda or 1,
-                                 b=claim.design_b, r=claim.design_r)
-        report = df.check(params)
-        certificate = report.certificate_dict()
-        certificate["sha256"] = report.certificate_digest()
-        own_obligations = [o for o in self._obligations()
-                           if o.claim_id == claim.id and o.kind == df.OBLIGATION_KIND]
-        steps: list[ProofStep] = []
-        for index, (text, rule) in enumerate(
-                df.theorem_application_steps(certificate), start=1):
-            obligation = own_obligations[0] if own_obligations else None
-            steps.append(ProofStep(
-                index=index, statement=text, justification="由证书重算, 可反查", rule=rule,
-                obligation_ref=(ObjectRef(id=obligation.id, version=obligation.version)
-                                if obligation is not None else None)))
-        attempt = ProofAttempt(
-            id=f"pf-{claim.id}-v{claim.version}", target_claim_id=claim.id,
-            target_version=claim.version, strategy="design_necessity_certificate",
-            steps=steps, subgoals=[o.statement for o in self._obligations()
-                                   if o.claim_id == claim.id],
-            status="complete",
-        )
-        self.append_step(
-            writes=[(KIND_ATTEMPT, attempt.id, attempt.model_dump(mode="json"))],
-            events=[("derive_step", {"claim_id": claim.id, "steps": len(steps),
-                                     "formal_gap": False, "review_obligations": 0,
-                                     "adversarial_checked": 0, "adversarial_hits": 0,
-                                     "adversarial": "证书判定链 (无需自由推导)"})],
-            idempotency_key=f"derive:{claim.id}:{report.certificate_digest()[:16]}",
-        )
+        outcome = design_steps_for(claim, obligations=self._obligations(),
+                                   step_builder=build_design_steps)
+        if not outcome.ok:
+            return False
+        self.append_step(writes=outcome.writes, events=outcome.events,
+                         idempotency_key=outcome.idempotency_key)
+        self._notes.extend(outcome.notes)
         return True
 
     def _act_derive_step(self, action: ResearchAction) -> bool:
@@ -1813,9 +1811,13 @@ class TheoryEngine:
 
         应用/数据类命题 (因果/描述/预测/情景/规范) 没有可符号推导的形式化片段,
         但**反方审查仍然适用** —— 早期实现因为"没有结构化形式"直接返回失败,
-        导致这八项检查在实践中从未对应用类命题执行过。现在这类命题会补一条
-        显式的"尚无形式化片段"步骤, 使审查与审计记录都能进行。
+        导致这八项检查在实践中从未对应用类命题执行过。
+
+        计算在 `reasoning_kernel.derive_steps_for` (合并计划 M2: 按职责抽走), 这里
+        只做"定位命题 → 调内核 → 落盘"; 命题真值仍由判定层 `_reconcile_claim` 产生。
         """
+        from src.research.reasoning_kernel import derive_steps_for
+
         claim = self._get_claim(action.object_id)
         if claim is None:
             # 协调者把"未关闭义务"缺口的对象设为义务 id (check_step 需要义务),
@@ -1835,52 +1837,14 @@ class TheoryEngine:
             return self._derive_design_steps(claim)
         plan = self._plans.get(claim.id) or self.plan_for_claim(claim)
         self._plans[claim.id] = plan
-        attempt = plan.attempt
-        formal_gap = False
-        if not attempt.steps:
-            formal_gap = True
-            attempt.steps = [ProofStep(
-                index=1,
-                statement=f"该命题尚无形式化片段, 无法给出符号推导 (陈述: {claim.statement[:80]})",
-                justification="应用类命题的结论强度取决于证据与设计, 不是推导",
-                rule="adversarial_review_only",
-            )]
-
-        from src.research.adversarial import review_claim_with_obligations
-        from src.research.critic import issues_to_obligations
-
-        existing = {o.statement for o in self._obligations() if o.claim_id == claim.id}
-        rule_obligations = issues_to_obligations(attempt, claim, existing_statements=existing)
-        existing |= {o.statement for o in rule_obligations}
-        # 计划书 §7.2: 反方审查清单八项必须都跑过, 并在审计里留下每项结论
-        review, review_obligations = review_claim_with_obligations(
-            claim, evidence=[e for e in self._evidence() if e.claim_id == claim.id],
-            existing_statements=existing)
-        new_obligations = list(rule_obligations) + list(review_obligations)
-        # 一次推导尝试到此已完整记录 (步骤 + 审查意见 + 新增义务), 因此标记为
-        # complete: 这只是"记录完整", 不代表结论成立 —— 结论仍由中央规则依据
-        # 验证记录计算。缺此标记时交付门槛会认为"正文引用了证明却没有任何
-        # 已完成的证明尝试记录"。
-        attempt.status = "complete"
-        writes = [(KIND_ATTEMPT, attempt.id, attempt.model_dump(mode="json"))]
-        writes += [(KIND_OBLIGATION, o.id, o.model_dump(mode="json")) for o in new_obligations]
-        self.append_step(
-            writes=writes,
-            events=[("derive_step", {"claim_id": claim.id, "steps": len(attempt.steps),
-                                     "formal_gap": formal_gap,
-                                     "review_obligations": len(new_obligations),
-                                     "adversarial_checked": review.checked,
-                                     "adversarial_hits": len(review.hits),
-                                     "adversarial": review.digest()})],
-            idempotency_key=f"derive:{claim.id}:{hash_payload([s.statement for s in attempt.steps])}",
-        )
-        if formal_gap:
-            self._notes.append(
-                f"{claim.id}: 无可形式化片段, 已改为以反方审查清单产出待核验义务")
-        if new_obligations:
-            self._notes.append(
-                f"{claim.id}: 独立审查提出 {len(new_obligations)} 条待核验义务 "
-                f"({review.summary()})")
+        outcome = derive_steps_for(claim, attempt=plan.attempt,
+                                   obligations=self._obligations(),
+                                   evidence=self._evidence())
+        if not outcome.ok:
+            return False
+        self.append_step(writes=outcome.writes, events=outcome.events,
+                         idempotency_key=outcome.idempotency_key)
+        self._notes.extend(outcome.notes)
         return True
 
     def _act_check_step(self, action: ResearchAction) -> bool:
@@ -1950,7 +1914,12 @@ class TheoryEngine:
         result, record = self._run_tool(claim, obligation, check,
                                        record_id=f"ver-{claim.id}-{obligation.id}",
                                        scope=VerificationScope.target)
-        status = self._to_validation_status(result)
+        # 结果 → 义务处置: 纯映射在 reasoning_kernel (与团队路径共用同一份判定),
+        # 这里只负责"落盘 + 领域化收尾"。判定层仍是唯一状态写入点 (M2 边界)。
+        from src.research.reasoning_kernel import obligation_disposition_for
+
+        disposition = obligation_disposition_for(result, obligation)
+        status = disposition.validation_status
         obligation.validation_status = status
         obligation.support_kind = support_kind_for_tool(check.tool)
         obligation.coverage = coverage_for_tool(check.tool)
@@ -1959,18 +1928,19 @@ class TheoryEngine:
         record.stale = True
         self._save_verification(record)
 
-        if status == ValidationStatus.verified:
+        if disposition.action == "closed":
             obligation.status = ObligationStatus.closed
-            obligation.detail = result.detail or "验证通过"
-            if obligation.kind == "equality_condition":
+            obligation.detail = disposition.reason
+            if disposition.record_equality:
                 self._add_equality_claim(claim, result.certificate, check.tool)
-            elif obligation.kind == "estimate_effect":
+            elif disposition.apply_estimate:
                 # 估计写入内存态, 由随后的 _reconcile_claim 作为**单次**版本写回,
                 # 避免"先写估计再被弱状态覆盖"的多写竞争。
                 claim = self._apply_estimate(claim, result)
             self._save_obligation(obligation)
-            record.stale = False   # 确认可用后才解除 stale
-            self._save_verification(record)
+            if disposition.mark_record_usable:
+                record.stale = False   # 确认可用后才解除 stale
+                self._save_verification(record)
             self._reconcile_claim(claim)
             self.append_step(
                 writes=[(KIND_OBLIGATION, obligation.id, obligation.model_dump(mode="json"))],
@@ -1980,37 +1950,21 @@ class TheoryEngine:
             )
             return True
 
-        if status == ValidationStatus.counterexample_found:
-            # 只有满足前提的反例才算数学反驳; 统计估计失败单独处理
-            if not result.counterexample:
-                obligation.status = ObligationStatus.blocked
-                obligation.detail = f"未给出可回代的反例: {result.detail}"
-                self._save_obligation(obligation)
-                self.routes.record_failure(claim.id, "no_counterexample", obligation.detail,
-                                           scientific=False, tool=check.tool,
-                                           recovery_condition="补出满足前提的反例后再判定为假")
-                self._save_routes()
-                self._reconcile_claim(claim)
-                return False
-            if obligation.kind == "estimate_effect":
-                obligation.status = ObligationStatus.blocked
-                obligation.detail = "效应估计未支持结论 (区间跨零不等于效应不存在)"
-                self._save_obligation(obligation)
-                self._reconcile_claim(claim)
-                return False
+        if disposition.action == "refuted":
             obligation.status = ObligationStatus.refuted
             obligation.counterexample = dict(result.counterexample)
-            obligation.detail = result.detail or "找到满足前提的反例"
+            obligation.detail = disposition.note or disposition.reason
             self._save_obligation(obligation)
             self.routes.record_failure(
                 claim.id, "counterexample",
                 f"找到反例 {result.counterexample}", scientific=True, tool=check.tool,
                 detail=result.detail,
-                recovery_condition="修改命题条件或改为弱化版本后另建命题")
+                recovery_condition=disposition.recovery_condition)
             self._save_routes()
             self._reconcile_claim(claim)
-            record.stale = False
-            self._save_verification(record)
+            if disposition.mark_record_usable:
+                record.stale = False
+                self._save_verification(record)
             self.append_step(
                 writes=[(KIND_OBLIGATION, obligation.id, obligation.model_dump(mode="json"))],
                 events=[("claim_refuted", {"claim_id": claim.id,
@@ -2019,23 +1973,36 @@ class TheoryEngine:
             )
             return True
 
-        # 其余 (unknown/timeout/unsupported/error/invalid_input/encoding_mismatch):
-        # 一律保持未决, 不映射为通过或数学反驳。
+        # 其余 (unknown/timeout/unsupported/error/invalid_input/encoding_mismatch, 以及
+        # 声明 failed 却给不出反例的情形): 一律保持未决, 不映射为通过或数学反驳。
         # 该义务退出 open 集合 (标记 blocked), 使循环到达不动点而非无限重试同一输入。
         obligation.status = ObligationStatus.blocked
-        obligation.detail = result.detail or result.status.value
+        obligation.detail = disposition.reason
         self._save_obligation(obligation)
-        kind = "unknown" if status == ValidationStatus.unknown else status.value
-        self.routes.record_failure(
-            claim.id, kind, obligation.detail, scientific=False, tool=check.tool,
-            recovery_condition="出现新证据/条件后重试, 或改用其他后端")
-        self._save_routes()
+        if disposition.record_route_failure:
+            kind = "unknown" if status == ValidationStatus.unknown else status.value
+            self.routes.record_failure(
+                claim.id, kind, obligation.detail, scientific=disposition.scientific,
+                tool=check.tool, recovery_condition=disposition.recovery_condition)
+            self._save_routes()
         self._reconcile_claim(claim)
-        self._notes.append(f"{claim.id} 未决({check.tool}/{result.status.value}): {obligation.detail}")
+        if disposition.note:
+            self._notes.append(f"{claim.id} {disposition.note}")
         return False
 
     def _act_seek_counterexample(self, action: ResearchAction) -> bool:
+        """搜索反例 (计划书 §4.1)。
+
+        判定与措辞在 `reasoning_kernel.counterexample_verdict_for` + 
+        `COUNTEREXAMPLE_REPEAT_FAILURES` (合并计划 M2 按职责抽取); 引擎只负责
+        "该不该跑 → 执行工具 → 按判定落盘"。**未找到反例不等于命题为真** —— 只记一次
+        有限测试证据, 不写 `supported`。
+        """
         from src.research.critic import counterexample_check
+        from src.research.reasoning_kernel import (
+            COUNTEREXAMPLE_REPEAT_FAILURES,
+            counterexample_verdict_for,
+        )
 
         claim = self._get_claim(action.object_id)
         if claim is None:
@@ -2044,9 +2011,9 @@ class TheoryEngine:
             self._notes.append(f"{claim.id}: 已有科学反例, 不重复搜索")
             return False
         # 同一输入下重复搜索不会得到不同结果: 已试过的失败不再重跑 (省预算, 不空转)
-        repeats = {"unsupported", "unknown", "no_counterexample_found", "read_failed"}
         if self.routes.failures_for(claim.id) and all(
-                f.kind in repeats for f in self.routes.failures_for(claim.id)):
+                f.kind in COUNTEREXAMPLE_REPEAT_FAILURES
+                for f in self.routes.failures_for(claim.id)):
             self._notes.append(
                 f"{claim.id}: 反例搜索已试过且均为运行/能力问题, 不重复同一输入; 需换路或补条件")
             self._force_switch = bool(self._no_progress >= 1)
@@ -2062,35 +2029,39 @@ class TheoryEngine:
         result, record = self._run_tool(claim, None, check, record_id=f"ce-{claim.id}",
                                        scope=VerificationScope.target)
         status = self._to_validation_status(result)
-        if status == ValidationStatus.counterexample_found and result.counterexample:
+        verdict = counterexample_verdict_for(status, result.counterexample,
+                                             result.detail or "")
+        if verdict.action == "refute":
             updated = self._with_status(claim, status=ClaimStatus.refuted,
                                         support_kind=support_kind_for_tool(check.tool),
-                                        note=f"反例: {result.counterexample}")
+                                        note=verdict.note)
             self._save_claim(updated)
             record.stale = False
             self._save_verification(record)
-            self.routes.record_failure(claim.id, "counterexample",
-                                       f"找到反例 {result.counterexample}", scientific=True,
-                                       tool=check.tool,
-                                       recovery_condition="改为弱化命题或增加条件")
+            self.routes.record_failure(claim.id, "counterexample", verdict.reason,
+                                       scientific=verdict.scientific, tool=check.tool,
+                                       recovery_condition=verdict.recovery_condition)
             self._save_routes()
             self.store.append_event("counterexample",
-                                    {"claim_id": claim.id, "witness": result.counterexample},
+                                    {"claim_id": claim.id,
+                                     "witness": result.counterexample},
                                     idempotency_key=f"ce:{claim.id}:{result.counterexample}")
             return True
-        if status == ValidationStatus.verified:
+        if verdict.action == "record_test":
             # 未找到反例 ≠ 普遍成立: 只记录一次有限测试证据
-            note = "反例搜索未发现反例 (有限测试证据, 不构成证明)"
-            self._notes.append(f"{claim.id}: {note}")
+            self._notes.append(f"{claim.id}: {verdict.note}")
             self._save_verification(record)
-            self.routes.record_failure(claim.id, "no_counterexample_found", note,
-                                       scientific=False, tool=check.tool)
+            self.routes.record_failure(claim.id, "no_counterexample_found",
+                                       verdict.reason, scientific=False,
+                                       tool=check.tool)
             self._save_routes()
             return False
         self._save_verification(record)
-        self.routes.record_failure(claim.id, status.value, result.detail or status.value,
-                                   scientific=False, tool=check.tool,
-                                   recovery_condition="改用其他后端或缩小问题范围")
+        self.routes.record_failure(claim.id,
+                                   status.value if verdict.action == "failed" else "blocked",
+                                   verdict.reason, scientific=verdict.scientific,
+                                   tool=check.tool,
+                                   recovery_condition=verdict.recovery_condition)
         self._save_routes()
         return False
 
@@ -2367,15 +2338,12 @@ class TheoryEngine:
     def _act_propose_model(self, action: ResearchAction) -> bool:
         """从已有证据提出**候选模型并比较**, 再显式选中一个 (计划书 §3 R2 / §5.2)。
 
-        R2: 早期实现按命题类型套一个通用模板就结束。现在至少构造两个互相竞争的
-        候选机制 (条件化机制 vs 简化替代解释), 比较来源/忠实度/可验证性/成本,
-        给出选中理由, 并在候选预测冲突时产出**可区分检验**建议。
-
-        计划书 §5.2: 提出候选之后必须显式选中一个具体版本, 否则
-        `ResearchModel.selected` 永远为假, 结论依据哪个模型无从审计。
+        计算在 `reasoning_kernel.model_proposal_for` (合并计划 M2 按职责抽取): 内核按
+        候选机制构造 `ResearchModel`、显式选中一个并给出比较与能力声明; 引擎负责落盘、
+        把 `model_ref` 写回命题与产出可区分检验的实验规格。没有可用原文时内核返回
+        `requires_evidence=True`, 引擎据此去补检索而不是凭空造模型。
         """
-        from src.research.capability import declare_capability
-        from src.research.modeling import compare_from_evidence
+        from src.research.reasoning_kernel import model_proposal_for
 
         claim = self._get_claim(action.object_id)
         if claim is None:
@@ -2383,56 +2351,34 @@ class TheoryEngine:
         if claim is None:
             return False
         evidence = [e for e in self.evidence_for_claim(claim) if e.excerpt]
-        if not evidence:
-            self._notes.append("缺少可用原文, 无法提出有来源的模型 (先做定向检索)")
-            self.routes.record_failure(claim.id, "missing_model_evidence",
-                                       "无已读取原文", scientific=False,
-                                       recovery_condition="先 retrieve_targeted + read_source")
-            self._save_routes()
+        outcome = model_proposal_for(claim, evidence=evidence,
+                                     contract=self.spec.contract,
+                                     available=self.available)
+        if not outcome.ok:
+            self._notes.append(outcome.summary)
+            if outcome.payload.get("requires_evidence"):
+                self.routes.record_failure(claim.id, "missing_model_evidence",
+                                           "无已读取原文", scientific=False,
+                                           recovery_condition="先 retrieve_targeted + read_source")
+                self._save_routes()
             return False
 
-        comparison = compare_from_evidence(claim, evidence, self.spec.contract)
-        declaration = declare_capability(
-            _claim_category(claim), available=self.available,
-            has_data=bool(claim.study.data_ref or claim.study.rows),
-            has_design=claim.study.design.value not in ("", "none"))
-        models: list[ResearchModel] = []
-        for mechanism in comparison.mechanisms:
-            models.append(ResearchModel(
-                name=f"{mechanism.name}-{claim.id}",
-                natural_language=(f"基于 {len(evidence)} 条原文的候选机制 "
-                                  f"({mechanism.name}), 待核验"),
-                formal_encoding=mechanism.formal_encoding,
-                variables=list(claim.variables),
-                variable_domains=dict(claim.variable_domains),
-                mechanism=mechanism.relation or mechanism.name,
-                source_refs=list(mechanism.source_refs),
-                origin=Origin.proposed,
-                assumptions=list(claim.assumption_ids) + list(mechanism.assumptions),
-                approximations=[mechanism.noise] if mechanism.noise else [],
-                boundaries=mechanism.boundaries,
-                fidelity=mechanism.fidelity,
-                verified_scope="未验证: 该模型下的结论需重新推导与核验",
-            ))
-        chosen_id = ""
-        for model in models:
-            if model.name.startswith(next((m.name for m in comparison.mechanisms
-                                           if m.id == comparison.selected), "")):
-                chosen_id = model.id
-        chosen = next((m for m in models if m.id == chosen_id), models[0])
-        chosen.selected = True
-        updated = claim.model_copy(update={"model_ref": ObjectRef(id=chosen.id,
-                                                                 version=chosen.version)})
+        comparison = outcome.payload["comparison"]
+        models = [ResearchModel.model_validate(m) for m in outcome.payload["models"]]
+        chosen_id = str(outcome.payload["chosen_id"])
+        chosen = next(m for m in models if m.id == chosen_id)
+        updated = Claim.model_validate(outcome.payload["updated_claim"])
         self._selected_models[claim.id] = chosen.id
 
         writes = [(KIND_MODEL, m.id, m.model_dump(mode="json")) for m in models]
         writes.append((KIND_CLAIM, updated.id, updated.model_dump(mode="json")))
         # 可区分检验 → 实验规格 (仍需人工/后续授权才能执行, 不产生"已执行结果")
-        if comparison.distinguishing:
+        distinguishing = outcome.payload.get("_distinguishing_objects") or []
+        if distinguishing:
             from src.experiments.planner import design_experiment
             from src.experiments.schemas import ExperimentPurpose
 
-            test = comparison.distinguishing[0]
+            test = distinguishing[0]
             spec = design_experiment(claim, gaps=[], evidence=evidence,
                                      distinguishing=test,
                                      model=chosen.model_dump(mode="json"))
@@ -2444,7 +2390,8 @@ class TheoryEngine:
                          {"claim_id": claim.id, "spec_id": spec.id,
                           "kind": test.kind, "statement": test.statement,
                           "discriminates": test.discriminates})],
-                idempotency_key=f"distinguish:{claim.id}:{hash_payload(test.to_dict())}",
+                idempotency_key=f"distinguish:{claim.id}:"
+                                f"{hash_payload(test.to_dict())}",
             )
 
         self.append_step(
@@ -2454,17 +2401,15 @@ class TheoryEngine:
                                         "selected": True,
                                         "candidates": [m.id for m in models],
                                         "sources": chosen.source_refs,
-                                        "why_selected": comparison.why_selected,
-                                        "weak": [m.id for m in comparison.weak],
-                                        "terms": len(comparison.terms),
-                                        "conflicts": comparison.conflicts,
-                                        "capability": declaration.describe()})],
-            idempotency_key=f"model:{claim.id}:{hash_payload([m.source_refs for m in models])}",
+                                        "why_selected": comparison.get("why_selected", ""),
+                                        "weak": [m.get("id") for m in
+                                                 comparison.get("weak", [])],
+                                        "terms": len(comparison.get("terms", [])),
+                                        "conflicts": comparison.get("conflicts", []),
+                                        "capability": outcome.payload["declaration"]})],
+            idempotency_key=outcome.idempotency_key,
         )
-        if comparison.weak:
-            self._notes.append(
-                f"{claim.id}: 候选模型 {len(models)} 个, 其中 {len(comparison.weak)} 个为弱候选 "
-                f"(缺来源或无可观测预测)")
+        self._notes.extend(outcome.notes)
         return True
 
     def model_comparison(self, claim_id: str = "") -> dict:
@@ -2587,28 +2532,36 @@ class TheoryEngine:
                    for o in self._obligations())
 
     def _act_design_experiment(self, action: ResearchAction) -> bool:
-        """为具体未决问题生成实验/仿真规格 (计划书 §8); 绝不产生"已执行结果"。"""
-        from src.experiments.planner import design_experiment
+        """为具体未决问题生成实验/仿真规格 (计划书 §8); 绝不产生"已执行结果"。
+
+        判定与构造在 `reasoning_kernel.validation_plan_for` (合并计划 M2 按职责抽取):
+        内核负责"有没有竞争预测/未闭义务 → 该不该生成 → 生成什么", 并保证
+        `executed=False`; 引擎只落盘与记录拒绝原因。
+        """
+        from src.research.reasoning_kernel import validation_plan_for
 
         claim = self._get_claim(action.object_id) or (self._claims() or [None])[0]
         if claim is None:
             return False
         distinguishing = self._distinguishing_for(claim.id)
-        # P1-3: 只对有明确竞争预测或未闭义务的对象生成建议; 否则不套模板充数
-        if distinguishing is None and not self._has_open_obligation(claim.id):
-            self._refuse_action(action, "既没有竞争预测也没有未闭义务, 不套模板生成建议")
+        open_obligation = self._has_open_obligation(claim.id)
+        outcome = validation_plan_for(
+            claim, distinguishing=distinguishing, open_obligation=open_obligation,
+            gaps=self._gaps(self._claims(), self._obligations()),
+            evidence=self._evidence(),
+            model=self._selected_mechanism(claim.id))
+        if not outcome.ok:
+            self._refuse_action(action, outcome.summary)
             return False
-        spec = design_experiment(claim, gaps=[g.model_dump(mode="json") for g in
-                                              self._gaps(self._claims(), self._obligations())],
-                                 evidence=self._evidence(),
-                                 distinguishing=distinguishing,
-                                 model=self._selected_mechanism(claim.id))
+        spec = outcome.payload["spec"]
         self.append_step(
-            writes=[(KIND_GAP, f"exp-{spec.id}", spec.model_dump(mode="json"))],
-            events=[("experiment_spec_proposed", {"claim_id": claim.id, "spec_id": spec.id,
-                                                  "status": spec.execution_status})],
-            idempotency_key=f"exp:{claim.id}",
+            writes=[(KIND_GAP, f"exp-{spec['id']}", spec)],
+            events=[("experiment_spec_proposed",
+                     {"claim_id": claim.id, "spec_id": spec["id"],
+                      "status": spec.get("execution_status", "")})],
+            idempotency_key=outcome.idempotency_key,
         )
+        self._notes.extend(outcome.notes)
         return True
 
     def _act_revise_hypothesis(self, action: ResearchAction) -> bool:
@@ -2846,6 +2799,14 @@ class TheoryEngine:
             return None
 
     def _act_compare_novelty(self, action: ResearchAction) -> bool:
+        """新颖性对照 (计划书 §7.2)。
+
+        对照计算在 `reasoning_kernel.novelty_comparison_for` (合并计划 M2 按职责抽取):
+        内核只产出"对照记录与状态", 引擎负责落盘与把 `novelty_status` 写回命题。
+        检索命中**不等于**已被别人做过 —— 状态保持 `unchecked` 时不得升级结论。
+        """
+        from src.research.reasoning_kernel import novelty_comparison_for
+
         claim = self._get_claim(action.object_id)
         if claim is None:
             return False
@@ -2856,25 +2817,30 @@ class TheoryEngine:
                             "queries": list(coverage.queries),
                             "uncovered": list(coverage.uncovered)}
                            if coverage is not None else {})
-        record = novelty_mod.assess(
-            claim, lookup,
-            evidence=self.evidence_for_claim(claim),
+        outcome = novelty_comparison_for(
+            claim, lookup=lookup, evidence=self.evidence_for_claim(claim),
             evidence_scope=[x for x in (self.spec.source_set_id, self.spec.domain) if x],
-            retrieval_scope=retrieval_scope,
-        )
+            retrieval_scope=retrieval_scope)
+        record = outcome.payload.get("record") or {}
+        record_id = str(record.get("id", "") or f"nov-{claim.id}")
         self.append_step(
-            writes=[(KIND_NOVELTY, record.id, record.model_dump(mode="json"))],
-            events=[("novelty_assessed", {"claim_id": claim.id, "status": record.status.value})],
-            idempotency_key=f"novelty:{claim.id}:{hash_payload(record.rows and len(record.rows))}",
+            writes=[(KIND_NOVELTY, record_id, record)],
+            events=[("novelty_assessed", {"claim_id": claim.id,
+                                          "status": outcome.payload["status"]})],
+            idempotency_key=f"novelty:{claim.id}:"
+                            f"{hash_payload(len(outcome.payload.get('rows') or []))}",
         )
-        updated = claim.model_copy(update={"novelty_status": record.status})
+        from src.research.schemas import NoveltyStatus
+
+        status = NoveltyStatus(outcome.payload["status"])
+        updated = claim.model_copy(update={"novelty_status": status})
         self.append_step(
             writes=[(KIND_CLAIM, updated.id, updated.model_dump(mode="json"))],
-            idempotency_key=f"novelty-claim:{claim.id}:{record.status.value}",
+            idempotency_key=f"novelty-claim:{claim.id}:{status.value}",
         )
         # 已经做过有界检索即视为"已检索待比较"; 未接入检索能力时保持 unchecked,
         # 不再重复派发同一动作。
-        return record.status != NoveltyStatus.unchecked or self.knowledge_available
+        return status != NoveltyStatus.unchecked or self.knowledge_available
 
     def _switch_change(self, claim: Claim) -> dict:
         """换路时必须给出的**实质变化** (P1-2): 新机制 > 新条件 > 新子命题 > 换后端。

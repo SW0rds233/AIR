@@ -1008,5 +1008,8 @@ def test_server_startrequest_theory_fields():
     assert state["mode"] == "theory"
     assert state["project_id"] == "pj"
     assert state["budget_max_actions"] == 40
-    # 旧请求默认 survey, 不受影响
-    assert StartRequest(topic="t").mode == "survey"
+    # 统一入口 (合并计划 §3 / M5): 留空不再等于"综述", 由服务端按默认引擎决定
+    from src.server import DEFAULT_ENGINE
+
+    assert StartRequest(topic="t").mode == ""
+    assert DEFAULT_ENGINE == "theory"

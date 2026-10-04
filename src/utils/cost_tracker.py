@@ -6,6 +6,7 @@ from __future__ import annotations
 """
 
 import logging
+from contextvars import ContextVar
 
 from src.config import DEFAULT_MODEL_PRICE, MODEL_PRICES
 
@@ -67,10 +68,21 @@ def extract_usage_metadata(result) -> dict | None:
 
 
 class UsageTracker:
-    """简单的进程内用量累计器"""
+    """简单的进程内用量累计器
+
+    **归属** (合并计划 §7.4 / M4): 这是一个"归属可绑定"的累计器 —— 模块级单例
+    (`tracker`) 只是没有绑定会话时的默认出口。一个会话启动时用
+    `bind_session_tracker()` 在本线程 (及其派生线程, ContextVar 会继承) 上绑定
+    自己的实例, 于是"两会话同时研究"不会互相把用量算进对方的成本报告。
+    此前只有一个全局实例, 于是每个 run 的成本报告都是**历史累计**。
+    """
 
     def __init__(self):
         self.calls: list[dict] = []
+
+    def reset(self) -> None:
+        """清空累计 (会话级绑定时使用新实例, 这里只作为显式复位入口)。"""
+        self.calls = []
 
     def add_call(self, model: str, usage: dict | None, stage: str = "") -> None:
         if not usage:
@@ -144,9 +156,65 @@ class UsageTracker:
         return "\n".join(lines)
 
 
-# 模块级单例（供各 agent 共享）
-tracker = UsageTracker()
+# 模块级单例: **没有绑定会话时**的默认出口 (旧调用点的行为保持不变)。
+_default_tracker = UsageTracker()
 # 模型角色价格只能按模型名查表; 研究循环里同一角色可能换模型, 因此记录时带上实际模型名。
+
+#: 当前上下文 (线程/任务) 绑定的会话级累计器; 未绑定时退回模块级单例。
+_ACTIVE_TRACKER: ContextVar[UsageTracker | None] = ContextVar(
+    "air_active_usage_tracker", default=None)
+
+
+def bind_session_tracker(instance: UsageTracker | None = None) -> UsageTracker:
+    """为当前线程 (及其派生线程) 绑定一个**会话级**用量累计器。
+
+    ContextVar 会被新线程继承 (线程在父线程的上下文里被创建), 因此会话内部再派生的
+    worker 线程也会把用量记到同一个会话上 —— 这正是"两任务不串费用"所要求的归属。
+    """
+    bound = instance if instance is not None else UsageTracker()
+    _ACTIVE_TRACKER.set(bound)
+    return bound
+
+
+def unbind_session_tracker() -> None:
+    """解除当前线程的会话级绑定 (之后回落到模块级单例)。"""
+    _ACTIVE_TRACKER.set(None)
+
+
+def current_tracker() -> UsageTracker:
+    """当前生效的用量累计器: 会话级优先, 否则是模块级单例。"""
+    return _ACTIVE_TRACKER.get() or _default_tracker
+
+
+class _TrackerProxy:
+    """把模块级名字 `tracker` 变成"当前生效的累计器"的转发。
+
+    这样各处 `from src.utils.cost_tracker import tracker` 的写法不必改动, 也**不会**
+    在 import 时就把会话归属定死 (计划书 §7.4 要求按 run/project 绑定用量)。
+    """
+
+    def add_call(self, *args, **kwargs):
+        return current_tracker().add_call(*args, **kwargs)
+
+    def summary(self, *args, **kwargs):
+        return current_tracker().summary(*args, **kwargs)
+
+    def summary_md(self, *args, **kwargs):
+        return current_tracker().summary_md(*args, **kwargs)
+
+    def reset(self, *args, **kwargs):
+        return current_tracker().reset(*args, **kwargs)
+
+    @property
+    def calls(self) -> list[dict]:
+        return current_tracker().calls
+
+    def __getattr__(self, name):
+        return getattr(current_tracker(), name)
+
+
+#: 兼容入口: 仍然是 `tracker`, 但读写都落到当前会话的实例上。
+tracker = _TrackerProxy()  # type: ignore[assignment]
 
 
 def usage_metadata_of(result) -> dict | None:

@@ -104,28 +104,33 @@ def _filled_sealed_values(notes: str) -> list[str]:
 
 
 def test_rubric_exists_and_covers_all_dimensions():
+    """交付物复核清单必须覆盖各维度 (人只审查最终产出, 不登记审批状态)。"""
     rubric = EVALS / "rubric.md"
-    assert rubric.is_file(), "计划书 §5 门槛 6 的人审表必须存在"
+    assert rubric.is_file(), "交付物复核清单必须存在"
     text = _read(rubric)
     for dimension in RUBRIC_DIMENSIONS:
-        assert dimension in text, f"人审表缺少维度: {dimension}"
+        assert dimension in text, f"复核清单缺少维度: {dimension}"
     # 判定口径必须是三档且要求写明理由, 不能只有"通过/不通过"
     for verdict in ("通过", "需修改", "不通过"):
         assert verdict in text, verdict
-    assert "理由" in text and "签字" in text
+    assert "理由" in text
+    # 用户决策: 系统里**不再有"专家签字"环节**, 人只看最终产出
+    assert "不再有" in text and "签字" in text, "必须写明签字环节已被移除"
+    assert "| 角色 | 姓名 | 结论 | 日期 |" not in text, "不得再保留签字表"
     # 失败案例必须留痕且不得删除
-    assert "失败案例" in text and "不得删除" in text
-    # 必须说清"自动化测试通过不等于本表通过"
+    assert "失败案例" in text or "复核记录" in text
+    assert "不得删除" in text
+    # 必须说清"自动化测试通过不等于本清单通过"
     assert "不等于" in text
 
 
-def test_rubric_lists_every_required_deliverable():
+def test_rubric_lists_every_deliverable_to_review():
+    """复核对象是**交付包里的文件** —— 缺一项就算材料不全。"""
     text = _read(EVALS / "rubric.md")
     for material in REQUIRED_MATERIALS:
-        assert material in text, f"送审材料清单缺少 {material}"
-    # 评审前必须准备的三样材料 (计划书 §5)
-    for prepared in ("两篇条件不同的资料", "已知解析特例", "反例"):
-        assert prepared in text, prepared
+        assert material in text, f"复核材料清单缺少 {material}"
+    # 复核只看产出: 清单要给出每项材料的来源文件
+    assert "manifest.json" in text and "claims.json" in text
 
 
 @pytest.mark.parametrize("case_id", ["rf-fingerprint"])

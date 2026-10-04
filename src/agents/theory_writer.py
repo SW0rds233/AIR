@@ -12,7 +12,9 @@ from __future__ import annotations
   未关闭义务只如实列出, 不生成断言式表述。
 """
 
-from src.rag.theory_render import Block, Manuscript, render_markdown
+from typing import Any
+
+from src.rag.theory_render import Block, Manuscript
 from src.research.argument import writing_gaps
 from src.research.design_feasibility import (
     certificate_of,
@@ -436,6 +438,25 @@ def render_research_report(snapshot: ResearchSnapshot, gate=None, notes: list[st
 
 
 def run_theory_writing(snapshot: ResearchSnapshot, topic: str = "",
-                       delivery_level: str = "") -> tuple[str, dict[str, str]]:
-    manuscript = build_manuscript(snapshot, topic, delivery_level=delivery_level)
-    return render_markdown(manuscript), manuscript.writing_map
+                       delivery_level: str = "",
+                       writer: Any = None,
+                       *,
+                       task: Any = None,
+                       context: Any = None,
+                       runtime: Any = None,
+                       usage: Any = None) -> tuple[str, dict[str, str]]:
+    """理论稿件主文 (合并计划 §7.3: **主文统一由 WritingAgent 形成**)。
+
+    这里不再自己组装正文: 走 `agents.writing.write_main_manuscript` 这个唯一入口。
+    离线 (无 LLM) 时它由快照确定性起草, 输出与本函数旧实现逐字一致, 因此
+    "离线可复现"不因合并而下降; 有模型时正文来自写作智能体, 逐段带依据对象 id。
+
+    `writer` 可注入 (测试/替换实现), 透传给 WritingAgent; `task`/`context`/`runtime`
+    给了才会尝试模型起草, 否则直接确定性起草 (离线路径)。
+    """
+    from src.agents.writing import write_main_manuscript
+
+    _, markdown, writing_map, _ = write_main_manuscript(
+        snapshot, topic, delivery_level, agent=writer, task=task, context=context,
+        runtime=runtime, usage=usage)
+    return markdown, writing_map

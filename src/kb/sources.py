@@ -44,6 +44,13 @@ class SourceSet:
     updated_at: str = ""
     readable: bool = True
     note: str = ""
+    #: 这个库从哪来: managed (data/kb 下自建) / path_import (用户给定本机路径) /
+    #: upload (界面上传)。合并计划 §13.3: "从哪来、能读哪些根"必须可查。
+    origin: str = "managed"
+    #: 路径导入库登记的文件数 (managed 库为 0)。
+    imported_files: int = 0
+    #: 已失效 (原文件被移动/删除) 的登记文件数。
+    stale_files: int = 0
 
     def describe(self) -> str:
         if not self.readable:
@@ -54,6 +61,10 @@ class SourceSet:
         if self.year_range:
             bits.append(f"年份 {self.year_range}")
         bits.append("已建索引" if self.indexed else "未建索引")
+        if self.origin == "path_import":
+            bits.append(f"路径导入 {self.imported_files} 个文件")
+            if self.stale_files:
+                bits.append(f"{self.stale_files} 个已失效")
         return f"{self.source_set_id}: " + ", ".join(bits)
 
     def to_dict(self) -> dict:
@@ -64,8 +75,25 @@ class SourceSet:
             "languages": list(self.languages), "year_range": self.year_range,
             "indexed": self.indexed, "updated_at": self.updated_at,
             "readable": self.readable, "note": self.note,
+            "origin": self.origin, "imported_files": self.imported_files,
+            "stale_files": self.stale_files,
             "description": self.describe(),
         }
+
+
+def _path_import_stats(topic: str) -> tuple[int, int]:
+    """该库的路径导入登记数 (文件数, 失效数); 非路径导入库返回 (0, 0)。
+
+    只读登记文件, 不触发任何导入或解析。
+    """
+    try:
+        from src.kb.path_import import load_path_refs
+    except Exception:  # noqa: BLE001
+        return 0, 0
+    refs = load_path_refs(topic)
+    if not refs:
+        return 0, 0
+    return len(refs), sum(1 for r in refs if r.missing_since)
 
 
 def _vector_indexed(topic: str) -> bool:
@@ -134,6 +162,7 @@ def list_source_sets(include_unreadable: bool = True) -> list[SourceSet]:
         try:
             stats = store.stats()
             languages, year_range = _language_year(store)
+            imported, stale = _path_import_stats(topic)
             out.append(SourceSet(
                 source_set_id=topic,
                 documents=int(stats.get("documents", 0)),
@@ -143,6 +172,8 @@ def list_source_sets(include_unreadable: bool = True) -> list[SourceSet]:
                 languages=languages, year_range=year_range,
                 indexed=_vector_indexed(topic),
                 updated_at=str(child.stat().st_mtime_ns),
+                origin="path_import" if imported else "managed",
+                imported_files=imported, stale_files=stale,
             ))
         finally:
             store.close()
@@ -165,6 +196,7 @@ def describe_source_set(source_set_id: str) -> SourceSet:
     try:
         stats = store.stats()
         languages, year_range = _language_year(store)
+        imported, stale = _path_import_stats(topic)
         return SourceSet(
             source_set_id=topic,
             documents=int(stats.get("documents", 0)),
@@ -174,6 +206,8 @@ def describe_source_set(source_set_id: str) -> SourceSet:
             languages=languages, year_range=year_range,
             indexed=_vector_indexed(topic),
             updated_at=str(db_path.stat().st_mtime_ns),
+            origin="path_import" if imported else "managed",
+            imported_files=imported, stale_files=stale,
         )
     finally:
         store.close()

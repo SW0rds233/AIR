@@ -17,6 +17,20 @@
 - **科研工作台**：理论模式下「科研工作台」标签页显示研究问题、进度统计、当前动作与未决缺口、研究过程事件、结论状态表、证明义务、证据与原文定位、验证记录、实验/仿真建议、研究路线与失败原因、新颖性审查，并提供对象级反馈与快照派生；理论暂停点可直接**点选候选路线**
 - **成本追踪**：分阶段 Token 用量与费用统计
 
+### 智能体团队（合并计划 M1，新增）
+
+系统正在按《智能体团队合并计划》从"两套图 + 一次单趟 LLM 角色"收敛为**一个主控 + 七类功能子智能体**的团队：
+
+- **统一入口**：用户只给自然语言（可带附件、资料库与预算），不需要先选"综述/理论模式"；主控产出 `ResearchBrief`（分开记录子问题类型 / 交付形态 / 授权与能力三个维度，未知字段保留为未知）与版本化 `TeamPlan`
+- **动态派工而非线性阶段**：每轮主控给出一种结构化决策 —— `dispatch` / `request_clarification` / `wait` / `deliver` / `stop_with_report`；子智能体受阻时提 `ResearchNeed`（缺来源 / 缺模型条件 / 缺验证…），由主控转成新任务，**不允许子智能体互相派工**
+- **角色与真实能力**：`GET /api/team/roles` 返回八个角色的职责、交付物，并**探测**能力是否真的可用（无 embedding 时如实报告"只能关键词+卡片召回"，不承诺语义检索）
+- **统一运行时**：有界工具循环、按任务记账、协作式取消、结果契约校验（角色只能提交本职责内的对象种类，越界即降级为 `partial`）；审阅**只可降级、不可升级**由运行时闸门实际拦住，不靠提示词
+- **任务持久化与一致性**：任务生命周期落盘、幂等续跑、`read-set` 版本检查（依据 v2 产出而对象已到 v3 时**拒绝合入**并记录过期）；图状态只保存身份与引用，正文留在产物里
+- **团队工作台（前端）**：`ResearchStore` 一份状态（selection / entities / transport / ui 各有归属）；连接状态与运行状态分开显示（**离线不等于后台已停止**）；会话级事件游标、按 `seq` 去重、缺口要求重新同步而不是把页面停在"完成"；团队状态条按角色聚合任务数，失败/受阻原因直接可见
+- **按用户指定路径建库**：`POST /api/library/scan`（只预览）→ `POST /api/library/import`（只读引用，**不复制**用户文件）；未授权路径与 `.env`/`*.key` 等敏感目标一律拒绝并给原因；原件被移动后标记 stale
+
+离线（无 LLM）时团队走**确定性实现**：检索走 KB/外部检索并留下覆盖记录、综合按已登记证据关系生成候选、写作渲染已登记结果并保留完整追溯；判定层仍为零 LLM。
+
 ### 理论研究模式（`--mode theory`）
 
 - **研究对象可追溯**：`ResearchSpec / Assumption / Definition / ResearchModel / Claim / ProofObligation / ProofAttempt / VerificationRecord / EvidenceLink / ResearchRoute / ResearchGap`，全部带稳定 ID 与版本；版本只增不减，历史不可覆盖
@@ -211,6 +225,33 @@ python -m src.main --mode theory --request "研究信道变化如何影响射频
 统计/分析类工具读取 CSV 时，`data_ref` 只允许指向 `data/` 或 `outputs/` 之下；
 需要额外放行只读数据目录时用 `DATA_READ_ROOTS`（分号分隔的绝对路径）。
 
+**按本机路径建人工文献库（合并计划 §13）**：用户可直接给出文件或文件夹路径，系统扫描后
+**只登记引用**（不复制、不改名、不修改原文件），随后供检索/推理/引用使用。
+
+| 接口 | 作用 |
+|---|---|
+| `POST /api/library/scan` | 只扫描不导入，返回逐条状态（`ok/skipped/denied/unreadable`）与截断提示，供**先预览再确认** |
+| `POST /api/library/import` | 按请求导入；返回逐条结果（新增/合并/幂等命中/跳过/拒绝/失败）；支持幂等键 |
+| `GET /api/library/{source_set_id}` | 库的来源类型、文件数、hash 清单与失效文件（只回显文件名，不外发绝对路径） |
+| `DELETE /api/library/{source_set_id}` | 只解除**该库**登记；**不删除用户原文件**，也不清空共享向量库 |
+
+安全规则（程序强制，不靠提示词）：只接受位于授权根（`data/`、`outputs/` 或
+`DATA_READ_ROOTS` 显式放行项）之下的路径；`.env`、`*.pem/*.key/*.pfx`、`.ssh/`、`.git/`、
+`.aws/`、`credentials*`、`node_modules/`、`.venv/` 即使在被授权根内也一律拒绝；符号链接
+越界即拒绝；默认上限 500 文件 / 2 GB，超限标记 `truncated` 而不是静默截断。
+
+```bash
+# 先预览
+curl -X POST http://127.0.0.1:8000/api/library/scan \
+  -H 'Content-Type: application/json' \
+  -d '{"paths": ["D:/papers", "D:/papers/extra/brc1949.pdf"], "label": "我的文献"}'
+# 确认后导入
+curl -X POST http://127.0.0.1:8000/api/library/import \
+  -H 'Content-Type: application/json' \
+  -d '{"paths": ["D:/papers"], "topic": "我的文献", "idempotency_key": "batch-1"}'
+```
+（上例中的 `D:/papers` 需由维护者在 `DATA_READ_ROOTS` 中显式放行。）
+
 
 ## 主要参数
 
@@ -277,17 +318,34 @@ AIR/
 │   ├── main.py / main_chat.py / server.py / gui.py   # CLI / 对话 CLI / Web / tkinter 入口
 │   ├── config.py            # 全局配置 (.env 加载/默认值)
 │   ├── agents/              # 文献查阅、撰写、审阅、大纲、引用预验证/守门/核查、PDF 摄入、理论写作
+│   │   ├── protocol.py      #   团队契约: AgentTask/AgentResult/ResearchNeed/权限令牌/预算
+│   │   ├── registry.py      #   角色注册 + **真实可用能力探测**
+│   │   ├── runtime.py       #   统一运行时: 有界工具循环/记账/取消/结果校验
+│   │   ├── supervisor.py    #   主控: 任务画像/团队计划/结构化决策/复盘
+│   │   ├── evidence|modeling|reasoning|validation_planning|writing|figures|review.py
+│   │   └── base.py / tools.py   # 角色公共设施与受控工具集
 │   ├── graph/               # LangGraph 流水线 (Supervisor 编排 / 修订循环 / 理论研究图)
+│   │   ├── research_graph.py #   团队外层循环 (动态派工, 非固定阶段)
+│   │   └── unified_state.py  #   统一状态: 只保存身份、任务与引用
 │   ├── research/            # 理论研究内核 (对象模型/存储/缺口/协调/路线/推导/反例/验收/交付包)
+│   │   ├── task_store.py    #   任务生命周期 + 幂等续跑 + read-set 事务检查
+│   │   └── projection.py    #   团队候选登记 (只登记, 不做判定)
+│   ├── publication/         # 文稿中间表示 (WritingPacket/Manuscript/Block, 渲染期编号)
+│   ├── team_api.py          # 团队与资料库 HTTP 接口 (/api/team/*, /api/library/*)
 │   ├── verification/        # 受限验证执行器 (sympy / z3 / stats / lean, 子进程 + 超时)
 │   ├── experiments/         # 实验/仿真规格生成与校验 (只到 spec_validated)
 │   ├── kb/                  # 主题文献知识底座 (统一 search/read/resolve + 卡片 + 混合检索)
+│   │   └── path_import.py   #   按用户给定本机路径建库 (授权根/敏感拒绝/不复制/stale)
 │   ├── rag/                 # 向量库、图表、LaTeX、引用格式化、相关性过滤
 │   ├── tools/               # 学术搜索、引用验证、出处解析、PDF 下载、中文文献源
 │   ├── utils/               # HTTP 容错、成本追踪、检索缓存、会话记录等
 │   └── web/                 # 前端 (Vite + TypeScript)
 │       ├── index.html       #   源码模板 (入口, 由 Vite 构建)
 │       ├── src/             #   页面逻辑 (main/app/current-research/research-api/markdown/views/styles)
+│       │   ├── state/       #   唯一状态入口 research-store.ts (selection/entities/transport/ui)
+│       │   ├── events/      #   session-events.ts (会话级游标/去重/重连策略)
+│       │   ├── views/       #   纯函数视图 (含 team-board.ts 团队工作台)
+│       │   └── team-controller.ts  # 团队视图接入 (只读, 单向同步旧状态)
 │       ├── assets/          #   构建出的 JS/CSS (入库, server.py 从这里提供)
 │       └── dist/            #   构建出的页面 (不入库, 新克隆需 npm run build, 见「快速开始」)
 ├── tests/                   # 离线测试 (含可信状态/知识闭环/自主性反向安全用例)
@@ -305,6 +363,8 @@ AIR/
 - 工具通过不等于科学真理：形式化工具只检查提交给它的编码，**陈述是否忠实于原问题仍需人工确认**；
 - 多智能体一致同意不能替代数学证明；「没检索到等价结果」只表示在所检索范围内未发现；
 - 未执行的实验/仿真规格不是证据；报告与论文稿在门槛未通过时只作为研究备忘录/条件性报告导出。
+- **团队合并仍在进行中**：M0（契约）、M1（团队闭环）、M4（任务持久化与 read-set 一致性）、§13（按路径建库）、**M2 动作抽取（研究侧）**、**M3 任务画像与领域硬编码退役（研究侧）**已落地 —— 文稿的章节骨架与领域措辞现在由 `research/task_profile.py` 决定，通用入口不再输出组合设计专用内容；**M5 前端**只做了状态/事件基础与团队工作台视图。详见 `AI for Research(AIR)智能体团队合并计划.md` 第 15 节与 `AI for Research(AIR)计划推进情况.md` 的 10.4 节。
+- 团队闭环第一版**串行执行**（按合并计划 §10 要求，资源隔离完成前不打开全队并行）；没有 LLM 时角色走确定性实现，"任务完成"不等于"研究完成"。
 
 
 ## 许可

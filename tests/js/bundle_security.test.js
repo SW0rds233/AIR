@@ -44,6 +44,18 @@ function makeElement(tag) {
       this.childNodes = this.childNodes.filter((c) => c !== child);
       return child;
     },
+    /**
+     * 团队视图要插在工作台容器**最前** (合并计划 §9.2: 先给团队状态, 再给旧工作台)。
+     * 桩必须支持它 —— 否则页面初始化会在这里抛错, 而"插入位置"是真实需求, 不能用
+     * `appendChild` 代替。
+     */
+    insertBefore(child, reference) {
+      const index = reference ? this.childNodes.indexOf(reference) : -1;
+      if (index < 0) { this.childNodes.push(child); return child; }
+      this.childNodes.splice(index, 0, child);
+      return child;
+    },
+    get firstChild() { return this.childNodes[0] || null; },
     remove() {},
     focus() {},
     setAttribute(name, value) { this.attributes[name] = String(value); },
@@ -154,8 +166,15 @@ const win = installDom();
   const api = win.AIRMarkdown;
   check('bundle 暴露 AIRMarkdown', Boolean(api && api.render));
   check('bundle 暴露 AIR', Boolean(win.AIR && win.AIR.api && win.AIR.research));
-  check('研究状态初始为空', win.AIR && win.AIR.research.projectId === '');
-  check('状态对象含模式字段', win.AIR && win.AIR.research.mode === 'survey');
+  // 统一入口: 页面打开即落实**草稿身份** (R2, 供附件/检索归属), 因此初始 projectId
+  // 要么为空、要么是草稿 id (`proj-...`); 它**不是**运行绑定, 工作台不会拿它查状态。
+  const bootProject = win.AIR ? String(win.AIR.research.projectId || '') : '';
+  check('研究状态初始不绑定真实项目',
+        win.AIR && (bootProject === '' || bootProject.startsWith('proj-')));
+  // 统一入口: 前端不再预置任何"运行模式" —— 引擎标识只由服务端返回值填充,
+  // 初始为空串表示"还不知道", 不假装默认是某种模式。
+  check('状态对象不预置模式 (等后端返回)',
+        win.AIR && win.AIR.research.mode === '');
 
   // 页面逻辑必须真的在包里, 且**委托动作**能从全局解析到 (模板已无内联处理器:
   // 严格 CSP 会拦掉内联事件处理器, 因此改由 data-action + 文档级委托分发)

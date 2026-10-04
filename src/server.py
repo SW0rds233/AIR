@@ -31,17 +31,44 @@ from langgraph.types import Command
 from pydantic import BaseModel
 
 from src.config import DATA_DIR, MAX_REVISIONS, OUTPUT_DIR
-from src.graph.pipeline import _describe_node, _get_langfuse_handler, build_pipeline
+
+#: 统一入口的默认研究引擎 (合并计划 §3: 主控 + 功能子智能体)。
+#: 界面不再提供"综述/理论"选择; 需要旧引擎的旧客户端仍可显式传 `mode`。
+DEFAULT_ENGINE = "theory"
+
+#: 是否把**综述型**请求自动交给团队会话引擎 (合并计划 §15.2/§15.3)。
+#: 关掉它只是回到"综述请求走默认真式引擎并请求澄清"的旧边界, 便于出问题时快速回退。
+SURVEY_ENGINE_ENABLED = True
+from src.graph.node_progress import describe_node as _describe_node
+# 理论引擎的建图入口: 放在模块级, 使调用方/测试可以替换它注入假图
+# (`monkeypatch.setattr(server, "build_theory_pipeline", stub)`)。
+from src.graph.theory_pipeline import build_theory_pipeline
 from src.utils.console import ensure_utf8_console
 from src.utils.conversation_store import (
     delete_conversation,
     list_conversations,
     load_conversation,
-    save_conversation,
 )
 from src.utils.file_utils import safe_join, sanitize_filename
-
-_STOP = object()
+# M4 / §8: 会话生命周期、注册表、事件与运行线程归属资源全部抽到 `src/sessions/`;
+# 本模块只保留 FastAPI 端点、图装配与工作台读取。
+# 下面这些名字仍然挂在 `server` 上 —— 它们是既有调用方的契约:
+#   `server.Session` / `server.SESSIONS` / `server.shutdown_sessions()` /
+#   `server._persist_session` / `server._final_summary` / `server._run_session` /
+#   `server._STOP` / `server.EVENT_LOG_LIMIT` / `server.CHECKPOINT_DIR` /
+#   `server._make_checkpointer`
+# `EVENT_LOG_LIMIT` 属于"命名空间兼容再导出" (`tests/test_session_events.py` 直接读
+# `server.EVENT_LOG_LIMIT`), 因此显式标注为有意保留:
+from src.sessions.controller import EVENT_LOG_LIMIT, Session  # noqa: F401
+from src.sessions.events import replay_gap_note
+from src.sessions.runtime import STOP as _STOP
+from src.sessions.store import (  # noqa: F401 - 兼容再导出 (公共 API)
+    SESSIONS,
+    final_summary as _final_summary,
+    persist_session as _persist_session,
+    session_record as _session_record,
+    shutdown_sessions,
+)
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 INDEX_HTML = WEB_DIR / "index.html"
@@ -131,6 +158,124 @@ def _make_checkpointer(session_id: str):
         return MemorySaver(), None
 
 
+def _resolve_engine(mode: str, *, request: str = "") -> str:
+    """**唯一**的引擎选择点: 从请求语义/遗留字段决定用哪张图。
+
+    为什么要有这个函数 (合并计划 §3 / M5): 用户界面已经不再提供"综述/理论"选择,
+    但服务端内部仍有两张图 —— 一张负责**形式化研究**(TheoryEngine: 命题/义务/验证/
+    交付包), 一张负责**检索综述**(PipelineState: 检索→笔记综合→长文→配图)。把选择
+    写成一个具名函数, 是为了让"哪里决定了引擎"只有一处、可单测, 而不是散落在
+    端点里靠 `if mode == ...` 猜。
+
+    取值:
+    - 显式 `theory` / `team` → 尊重调用方;
+    - 留空 → 按请求类型: **综述型**交给团队会话引擎, 其余走默认真式引擎。
+
+    **已完成的收敛 (2026-10-04)**: 旧的 `survey` stage 图已删除; 综述型请求由
+    `research.intake.is_survey_request` 识别并交给团队会话引擎 —— 判据刻意保守:
+    出现形式化意图词时**不**按综述处理, 免得把证明题送进综述流程。
+
+    因此这里不再有"第二个综述引擎"这回事: `_resolve_engine` 只在
+    "形式化研究"与"团队会话"之间选择, 且用户界面从不暴露这个选择。
+
+    **为什么保留两种**研究形态 (有意选择, 不是待清理的冗余)
+    ------------------------------------------------------
+    这一处分支看起来像"还没合并完", 因此写清它为什么**不该**被合并掉:
+
+    1. **判定层必须保持零 LLM 且是唯一状态写入点** (`research/kernel`、
+       `verification/**`、`acceptance.py`)。形式化研究的一步是"选义务 → 跑工具
+       (SAT/符号计算) → 按结果落盘判定"; 这条链路里**没有**可供智能体"提议"的位置。
+    2. **`AgentTask` 的契约是"只提交候选、不做判断"**。把理论引擎的动作改造成任务,
+       等于让候选结果绕回判定层再判一次 —— 要么多一层无意义的转发, 要么把判定权
+       交给智能体, 后者正是这套设计要防的事。
+    3. 两者**已经共用**真正该共用的部分: 冻结快照与研究对象存储、`research/` 判定层、
+       会话与事件层 (`sessions/`)、写作入口 (`agents/writing.write_main_manuscript`)、
+       交付包导出 (`research/package.py`)、预算与用量计量。剩下的差别是**研究形态**
+       (形式化推导 vs 逐个角色的协作综述), 而不是"新旧两套实现"。
+
+    历史包袱确实存在过并已清除: 旧的 stage 综述图 (`graph/pipeline.py`)、旧的撰写路径
+    (`agents/paper_writer.py` + `research/writing_bridge.py`)、GUI 与交互式 CLI 都已删除。
+    现在这两个引擎没有一行是"旧实现"。
+    """
+    chosen = str(mode or "").strip().lower()
+    if chosen in ("theory", "team"):
+        return chosen
+    from src.research.intake import is_survey_request
+
+    if SURVEY_ENGINE_ENABLED and is_survey_request(request):
+        return "team"
+    return DEFAULT_ENGINE
+
+
+def _build_app_for_mode(checkpointer, mode: str, *, session=None):
+    """按**已解析的引擎**构建该会话的图应用 (或团队会话)。
+
+    **建图的决策留在入口层**: `Session` (src/sessions/controller.py) 只关心会话
+    生命周期, 图由这里构建后注入。这样 `sessions/` 不 import LangGraph 的图工厂,
+    也就不会在"哪张图服务哪个会话"上形成第二份权威。
+    """
+    engine = str(mode or "").strip().lower()
+    if engine == "theory":
+        # 通过**模块属性**取工厂: 调用方与测试可以替换它来注入假图
+        # (`monkeypatch.setattr(server, "build_theory_pipeline", stub)`)。
+        return build_theory_pipeline(checkpointer)
+    # 统一入口的默认形态: 团队会话引擎 (主控 + 七类角色)。
+    return _build_team_app(session)
+
+
+def _build_team_app(session):
+    """构建团队会话的"图应用" (供会话驱动逐轮调用)。
+
+    需要 `session` 才能把事件接到会话出口 —— 团队进度 (主控决策、角色成果) 必须
+    出现在 SSE 里, 否则界面又回到"正在思考"。
+    """
+    from src.graph.research_graph import TeamRun
+    from src.graph.team_session import TeamApp, TeamSession
+
+    if session is None:                     # 没有会话对象时不接出口 (测试/内省用)
+        team = TeamRun(project_id="", request="", max_rounds=1)
+        return TeamApp(TeamSession(team))
+    request = session.request or {}
+    run_id = session.run_id or ""
+    team = TeamRun(
+        project_id=str(request.get("project_id", "") or session.session_id),
+        problem_id=str(request.get("problem_id", "") or ""),
+        run_id=run_id,
+        request=str(request.get("request") or request.get("topic") or session.topic),
+        source_set_ids=[str(request.get("source_set_id", "") or "")],
+        source_policy=str(request.get("source_policy", "user_kb") or "user_kb"),
+        max_rounds=int(request.get("max_rounds", 24) or 24),
+    )
+    return TeamApp(TeamSession(team, emit=session.emit))
+
+
+def _make_session(thread_id: str, *, topic: str = "", session_id: str,
+                  checkpointer=None, checkpoint_conn=None, run_id: str = "",
+                  mode: str = "") -> Session:
+    """构造一个会话 (显式注入按模式构建的图应用)。
+
+    这是**唯一**的会话装配入口: 新建与续跑都走这里, 避免两处各写一遍建图逻辑
+    (漏掉一处就会出现"续跑的会话没有图"这类难查的不一致)。
+
+    `Session` 也保留了缺省建图能力 (直接 `Session(...)` 仍然可用), 但那会绕过
+    "模式 → 图"的唯一决策点; 入口一律显式注入。
+    """
+    session = Session(
+        thread_id,
+        topic=topic,
+        session_id=session_id,
+        checkpointer=checkpointer,
+        checkpoint_conn=checkpoint_conn,
+        run_id=run_id,
+        mode=mode,
+        # 先不给 app: 团队引擎需要会话对象才能把进度接到会话出口 (SSE), 因此
+        # 两段式装配 —— 先构造会话, 再按引擎注入 app。
+        app=None,
+    )
+    session.app = _build_app_for_mode(checkpointer, mode, session=session)
+    return session
+
+
 class StartRequest(BaseModel):
     topic: str = ""
     request: str = ""
@@ -139,8 +284,9 @@ class StartRequest(BaseModel):
     time_range: str = "2019-2026"
     max_revisions: int | None = None
     skip_retrieval: bool = False
-    # 理论研究模式 (默认 survey, 完全兼容旧请求)
-    mode: str = "survey"  # survey / theory
+    # 遗留兼容字段 (合并计划 §3 / M5: 统一入口不要求用户选模式)。
+    # 留空时按 `DEFAULT_ENGINE` 启动; 界面不再提供该选择。
+    mode: str = ""
     project_id: str = ""
     problem_id: str = "problem"
     research_spec: dict = {}
@@ -180,143 +326,9 @@ class ForkRequest(BaseModel):
     project_id: str = ""
 
 
-class Session:
-    def __init__(self, thread_id: str, topic: str = "", session_id: str | None = None,
-                 checkpointer=None, checkpoint_conn=None, run_id: str = "", mode: str = "survey"):
-        self.thread_id = thread_id
-        self.session_id = session_id or uuid.uuid4().hex
-        self.topic = topic
-        self.run_id = run_id  # outputs/{run_id}/ 产物子目录
-        self.mode = mode or "survey"
-        self.created_at = datetime.now().isoformat(timespec="seconds")
-        self.checkpointer = checkpointer or MemorySaver()
-        self.checkpoint_conn = checkpoint_conn
-        if self.mode == "theory":
-            from src.graph.theory_pipeline import build_theory_pipeline
-
-            self.app = build_theory_pipeline(self.checkpointer)
-        else:
-            self.app = build_pipeline(self.checkpointer)
-        self.config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
-        lf = _get_langfuse_handler()
-        if lf:
-            self.config["callbacks"] = [lf]
-        self.events: queue.Queue = queue.Queue()
-        self.responses: queue.Queue = queue.Queue()
-        self.stop_flag = threading.Event()
-        self.status = "running"  # running / waiting / done / stopped / error
-        self.final_state: dict | None = None
-        self.error: str | None = None
-        self.messages: list[dict] = []
-        self.request: dict = {}
-        # F2: 当前等待中的 interrupt 稳定 ID 与已回答记录 (幂等 + 只接受等待态响应)
-        self.pending_interrupt_id: str = ""
-        self.answered_interrupts: list[str] = []
-        # F2: 事件日志 (可重放) —— SSE 是单消费者队列, 断线或多标签页会丢事件;
-        # 这里保留带序号的日志, 重连时按 last_event_id 回放缺失部分。
-        self.event_log: list[dict] = []
-        self.event_seq: int = 0
-        self.event_lock = threading.RLock()
-        # 跑这一会话的后台线程 (start 时登记): 关闭检查点连接前必须等它退出,
-        # 否则会在"线程还在用 sqlite 连接"时 close, Windows 上直接崩进程。
-        self.worker_thread: threading.Thread | None = None
-
-    def shutdown(self, timeout: float = 10.0) -> bool:
-        """关闭会话持有的检查点连接 (幂等)。
-
-        为什么必须有这一步: 每个会话一个 SQLite 检查点, 连接不关闭时在 Windows 上
-        会**一直持有文件句柄** —— 删除会话时 `unlink` 静默失败 (留下无法删除的文件),
-        测试的临时目录清理也会报 `WinError 32`。这里显式关闭, 并让调用方知道结果。
-
-        为什么要先等后台线程: `checkpoint_conn` 是 `check_same_thread=False` 的 sqlite3
-        连接, 后台研究线程仍在 `app.stream`/落盘中用它。在另一个线程还在使用时 close,
-        CPython 的 sqlite3 会访问已释放的句柄 —— 实测直接触发
-        `0xC0000005` (STATUS_ACCESS_VIOLATION) 崩掉整个进程, 而且崩点在 C 层,
-        Python 的 `except Exception` 拦不住。因此这里先 join, 只在线程确实退出后才关;
-        线程还在跑就**不关**并如实返回 False (宁可有句柄残留, 也不崩进程)。
-        """
-        thread = self.worker_thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout)
-        if thread is not None and thread.is_alive():
-            self.error = self.error or "研究线程仍在运行, 未关闭检查点连接"
-            return False
-        conn, self.checkpoint_conn = self.checkpoint_conn, None
-        if conn is None:
-            return True
-        try:
-            conn.close()
-            return True
-        except Exception as e:  # noqa: BLE001 - 关闭失败不应掩盖删除结果
-            self.error = self.error or f"检查点连接关闭失败: {e}"
-            return False
-
-    def emit(self, event: dict):        # 先入可重放日志 (带序号), 再入实时队列: 断线/多标签页时按序号补齐
-        with self.event_lock:
-            self.event_seq += 1
-            record = {**event, "_seq": self.event_seq}
-            self.event_log.append(record)
-            # 只保留最近 500 条: 重放日志用于补偿短时断线, 不是完整归档
-            if len(self.event_log) > 500:
-                del self.event_log[:-500]
-        self.events.put(record)
-        msg = _event_to_message(event)
-        if msg is None:
-            return
-        # 断点续跑时 checkpoint 会重新抛出与历史最后一条相同的 interrupt,
-        # 去重避免历史记录里出现重复的中断卡片 (SSE 事件照常推送, 只影响落盘)。
-        if msg.get("role") == "interrupt" and self.messages and self.messages[-1].get("role") == "interrupt":
-            if self.messages[-1].get("title") == msg.get("title"):
-                return
-        self.messages.append(msg)
-
-
-def _event_to_message(event: dict) -> dict | None:
-    """把 SSE 事件映射为会话消息记录 (供历史回看与落盘)。"""
-    t = event.get("type")
-    if t in ("node", "log"):
-        return {"role": "node", "text": event.get("text", "")}
-    if t == "interrupt":
-        p = event.get("payload") or {}
-        return {
-            "role": "interrupt",
-            "title": p.get("title", ""),
-            "hint": p.get("hint", ""),
-            "content": p.get("content", ""),
-        }
-    if t == "done":
-        return {"role": "done", "text": "完成"}
-    if t == "stopped":
-        return {"role": "stopped", "text": "已停止"}
-    if t == "error":
-        return {"role": "error", "text": event.get("message", "")}
-    return None
-
-
-def _session_record(session: Session) -> dict:
-    """构造会话记录 (供落盘)。"""
-    return {
-        "session_id": session.session_id,
-        "thread_id": session.thread_id,
-        "topic": session.topic,
-        "run_id": session.run_id,
-        "created_at": session.created_at,
-        "status": session.status,
-        "summary": _final_summary(session.final_state) if session.final_state else {},
-        "messages": list(session.messages),
-        "request": dict(session.request),
-    }
-
-
-def _persist_session(session: Session):
-    """把会话记录写入 data/conversations/ (失败不中断会话)。"""
-    try:
-        save_conversation(session.session_id, _session_record(session))
-    except Exception:
-        pass
-
-
-SESSIONS: dict[str, Session] = {}
+# `Session` / `SESSIONS` / `_session_record` / `_persist_session` 已移到
+# `src/sessions/` (controller + store), 在文件顶部 import 后保持这些名字可用。
+# 这里不再保留第二份实现 —— 两份状态各自漂移正是 P0 类缺陷的成因。
 
 
 def _research_progress(session, node_name: str, node_state: dict) -> dict | None:
@@ -372,34 +384,6 @@ def _research_progress(session, node_name: str, node_state: dict) -> dict | None
         }
     except Exception:  # noqa: BLE001 - 进度显示失败不得影响研究
         return None
-
-
-def _final_summary(final: dict) -> dict:
-    return {
-        "draft_path": final.get("draft_path", ""),
-        "paper_tex_path": final.get("paper_tex_path", ""),
-        "review_report_path": final.get("review_report_path", ""),
-        "literature_notes_path": final.get("literature_notes_path", ""),
-        "figure_count": len(final.get("figure_paths", []) or []),
-        "review_score": final.get("review_score", "N/A"),
-        "revision_count": final.get("revision_count", 0),
-        "total_cost": final.get("total_cost", 0),
-        "error": final.get("error", ""),
-        # 理论研究模式
-        "package_dir": final.get("package_dir", ""),
-        "manuscript_path": final.get("manuscript_path", ""),
-        "tex_path": final.get("tex_path", ""),
-        "gate_passed": final.get("gate_passed", None),
-        "gate_report": final.get("gate_report", ""),
-        "delivery_level": final.get("delivery_level", ""),
-        "snapshot_id": final.get("snapshot_id", ""),
-        "project_id": final.get("project_id", ""),
-        "problem_id": final.get("problem_id", ""),
-        "needs_clarification": final.get("needs_clarification", False),
-        # 资源用量与停止原因 (计划书 §9.3)
-        "usage": final.get("usage", {}),
-        "stopped_reason": final.get("stopped_reason", ""),
-    }
 
 
 # ----------------------------------------------------------------------
@@ -716,39 +700,20 @@ def build_theory_initial_state(req: StartRequest) -> dict:
     }
 
 
-class _StdoutBridge:
-    """把后台图线程的 print 输出桥接为 SSE 'log' 事件, 同时保留控制台输出。
+# `_StdoutBridge` / 派发器 / 按线程绑定 (含会话级用量与运行身份作用域) 已移到
+# `src/sessions/runtime.py`。这里保留这些名字是为了不破坏既有调试/测试入口
+# (`server._STDOUT_BRIDGES` / `server._StdoutDispatcher`), 实现只有一份。
+from src.sessions import runtime as _session_runtime  # noqa: E402
 
-    子智能体 (文献检索/PDF下载/引用核查等) 的进度 print 原本只进服务端控制台,
-    通过本桥接器逐行转发给前端, 让用户能实时看到子智能体调用过程。
-    """
-
-    def __init__(self, session: Session, orig):
-        self.session = session
-        self.orig = orig
-        self._buf = ""
-
-    def write(self, s: str):
-        try:
-            self.orig.write(s)
-            self.orig.flush()
-        except Exception:
-            pass
-        self._buf += s
-        while "\n" in self._buf:
-            line, self._buf = self._buf.split("\n", 1)
-            line = line.strip()
-            if line:
-                self.session.emit({"type": "log", "text": line})
-
-    def flush(self):
-        try:
-            self.orig.flush()
-        except Exception:
-            pass
-
-    def __getattr__(self, name):
-        return getattr(self.orig, name)
+_StdoutBridge = _session_runtime.StdoutBridge
+_StdoutDispatcher = _session_runtime._StdoutDispatcher
+_STDOUT_BRIDGES = _session_runtime._STDOUT_BRIDGES
+_STDOUT_LOCK = _session_runtime._STDOUT_LOCK
+_RUN_SCOPE_STACKS = _session_runtime._RUN_SCOPE_STACKS
+_RUN_SCOPE_LOCK = _session_runtime._RUN_SCOPE_LOCK
+_install_stdout_dispatcher = _session_runtime._install_stdout_dispatcher
+_bind_stdout_bridge = _session_runtime.bind_stdout_bridge
+_unbind_stdout_bridge = _session_runtime.unbind_stdout_bridge
 
 
 def _run_session(session: Session, initial_state: dict | None = None):
@@ -758,11 +723,9 @@ def _run_session(session: Session, initial_state: dict | None = None):
     上次 checkpoint 继续 (stream(None, config))。若上次停在 interrupt, stream 会
     重新抛出 __interrupt__, 进入下方等待用户响应的分支。
     """
-    import sys
-
     inputs: Any = initial_state
-    orig_stdout = sys.stdout
-    sys.stdout = _StdoutBridge(session, orig_stdout)
+    # M4: 不替换全局 stdout, 只把**本线程**绑定到本会话的日志桥 (见 _StdoutDispatcher)
+    _bind_stdout_bridge(session)
     try:
         while True:
             interrupted = False
@@ -835,10 +798,17 @@ def _run_session(session: Session, initial_state: dict | None = None):
         session.emit({"type": "error", "message": str(e)})
         _persist_session(session)
     finally:
-        sys.stdout = orig_stdout
+        # M4: 只解绑本线程的日志桥, 全局 stdout 保持不变 (不再"恢复"上一个会话的桥)
+        _unbind_stdout_bridge()
 
 
 app = FastAPI(title="AIR智能体研究系统")
+
+# 团队与资料库接口 (合并计划 §9.4 / §13.4): 独立路由模块, 避免 server.py 继续膨胀。
+# 导入放在 app 构造之后是为了保持既有的导入顺序 (该模块会 import ResearchStore)。
+from src.team_api import router as team_router  # noqa: E402
+
+app.include_router(team_router)
 
 
 @app.get("/")
@@ -952,9 +922,12 @@ def start_session(req: StartRequest):
         raise HTTPException(400, "研究主题或自然语言描述至少填写一项")
     thread_id = sanitize_filename((req.topic or req.request).strip()) + "_" + uuid.uuid4().hex[:6]
     session_id = uuid.uuid4().hex
-    mode = (req.mode or "survey").strip().lower()
+    # 统一入口 (合并计划 §3 / M5): 用户**不再选择模式**。没有显式给出 `mode` 时
+    # 由 `_resolve_engine` 按默认引擎启动; `mode` 仅作为遗留兼容字段被接受
+    # (旧客户端/旧会话), 不出现在界面上, 也不作为用户可见的选择。
+    mode = _resolve_engine(req.mode, request=req.request or req.topic)
     checkpointer, conn = _make_checkpointer(session_id)
-    session = Session(
+    session = _make_session(
         thread_id,
         topic=(req.topic or req.request).strip(),
         session_id=session_id,
@@ -1097,8 +1070,14 @@ async def session_events(thread_id: str, last_event_id: int = 0):
 
     async def gen():
         with session.event_lock:
-            replayed = [e for e in session.event_log if e.get("_seq", 0) > last_event_id]
+            replayed, truncated = session.event_stream.replay(last_event_id)
             current_seq = session.event_seq
+        if truncated:
+            # M4: 请求的游标早于日志里最早的记录 —— 那部分已经被裁掉。此时**不能**
+            # 假装补齐: 如实告知客户端"日志截断", 让它重新加载投影 (前端把未知事件
+            # 类型当作 resync 信号, 见 events/session-events.ts)。
+            yield _frame({"type": "event_log_truncated",
+                          "message": replay_gap_note(True)}, current_seq)
         if replayed:
             for event in replayed:
                 seq = event.get("_seq", 0)
@@ -1196,8 +1175,9 @@ def stop_session(thread_id: str):
     session = SESSIONS.get(thread_id)
     if not session:
         raise HTTPException(404, "会话不存在")
-    session.stop_flag.set()
-    session.responses.put(_STOP)  # 若正阻塞在 interrupt, 解除等待
+    # 停止语义封装在会话里 (置停止标志 + 投递停止哨兵解除 interrupt 阻塞)。
+    # 端点不接触私有哨兵, 也就不可能塞错对象。
+    session.request_stop()
     return {"ok": True}
 
 
@@ -1219,14 +1199,20 @@ def resume_session(session_id: str):
 
     checkpointer, conn = _make_checkpointer(session_id)
     stored_request = dict(record.get("request") or {})
-    session = Session(
+    # 续跑用的引擎必须与**启动时**同一条判据: 落盘里有 mode 就用它, 没有 (旧记录)
+    # 就按请求/主题重新解析。只看 mode 会让"落盘早于 mode 字段"的会话续跑时悄悄
+    # 换成另一个引擎 (实测: 一个形式化研究会话被当综述交给团队引擎)。
+    resume_request = str(stored_request.get("request") or "")
+    resume_topic = str(record.get("topic") or stored_request.get("topic") or "")
+    session = _make_session(
         thread_id,
         topic=record.get("topic", ""),
         session_id=session_id,
         checkpointer=checkpointer,
         checkpoint_conn=conn,
         run_id=record.get("run_id", ""),
-        mode=stored_request.get("mode", "survey"),
+        mode=_resolve_engine(str(stored_request.get("mode") or ""),
+                             request=resume_request or resume_topic),
     )
     session.request = stored_request
     session.created_at = record.get("created_at", session.created_at)
@@ -1248,11 +1234,14 @@ def resume_session(session_id: str):
         if req.get("topic") or req.get("request"):
             try:
                 start_req = StartRequest(**req)
+                engine = _resolve_engine(session.mode,
+                                         request=req.get("request") or req.get("topic") or "")
                 initial_state = (build_theory_initial_state(start_req)
-                                 if session.mode == "theory" else build_initial_state(start_req))
+                                 if engine == "theory" else None)
             except Exception:
                 initial_state = None
-        if initial_state is None:
+        if initial_state is None and _resolve_engine(
+                session.mode, request=req.get("request") or req.get("topic") or "") == "theory":
             raise HTTPException(400, "无 checkpoint 且缺少启动参数, 无法恢复")
 
     worker = threading.Thread(target=_run_session, args=(session, initial_state), daemon=True)
@@ -1495,11 +1484,7 @@ def delete_session(session_id: str):
     # 1. 停止并从内存移除活跃会话
     if thread_id and thread_id in SESSIONS:
         sess = SESSIONS.pop(thread_id)
-        sess.stop_flag.set()
-        try:
-            sess.responses.put(_STOP)
-        except Exception:
-            pass
+        sess.request_stop()
         # 先关检查点连接, 否则第 3 步的 unlink 在 Windows 上会因句柄未释放而失败
         sess.shutdown()
     # 2. 删除对话记录
@@ -1530,11 +1515,11 @@ def delete_session(session_id: str):
     # 5. 删除检索缓存 (data/pipeline_cache/{topic}.json)
     if topic:
         try:
-            from src.utils.pipeline_cache import CACHE_DIR, resolve_cache_topic
+            from src.utils.pipeline_cache import cache_dir, resolve_cache_topic
 
             resolved = resolve_cache_topic(topic)
             if resolved:
-                cache_path = CACHE_DIR / f"{sanitize_filename(resolved)}.json"
+                cache_path = cache_dir() / f"{sanitize_filename(resolved)}.json"
                 if cache_path.exists():
                     cache_path.unlink()
                     removed.append(f"data/pipeline_cache/{cache_path.name}")
@@ -1543,11 +1528,12 @@ def delete_session(session_id: str):
     # 6. 共享检索资源 (向量库 / 主题缓存): **只有确认没有其他会话再用**才清。
     #    早期实现在这里直接清空三个全局 collection —— 多项目共用实例时, 删掉会话 A
     #    会把会话 B 的检索资料一起毁掉 (计划书 P0-4: 数据损伤)。
-    #    判定依据: 除本会话外, 是否还有会话引用同一 project_id。
+    #    判定依据: 除本会话外, 是否还有会话引用同一 project_id **或同一主题**
+    #    (collection 是按主题命名的共享实例, 跨项目同主题同样共享)。
     owning_project = str(record.get("project_id", "")
                          or (record.get("request") or {}).get("project_id", "") or "")
     shared_removed, shared_kept = _cleanup_shared_retrieval_resources(
-        session_id, owning_project)
+        session_id, owning_project, topic)
     removed.extend(shared_removed)
     return {"ok": True, "removed": removed, "checkpoint_removed": closed,
             "kept_shared": shared_kept}
@@ -1555,31 +1541,55 @@ def delete_session(session_id: str):
 
 def _has_other_session_using(project_id: str, exclude_session_id: str) -> bool:
     """是否还有**其他**会话引用同一 project_id (共享资料的存活判据)。"""
-    if not project_id:
-        return False
+    return bool(_other_referrers(exclude_session_id, project_id=project_id, topic=""))
+
+
+def _other_referrers(exclude_session_id: str, *, project_id: str = "",
+                     topic: str = "") -> list[str]:
+    """还有哪些会话引用同一项目 / 同一主题 (返回 `session_id: 依据` 可读列表)。
+
+    为什么主题也算依据: Chroma collection 是**按主题**命名的共享实例
+    (`CHROMA_CONFIG`, 与 project_id 无关)。两个不同项目研究同一主题时共用同一批
+    collection —— 早期只按 `project_id` 判定"是否还有别人在用", 于是删掉项目 A 会把
+    项目 B 的同主题检索资料一起清空 (合并计划 §7.4 明确要求跨项目共享库也要保住)。
+    """
+    referrers: list[str] = []
     try:
         for item in list_conversations():
-            if str(item.get("session_id", "")) == exclude_session_id:
+            other = str(item.get("session_id", ""))
+            if not other or other == exclude_session_id:
                 continue
-            if str(item.get("project_id", "")) == project_id:
-                return True
-    except Exception:
+            other_project = str(item.get("project_id", "") or "")
+            other_topic = str(item.get("topic", "") or "")
+            same_project = bool(project_id) and other_project == project_id
+            same_topic = bool(topic) and other_topic == topic
+            if same_project or same_topic:
+                why = "同一项目" if same_project else "同一主题"
+                referrers.append(f"{other} ({why})")
+    except Exception:  # noqa: BLE001
         # 读不到会话清单时按"可能还有别人"处理: 宁可少删, 不可误删共享资料
-        return True
-    return False
+        return [f"(无法读取会话清单, 按仍有引用处理) {project_id or topic}"]
+    return referrers
 
 
-def _cleanup_shared_retrieval_resources(session_id: str, project_id: str):
+def _cleanup_shared_retrieval_resources(session_id: str, project_id: str,
+                                        topic: str = ""):
     """按所有权清理共享检索资源。返回 `(已删列表, 保留列表)`。
 
     只删除**属于该会话且无其他会话引用**的资源; 有共享引用时明确记入"保留", 让调用方
     (与人) 看到"这次没有删掉共享库", 而不是静默清空。
+
+    两条依据 (合并计划 §7.4 / M4):
+    - `project_id`: 同一项目还有别的会话;
+    - `topic`: Chroma collection 按主题命名, 与 project_id 无关 —— 跨项目同主题也共享。
     """
     removed: list[str] = []
     kept: list[str] = []
-    shared = _has_other_session_using(project_id, session_id)
-    if shared:
-        kept.append(f"data/chroma (向量库): 仍有其他会话引用项目 {project_id}, 已保留")
+    referrers = _other_referrers(session_id, project_id=project_id, topic=topic)
+    if referrers:
+        kept.append(
+            "data/chroma (向量库): 仍有其他会话引用同一批资料, 已保留 —— "
+            + "、".join(referrers[:5]))
         return removed, kept
     try:
         from src.config import CHROMA_CONFIG
@@ -1596,29 +1606,6 @@ def _cleanup_shared_retrieval_resources(session_id: str, project_id: str):
     except Exception:
         pass
     return removed, kept
-
-
-def shutdown_sessions() -> int:
-    """关闭所有活跃会话的检查点连接并清空注册表 (进程退出 / 测试清理用)。
-
-    返回仍然关闭失败的会话数。研究结论已落在 SQLite 研究库里, 关连接不会丢结论;
-    未关闭的句柄只会让检查点文件暂时无法删除 —— 这一点必须如实返回, 不能假装成功。
-
-    先给**所有**会话发停止信号, 再逐个等线程退出: 逐个"发信号→等待"会让线程串行
-    收敛, 多会话时白等多个超时。
-    """
-    sessions = [s for s in (SESSIONS.pop(t, None) for t in list(SESSIONS)) if s is not None]
-    for session in sessions:
-        session.stop_flag.set()
-        try:
-            session.responses.put(_STOP)
-        except Exception:  # noqa: BLE001 - 队列已满/已关闭都不影响关闭连接
-            pass
-    failed = 0
-    for session in sessions:
-        if not session.shutdown():
-            failed += 1
-    return failed
 
 
 @app.get("/api/conversations")
@@ -1642,7 +1629,16 @@ def clear_cache():
 
     输出产物 (outputs/) 保留。会话记忆一并清除, 避免记忆指向已删除的缓存。"""
     removed = []
-    for dir_name in ("pipeline_cache", "chroma"):
+    # 检索缓存: 按新接口清空 (兼容扁平旧格式与按 run 分片的新格式), 而不是只 rmtree 目录
+    try:
+        from src.utils.pipeline_cache import clear_all_caches
+
+        purged = clear_all_caches()
+        if purged:
+            removed.append(f"data/pipeline_cache ({len(purged)} 项)")
+    except Exception:  # noqa: BLE001 - 清理失败不掩盖其它清理结果
+        pass
+    for dir_name in ("chroma",):
         p = DATA_DIR / dir_name
         if p.exists():
             shutil.rmtree(p)
@@ -1665,6 +1661,15 @@ def clear_cache():
         try:
             mem.unlink()
             removed.append("data/session_memory.json")
+        except Exception:
+            pass
+    # M4: 会话记忆现在按会话分片 (data/session_memory/<session_id>.json), 一并清除 ——
+    # 否则"清除缓存"后旧的按会话记忆仍会让"继续撰写"沿用已清空的上下文。
+    mem_dir = DATA_DIR / "session_memory"
+    if mem_dir.exists():
+        try:
+            shutil.rmtree(mem_dir)
+            removed.append("data/session_memory")
         except Exception:
             pass
     return {"ok": True, "removed": removed}
@@ -1829,6 +1834,17 @@ def main():
     import uvicorn
 
     ensure_utf8_console()
+
+    # M4 / 用户决策: 旧检索缓存按**主题**存放, 与运行/项目无关 (跨项目同主题会互相
+    # 复用资料)。缓存随时可以重新检索得到, 因此不做迁移 —— 启动时直接清除一次。
+    try:
+        from src.utils.pipeline_cache import clear_all_caches
+
+        purged = clear_all_caches()
+        if purged:
+            print(f"  已清除旧检索缓存 {len(purged)} 项 (按主题的旧格式不再保留)")
+    except Exception as e:  # noqa: BLE001 - 清理失败不得阻止启动
+        print(f"  [warning] 旧检索缓存清理失败: {e}")
 
     no_browser = "--no-browser" in _sys.argv or os.getenv("AIR_NO_BROWSER", "0") == "1"
 

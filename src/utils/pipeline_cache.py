@@ -17,16 +17,67 @@ from src.config import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
+#: 默认缓存目录 (保留常量是为了不破坏既有导入点); 实际读写请走 `cache_dir()`。
 CACHE_DIR = DATA_DIR / "pipeline_cache"
+
+
+def cache_dir() -> Path:
+    """**调用时**解析缓存目录 (部署或测试改了 `DATA_DIR` 必须立即生效)。
+
+    早先各处直接用模块级 `CACHE_DIR`: 一旦 `config.DATA_DIR` 被改 (测试隔离、换
+    部署根), 清理与写入会指向**旧**目录 —— 实测表现为"清除缓存后旧缓存仍在"。
+    """
+    from src import config
+
+    data_dir = getattr(config, "DATA_DIR", None)
+    return (Path(data_dir) / "pipeline_cache") if data_dir is not None else CACHE_DIR
 
 # 判定"缓存可用"的最小已验证参考文献数 (低于此值回退完整检索)
 MIN_VERIFIED_REFS = 20
 
 
+def clear_all_caches() -> list[str]:
+    """清除全部检索缓存, 返回被删除的文件名 (供启动时/显式清理调用)。
+
+    为什么需要它 (合并计划 M4 / 用户决策): 旧缓存把检索结果按**主题**存成
+    `data/pipeline_cache/<topic>.json`, 与运行/项目无关 —— 跨项目同主题会互相复用
+    彼此的资料, 这正是"不许依靠全局最近一次续研"要消除的东西。用户已明确决定
+    **旧缓存直接清除, 不需要保留** (没有迁移价值: 缓存随时可以重新检索得到)。
+
+    读的是**调用时**的 `cache_dir()` (测试会改 `DATA_DIR`, 部署时也可能换根)。
+
+    只在**显式调用**时执行 (服务器启动 / 清理端点), 不在 import 时副作用删除,
+    否则跑一次测试就会删掉用户的数据。
+    """
+    directory = cache_dir()
+    removed: list[str] = []
+    if not directory.exists():
+        return removed
+    for path in sorted(directory.glob("*.json")):
+        try:
+            path.unlink()
+            removed.append(path.name)
+        except OSError as e:  # noqa: PERF203 - 逐条如实报告, 失败不静默
+            logger.warning(f"检索缓存删除失败 ({path.name}): {e}")
+    # 子目录形式的新分片缓存 (按 run/项目) 一并清掉: 清理语义是"清空缓存"
+    for child in sorted(directory.glob("*/")):
+        for path in sorted(child.glob("*.json")):
+            try:
+                path.unlink()
+                removed.append(f"{child.name}/{path.name}")
+            except OSError as e:
+                logger.warning(f"检索缓存删除失败 ({path}): {e}")
+        try:
+            child.rmdir()
+        except OSError:
+            pass
+    return removed
+
+
 def _cache_path(topic: str) -> Path:
     from src.utils.file_utils import sanitize_filename
 
-    return CACHE_DIR / f"{sanitize_filename(topic)}.json"
+    return cache_dir() / f"{sanitize_filename(topic)}.json"
 
 
 def resolve_cache_topic(topic: str) -> str | None:
@@ -38,7 +89,7 @@ def resolve_cache_topic(topic: str) -> str | None:
     """
     if _cache_path(topic).exists():
         return topic
-    if not CACHE_DIR.exists():
+    if not cache_dir().exists():
         return None
     try:
         from difflib import SequenceMatcher
@@ -46,7 +97,7 @@ def resolve_cache_topic(topic: str) -> str | None:
         return None
 
     best_name, best_score = None, 0.0
-    for f in CACHE_DIR.glob("*.json"):
+    for f in cache_dir().glob("*.json"):
         try:
             payload = json.loads(f.read_text(encoding="utf-8"))
         except Exception:
@@ -67,9 +118,9 @@ def resolve_cache_topic(topic: str) -> str | None:
 
 def latest_cache_topic() -> str | None:
     """返回最近修改的缓存主题 (用于"已有数据/报告"但未指明主题时的兜底)。"""
-    if not CACHE_DIR.exists():
+    if not cache_dir().exists():
         return None
-    files = [f for f in CACHE_DIR.glob("*.json") if f.is_file()]
+    files = [f for f in cache_dir().glob("*.json") if f.is_file()]
     if not files:
         return None
     latest = max(files, key=lambda f: f.stat().st_mtime)
@@ -93,7 +144,7 @@ def save_retrieval_cache(
     stages: list | None = None,
 ) -> str:
     """把检索产物写入 data/pipeline_cache/{topic}.json, 供 --skip-retrieval 复用"""
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_dir().mkdir(parents=True, exist_ok=True)
     payload = {
         "topic": topic,
         "keywords": list(keywords or []),
@@ -118,10 +169,10 @@ def list_contexts() -> list[dict]:
 
     每个缓存文件对应一个研究上下文; 返回按 saved_at 倒序的列表。
     """
-    if not CACHE_DIR.exists():
+    if not cache_dir().exists():
         return []
     contexts = []
-    for f in CACHE_DIR.glob("*.json"):
+    for f in cache_dir().glob("*.json"):
         try:
             payload = json.loads(f.read_text(encoding="utf-8"))
         except Exception:
@@ -147,7 +198,7 @@ def update_retrieval_cache(topic: str, **fields) -> str:
     - 模块2(分析) 追加 literature_review_notes / paper_outline
     传 None 表示不更新该字段。
     """
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_dir().mkdir(parents=True, exist_ok=True)
     path = _cache_path(topic)
     payload: dict = {"topic": topic}
     if path.exists():

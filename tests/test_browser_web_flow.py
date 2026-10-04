@@ -23,6 +23,8 @@ SCRIPT = WEB_DIR / "tests" / "e2e" / "web_flow.mjs"
 FULL_SCRIPT = WEB_DIR / "tests" / "e2e" / "web_flow_full.mjs"
 DRAFT_SCRIPT = WEB_DIR / "tests" / "e2e" / "draft_identity.mjs"
 UPLOAD_SCRIPT = WEB_DIR / "tests" / "e2e" / "web_upload.mjs"
+TEAM_SCRIPT = WEB_DIR / "tests" / "e2e" / "team_board.mjs"
+LIBRARY_SCRIPT = WEB_DIR / "tests" / "e2e" / "library_paths.mjs"
 
 
 def _node() -> str | None:
@@ -291,9 +293,17 @@ def test_favicon_routes_are_served():
 def test_browser_script_has_no_executed_assertions():
     """静态契约: 浏览器脚本必须真的检查关键界面对象 (防止退化成空跑)。"""
     source = SCRIPT.read_text(encoding="utf-8")
-    for needle in ("window.AIR", "#workbench", "#runmode", "#btn-send", "#wbfeedback",
+    for needle in ("window.AIR", "#workbench", "#projid", "#btn-send", "#wbfeedback",
                    "setViewportSize", "pageerror"):
         assert needle in source, needle
+    # 统一入口: 前端不再有模式选择器, 浏览器脚本也不得再依赖它
+    for path in WEB_DIR.joinpath("tests", "e2e").glob("*.mjs"):
+        text = path.read_text(encoding="utf-8")
+        # `team_board.mjs` 是无权修改的用例 (由上层统一迁移), 这里只对**本轮已迁移**
+        # 的脚本断言"没有模式选择器残留"。
+        if path.name == "team_board.mjs":
+            continue
+        assert "#runmode" not in text, f"{path.name} 仍在操作已删除的模式选择器"
     full = FULL_SCRIPT.read_text(encoding="utf-8")
     for needle in ("#sourceset", "#sourceinfo", '[data-tab="files"]', "manifest",
                    "page.route", "stateCalls"):
@@ -305,6 +315,119 @@ def test_browser_script_has_no_executed_assertions():
         assert needle in draft, needle
     upload = UPLOAD_SCRIPT.read_text(encoding="utf-8")
     for needle in ("setInputFiles", "#attachrow", "#attachkind", "#btn-upload",
-                   "attachment_ids", "POST"):
+                   "attachment_ids", "POST", "'mode' in p"):
         assert needle in upload, needle
+    library = LIBRARY_SCRIPT.read_text(encoding="utf-8")
+    # §13 的浏览器用例必须真的检查"预览先于导入""拒绝项可见""不复制原文件",
+    # 不能退化成"点一下按钮就算过"; 且入口可见性改为"始终可见"
+    for needle in ("#pathrow", "#libpaths", "#btn-lib-scan", "#btn-lib-import",
+                   "/api/library/scan", "/api/library/import", "#libpreview",
+                   "#libworkspace", "statSync", "deleteLibrary",
+                   "始终可见"):
+        assert needle in library, needle
+    team = TEAM_SCRIPT.read_text(encoding="utf-8")
+    # 团队工作台用例必须真的检查"数据来自后端"与"阻碍原因可见", 不能退化成只看标题
+    for needle in ("/api/team/roles", "/api/team/", "#team-section",
+                   "团队角色与真实能力来自后端", "受阻/失败原因",
+                   "setViewportSize", "pageerror"):
+        assert needle in team, needle
     assert json  # 保持导入有用性检查
+
+
+@pytest.mark.skipif(_node() is None, reason="需要 node 运行浏览器脚本")
+@pytest.mark.skipif(not _playwright_ready(), reason="需要 playwright 与已下载的浏览器")
+@pytest.mark.skipif(not (WEB_DIR / "dist" / "index.html").is_file(),
+                    reason="需要先构建前端 (cd src/web && npm run build)")
+def test_team_board_in_real_browser(tmp_path, monkeypatch):
+    """团队工作台的真实浏览器验收 (合并计划 §9.8)。
+
+    关键点: 界面上的团队信息必须**来自后端接口** —— 脚本会统计真实请求, 并检查
+    受阻原因与连接状态确实渲染出来 (而不是只渲染了标题)。
+    """
+    import uvicorn
+
+    from src import config
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path / "out")
+    monkeypatch.delenv("AIR_WEB_DEV", raising=False)
+
+    from src import server
+
+    port = _free_port()
+    uv_config = uvicorn.Config(server.app, host="127.0.0.1", port=port,
+                              log_level="warning")
+    uv_server = uvicorn.Server(uv_config)
+    thread = threading.Thread(target=uv_server.run, daemon=True)
+    thread.start()
+    deadline = time.time() + 30
+    while not uv_server.started and time.time() < deadline:
+        time.sleep(0.1)
+    assert uv_server.started, "uvicorn 未能在 30s 内启动"
+
+    try:
+        result = subprocess.run(
+            [_node(), str(TEAM_SCRIPT), f"http://127.0.0.1:{port}"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=str(WEB_DIR), check=False, timeout=300)
+        output = (result.stdout or "") + (result.stderr or "")
+        assert result.returncode == 0, output
+        assert "团队工作台浏览器验收通过" in output, output
+    finally:
+        uv_server.should_exit = True
+        thread.join(timeout=15)
+        server.shutdown_sessions()
+
+
+@pytest.mark.skipif(_node() is None, reason="需要 node 运行浏览器脚本")
+@pytest.mark.skipif(not _playwright_ready(), reason="需要 playwright 与已下载的浏览器")
+@pytest.mark.skipif(not (WEB_DIR / "dist" / "index.html").is_file(),
+                    reason="需要先构建前端 (cd src/web && npm run build)")
+def test_library_path_import_in_real_browser(tmp_path, monkeypatch):
+    """按本机路径构建文献库的真实浏览器验收 (合并计划 §13.4 / §13.5)。
+
+    关键点: 扫描只预览不导入、拒绝项单独可见、导入**不复制**用户原文件、
+    解除登记不动原文件 —— 这四条都是脚本里可核对的行为, 不靠人工观察。
+    """
+    import uvicorn
+
+    from src import config
+
+    readable = tmp_path / "papers"
+    readable.mkdir()
+    (readable / "brc1949.md").write_text(
+        "# Bruck-Ryser-Chowla\n\nTheorem 1. A 2-(211,15,1) design does not exist.\n",
+        encoding="utf-8")
+    # 敏感文件: 即使位于授权根内也必须被拒绝
+    (readable / ".env").write_text("SECRET=1\n", encoding="utf-8")
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path / "out")
+    monkeypatch.setenv("DATA_READ_ROOTS", str(readable))
+    monkeypatch.delenv("AIR_WEB_DEV", raising=False)
+
+    from src import server
+
+    port = _free_port()
+    uv_config = uvicorn.Config(server.app, host="127.0.0.1", port=port,
+                               log_level="warning")
+    uv_server = uvicorn.Server(uv_config)
+    thread = threading.Thread(target=uv_server.run, daemon=True)
+    thread.start()
+    deadline = time.time() + 30
+    while not uv_server.started and time.time() < deadline:
+        time.sleep(0.1)
+    assert uv_server.started, "uvicorn 未能在 30s 内启动"
+
+    try:
+        result = subprocess.run(
+            [_node(), str(LIBRARY_SCRIPT), f"http://127.0.0.1:{port}", str(readable)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=str(WEB_DIR), check=False, timeout=300)
+        output = (result.stdout or "") + (result.stderr or "")
+        assert result.returncode == 0, output
+        assert "本机路径资料接入浏览器验收通过" in output, output
+    finally:
+        uv_server.should_exit = True
+        thread.join(timeout=15)
+        server.shutdown_sessions()

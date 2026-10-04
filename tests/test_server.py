@@ -81,10 +81,10 @@ def test_final_summary():
 
 def test_session_interrupt_resume_roundtrip():
     """会话在 interrupt 暂停 → respond 续跑 → done"""
-    orig = server.build_pipeline
-    server.build_pipeline = _mock_graph
+    orig = server.build_theory_pipeline
+    server.build_theory_pipeline = _mock_graph
     try:
-        session = Session("t-test")
+        session = Session("t-test", mode="theory")
         t = threading.Thread(target=_run_session, args=(session, {"interactive": True}))
         t.start()
 
@@ -111,15 +111,15 @@ def test_session_interrupt_resume_roundtrip():
         t.join(timeout=10)
         assert not t.is_alive()
     finally:
-        server.build_pipeline = orig
+        server.build_theory_pipeline = orig
 
 
 def test_session_stop_unblocks_interrupt():
     """stop 解除 interrupt 阻塞并发出 stopped 事件"""
-    orig = server.build_pipeline
-    server.build_pipeline = _mock_graph
+    orig = server.build_theory_pipeline
+    server.build_theory_pipeline = _mock_graph
     try:
-        session = Session("t-stop")
+        session = Session("t-stop", mode="theory")
         t = threading.Thread(target=_run_session, args=(session, {"interactive": True}))
         t.start()
 
@@ -141,7 +141,7 @@ def test_session_stop_unblocks_interrupt():
         t.join(timeout=10)
         assert not t.is_alive()
     finally:
-        server.build_pipeline = orig
+        server.build_theory_pipeline = orig
 
 
 def test_session_streams_stdout_as_log_events():
@@ -160,10 +160,10 @@ def test_session_streams_stdout_as_log_events():
         g.add_edge("node", END)
         return g.compile(checkpointer=checkpointer)
 
-    orig = server.build_pipeline
-    server.build_pipeline = _mock_graph
+    orig = server.build_theory_pipeline
+    server.build_theory_pipeline = _mock_graph
     try:
-        session = server.Session("t-log")
+        session = server.Session("t-log", mode="theory")
         t = threading.Thread(target=server._run_session, args=(session, {"interactive": False}))
         t.start()
         log_lines = []
@@ -176,7 +176,7 @@ def test_session_streams_stdout_as_log_events():
         t.join(timeout=5)
         assert any("子智能体进度" in l for l in log_lines)
     finally:
-        server.build_pipeline = orig
+        server.build_theory_pipeline = orig
 
 
 def test_http_validation_and_static():
@@ -238,10 +238,10 @@ def test_run_session_persists_conversation():
     tmp = Path(tempfile.mkdtemp())
     orig_dir = store.CONVERSATIONS_DIR
     store.CONVERSATIONS_DIR = tmp
-    orig_bp = server.build_pipeline
-    server.build_pipeline = _mock_graph
+    orig_bp = server.build_theory_pipeline
+    server.build_theory_pipeline = _mock_graph
     try:
-        session = Session("t-persist", topic="持久化测试")
+        session = Session("t-persist", topic="持久化测试", mode="theory")
         server.SESSIONS[session.thread_id] = session
         t = threading.Thread(target=_run_session, args=(session, {"interactive": True}))
         t.start()
@@ -273,7 +273,7 @@ def test_run_session_persists_conversation():
         assert "user" in roles
         assert "interrupt" in roles
     finally:
-        server.build_pipeline = orig_bp
+        server.build_theory_pipeline = orig_bp
         server.SESSIONS.pop("t-persist", None)
         store.CONVERSATIONS_DIR = orig_dir
 
@@ -285,9 +285,15 @@ def test_clear_cache_endpoint():
 
     from fastapi.testclient import TestClient
 
+    from src import config
+
     orig_data_dir = server.DATA_DIR
+    orig_config_data = config.DATA_DIR
     tmp = Path(tempfile.mkdtemp())
     server.DATA_DIR = tmp
+    # 检索缓存按**调用时**的 config.DATA_DIR 解析 (部署/测试换根必须立即生效),
+    # 因此隔离要同时改 config; 只改 server.DATA_DIR 会让缓存写到真实数据目录。
+    config.DATA_DIR = tmp
     try:
         (tmp / "pipeline_cache").mkdir(parents=True)
         (tmp / "pipeline_cache" / "x.json").write_text("{}", encoding="utf-8")
@@ -300,11 +306,15 @@ def test_clear_cache_endpoint():
         assert r.status_code == 200
         data = r.json()
         assert data["ok"] is True
-        assert not (tmp / "pipeline_cache").exists()
+        # 判据从"目录被删掉"改成"缓存确实空了": 目录本身可以留着 (按 run 分片的
+        # 新格式下目录会持续存在), 但不得再有任何缓存条目。
+        assert not list((tmp / "pipeline_cache").glob("**/*.json")), \
+            "清除缓存后不得残留任何检索缓存条目"
         assert not (tmp / "chroma").exists()
         assert not (tmp / "pipeline_checkpoints.sqlite").exists()
     finally:
         server.DATA_DIR = orig_data_dir
+        config.DATA_DIR = orig_config_data
 
 
 def test_resume_from_interrupt_after_restart():
@@ -321,12 +331,12 @@ def test_resume_from_interrupt_after_restart():
     store.CONVERSATIONS_DIR = tmp
     orig_ckpt_dir = server.CHECKPOINT_DIR
     server.CHECKPOINT_DIR = tmp / "checkpoints"
-    orig_bp = server.build_pipeline
-    server.build_pipeline = _mock_graph
+    orig_bp = server.build_theory_pipeline
+    server.build_theory_pipeline = _mock_graph
     try:
         session_id = "resume-1"
         checkpointer, conn = server._make_checkpointer(session_id)
-        session = Session("t-resume", topic="测试", session_id=session_id,
+        session = Session("t-resume", topic="测试", session_id=session_id, mode="theory",
                           checkpointer=checkpointer, checkpoint_conn=conn)
         session.request = {"topic": "测试", "request": "", "keywords": [],
                            "subtopics": [], "time_range": "2019-2026",
@@ -360,7 +370,7 @@ def test_resume_from_interrupt_after_restart():
                 break
         assert resumed.status == "done"
     finally:
-        server.build_pipeline = orig_bp
+        server.build_theory_pipeline = orig_bp
         server.CHECKPOINT_DIR = orig_ckpt_dir
         server.SESSIONS.clear()
         store.CONVERSATIONS_DIR = orig_dir
@@ -485,6 +495,50 @@ def test_delete_session_missing_returns_404():
 
     client = TestClient(server.app)
     assert client.delete("/api/sessions/nope").status_code == 404
+
+
+def test_delete_session_keeps_shared_vector_store_across_projects(monkeypatch):
+    """跨项目同主题也必须保住共享向量库 (合并计划 §7.4 / M4)。
+
+    Chroma collection 按**主题**命名, 与 project_id 无关。早期只按 project_id 判定
+    "还有没有别人在用", 于是两个不同项目研究同一主题时, 删掉其中一个会把另一个的
+    检索资料一起清空 —— 这是跨项目的数据损伤, 比同项目那一条更隐蔽。
+    """
+    import tempfile
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    import src.utils.conversation_store as store
+
+    tmp = Path(tempfile.mkdtemp())
+    orig_dir = store.CONVERSATIONS_DIR
+    store.CONVERSATIONS_DIR = tmp / "conversations"
+
+    cleared: list[str] = []
+    monkeypatch.setattr("src.rag.vector_store.clear_collection",
+                        lambda name: cleared.append(name))
+    try:
+        store.save_conversation("sess-x", {
+            "session_id": "sess-x", "thread_id": "t-x", "topic": "同一主题",
+            "status": "done", "messages": [], "request": {"project_id": "proj-x"},
+        })
+        store.save_conversation("sess-y", {
+            "session_id": "sess-y", "thread_id": "t-y", "topic": "同一主题",
+            "status": "done", "messages": [], "request": {"project_id": "proj-y"},
+        })
+        client = TestClient(server.app)
+        removed = client.delete("/api/sessions/sess-x").json()
+        assert cleared == [], "另一个项目仍在用同一主题的 collection, 不得清空"
+        message = " ".join(removed["kept_shared"])
+        assert "保留" in message, message
+        assert "同一主题" in message, message
+        # 反向保护: 最后一个引用者离开时仍要正常清理 (不能一律不删)
+        removed_y = client.delete("/api/sessions/sess-y").json()
+        assert cleared, "没有其他引用者时应正常清理"
+        assert not removed_y["kept_shared"]
+    finally:
+        store.CONVERSATIONS_DIR = orig_dir
 
 
 if __name__ == "__main__":

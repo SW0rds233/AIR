@@ -38,6 +38,33 @@ def test_source_template_has_no_remote_script_and_no_marked():
     assert 'type="module"' in html and "/src/main.ts" in html
 
 
+def _frontend_ts_sources() -> dict[str, str]:
+    """`src/web/src` 下的全部前端源码 (文件名 -> 内容)。
+
+    合并计划 §9.5 把 `app.ts` 拆成了 session/intake controller 与多组 `views/*`:
+    "某个绑定写在哪个文件"不再是契约, "整个前端源码里存在该绑定"才是。
+    """
+    return {str(p.relative_to(WEB_DIR / "src")): p.read_text(encoding="utf-8")
+            for p in sorted((WEB_DIR / "src").rglob("*.ts"))}
+
+
+def _frontend_code_only() -> str:
+    """前端源码去掉注释行后的正文。
+
+    为什么要单独一份: 说明"为什么删掉模式分支"的**注释里**会出现 `runMode` 之类的
+    旧名字, 那是解释而不是实现。判据必须落在代码上, 否则测试会逼着作者删掉解释。
+    """
+    lines: list[str] = []
+    for name, source in _frontend_ts_sources().items():
+        if name == "markdown.ts":      # 安全渲染器有自己的 DOM API 判据
+            continue
+        for line in source.splitlines():
+            if line.strip().startswith(("*", "/*", "//")):
+                continue
+            lines.append(line)
+    return "\n".join(lines)
+
+
 def test_source_template_has_no_inline_event_handlers():
     """P2 实测缺陷回归: 严格 CSP 会直接拦掉内联事件处理器。
 
@@ -45,6 +72,9 @@ def test_source_template_has_no_inline_event_handlers():
     Security Policy directive 'script-src 'self''" —— 页面能加载、`window.AIR` 也在,
     但所有按钮与模式切换全部失效。因此模板不得再用 `on*=` 属性, 事件必须在打包
     模块里用 addEventListener 绑定。
+
+    统一入口 (本轮迁移): 模板里**不再有**模式选择器 (`#runmode`) 与其绑定,
+    因此这里断言存在的是统一入口的绑定, 并反向断言模式实现已彻底消失。
     """
     import re
 
@@ -53,15 +83,37 @@ def test_source_template_has_no_inline_event_handlers():
     html = server.INDEX_HTML.read_text(encoding="utf-8-sig")
     found = re.search(r"\son(?:click|change|keydown|input|submit|focus|blur)=", html)
     assert found is None, f"模板仍有内联事件处理器: {html[found.start():found.start() + 60]!r}"
-    app = (WEB_DIR / "src" / "app.ts").read_text(encoding="utf-8")
-    for binding in ("on('btn-send', 'click', onSend)", "on('runmode', 'change', onModeChange)",
-                    "'data-tab'"):
-        assert binding in app, binding
+    sources = _frontend_ts_sources()
+    assert sources, "找不到前端源码"
+    joined = "\n".join(sources.values())
+    for binding in ("on('btn-send', 'click'", "'data-tab'", "onSend"):
+        assert binding in joined, binding
+    # 统一入口: 模式选择器与其分支必须消失 (不是"隐藏", 是不存在)
+    for gone in ("#runmode", "runmode", "onModeChange", "setRunMode", "runMode(",
+                 "surveyrow", "theoryrow"):
+        assert gone not in html, f"模板仍残留模式实现: {gone}"
+    # 判据只看**代码正文** (注释里解释"为什么删掉模式分支"是允许的)
+    for gone in ("runmode", "onModeChange", "setRunMode", "runMode("):
+        assert gone not in _frontend_code_only(), f"前端代码仍残留模式实现: {gone}"
+    # 相关的行 id 也不得留下旧分组名 (它们不再按模式分组)
+    assert 'id="projectrow"' in html and 'id="topicrow"' in html, html[:200]
+    # 资料与附件入口 "始终可见": 模板里不得再用 display:none 把它们藏起来
+    for row in ('id="attachrow"', 'id="pathrow"'):
+        match = re.search(re.escape(row) + r'[^>]*', html)
+        assert match is not None, row
+        assert "display:none" not in match.group(0).replace(" ", ""), \
+            f"{row} 不得再按模式隐藏: {match.group(0)!r}"
     # 动态生成的 HTML 同样不得带内联处理器 (工作台按钮改用 data-action 委托)
-    code = "\n".join(line for line in app.splitlines()
-                     if not line.strip().startswith(("*", "/*", "//")))
+    code = "\n".join(
+        line
+        for name, source in sources.items()
+        for line in source.splitlines()
+        # 安全渲染器允许在注释里说明为什么不拼 innerHTML, 因此跳过注释行;
+        # `markdown.ts` 的 DOM API 约束由 test_markdown_module_uses_dom_api_only 单独把守。
+        if name != "markdown.ts" and not line.strip().startswith(("*", "/*", "//"))
+    )
     generated = re.search(r"onclick=\\?[\"']", code)
-    assert generated is None, f"app.ts 仍在生成内联处理器: {code[max(0, generated.start() - 40):generated.start() + 40]!r}"
+    assert generated is None, f"前端仍在生成内联处理器: {code[max(0, generated.start() - 40):generated.start() + 40]!r}"
     assert "data-action=" in code and "bindDelegatedActions" in code
 
 
@@ -73,7 +125,8 @@ def test_page_logic_moved_out_of_inline_script():
     assert "<script>" not in html, "不得再有内联脚本"
     assert (WEB_DIR / "src" / "app.ts").is_file()
     assert (WEB_DIR / "src" / "main.ts").is_file()
-    assert (WEB_DIR / "src" / "research-api.ts").is_file()
+    # 取数入口已收敛到 api/ 层 (原 research-api.ts 被它取代并删除)
+    assert (WEB_DIR / "src" / "api" / "research-client.ts").is_file()
     assert (WEB_DIR / "src" / "current-research.ts").is_file()
 
 

@@ -299,3 +299,26 @@ def test_no_unknown_backslash_commands_leak_into_the_tex():
                       if name not in KNOWN_COMMANDS})
     assert not unknown, f"出现未知 LaTeX 命令 (疑似符号替换出错): {unknown}"
     assert render_publication_latex(manuscript, None)[0]
+
+
+def test_graphicspath_declared_so_run_scoped_figures_are_found(tmp_path, monkeypatch):
+    """图表按 run 分目录后, `\\includegraphics` 的相对路径不再够用 (M4)。
+
+    相对路径是相对**编译器工作目录**解析的: 交付包在 `outputs/<run>/` 下编译时,
+    `figures/<run>/x.png` 相对该目录并不存在 —— 表现为"编译成功但图没排进去"。
+    因此导言区必须同时声明相对 `figures/` 与产物根下的绝对 figures 目录。
+    """
+    from src import config
+    from src.rag.latex_render import render_latex
+
+    monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path / "outputs")
+    figure = tmp_path / "outputs" / "figures" / "run-A" / "taxonomy_0.png"
+    figure.parent.mkdir(parents=True)
+    figure.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    tex = render_latex("# 标题\n\n[图1: 分类体系]\n\n正文", "主题", [],
+                       [str(figure)])
+    assert r"\graphicspath" in tex, "导言区必须声明 \\graphicspath"
+    assert "figures/run-A/taxonomy_0.png" in tex, tex[-500:]
+    absolute = (tmp_path / "outputs" / "figures").resolve().as_posix()
+    assert absolute in tex, "绝对 figures 目录也要可解析"

@@ -31,6 +31,9 @@ from src.research.schemas import (
     RetrievalCoverage,
 )
 
+# P0-3 / §7.3: 文稿结构与领域措辞由**任务画像**决定, 不再写死领域模板。
+from src.research.task_profile import TaskProfile, profile_for_deliverables
+
 # 作者/单位占位: 必须带"待作者补充"标注, 否则出版门槛会判为未标注占位符
 AUTHOR_PLACEHOLDER = "作者姓名（待作者补充）"
 AFFILIATION_PLACEHOLDER = "作者单位（待作者补充，含城市与邮编）"
@@ -82,7 +85,8 @@ def build_publication_paper(snapshot: ResearchSnapshot, topic: str = "",
                             coverage: RetrievalCoverage | None = None,
                             delivery_level: str = "",
                             spec: ResearchSpec | None = None,
-                            related_evidence: list | None = None
+                            related_evidence: list | None = None,
+                            profile: TaskProfile | None = None
                             ) -> tuple[Manuscript, list[str]]:
     """冻结快照 + 研究规格 + 文献表 → 期刊式论文稿件。
 
@@ -96,12 +100,20 @@ def build_publication_paper(snapshot: ResearchSnapshot, topic: str = "",
     为什么需要 `related_evidence`: 出版层检索到的证据**不在冻结快照里**, 而第 4 节
     要逐条给出关系判定。不传它就会出现"参考文献表有 N 条、第 4 节却写'未发现可比较的
     工作'"的自相矛盾 (实测)。
+
+    为什么需要 `profile` (合并计划 §7.3 / P0-3): 文稿的章节骨架与领域措辞必须由**任务
+    画像**决定。不传时按快照里是否真的有设计参数降级推断 (兼容旧调用点), 但那时
+    "章节骨架"退回默认的问题报告骨架, 不会硬套期刊六章。
     """
     references = references or refmod.ReferenceList()
     if coverage is None:
         coverage = getattr(spec, "coverage", None) or RetrievalCoverage()
     missing_citations: list[str] = []
     question = _problem_text(spec, topic)
+    if profile is None:
+        profile = profile_for_deliverables(
+            _deliverables_from_spec(spec),
+            has_design_parameters=bool(_design_params(snapshot)))
 
     supported = [c for c in snapshot.claims if c.status == ClaimStatus.supported]
     refuted = [c for c in snapshot.claims if c.status == ClaimStatus.refuted]
@@ -124,8 +136,8 @@ def build_publication_paper(snapshot: ResearchSnapshot, topic: str = "",
 
     # ---- 中文摘要 / 关键词 / 分类号 ----
     add(Block("abstract", _abstract(question, supported, refuted, unresolved,
-                                    open_obligations)))
-    add(Block("keywords", _keywords(snapshot, supported)))
+                                    open_obligations, profile)))
+    add(Block("keywords", _keywords(snapshot, supported, profile)))
     add(Block("prose", CLC_PLACEHOLDER))
 
     # ---- 英文题名与摘要 ----
@@ -137,13 +149,23 @@ def build_publication_paper(snapshot: ResearchSnapshot, topic: str = "",
 
     # ---- 1 引言 ----
     add(Block("heading", "1 引言"))
-    add(Block("prose", _introduction(question, references, coverage, snapshot)))
+    add(Block("prose", _introduction(question, references, coverage, snapshot,
+                                     profile)))
 
     # ---- 2 问题与形式化 ----
     add(Block("heading", "2 问题与形式化"))
-    add(Block("prose", "本节把问题形式化为参数 $v$、$k$、$\\lambda$ 的 2-设计存在性判定："
-                       "把题面给出的每条计数约束写成对 $(v,k,\\lambda)$ 的代数条件，"
-                       "再逐条核验经典必要条件。完整的题面陈述与研究对象见第 1 节。"))
+    # P0-3: 第 2 节也必须按画像写。抽取前这里**无条件**说"把问题形式化为参数 v、k、λ
+    # 的 2-设计存在性判定" —— 与整篇稿件同样的领域硬编码, 只是藏在第二节。
+    if profile.allows_design_vocabulary():
+        add(Block("prose", "本节把问题形式化为参数 $v$、$k$、$\\lambda$ 的 2-设计存在性判定："
+                           "把题面给出的每条计数约束写成对 $(v,k,\\lambda)$ 的代数条件，"
+                           "再逐条核验经典必要条件。完整的题面陈述与研究对象见第 1 节。"))
+    elif not profile.allows_formal_vocabulary():
+        add(Block("prose", "本节明确研究对象、依据来源与适用条件：每条结论都附可定位的"
+                           "依据或明确的未决说明。完整的题面陈述见第 1 节。"))
+    else:
+        add(Block("prose", "本节把题面给出的对象、量词与约束写成可核验的形式，"
+                           "并声明结论成立的适用条件。完整的题面陈述见第 1 节。"))
     for item in snapshot.definitions:
         text = getattr(item, "statement", "") or getattr(item, "natural_language", "")
         add(Block("prose", f"- 定义 {getattr(item, 'id', '')}：{text}"))
@@ -223,9 +245,20 @@ def build_publication_paper(snapshot: ResearchSnapshot, topic: str = "",
 
     # ---- 附录 ----
     add(Block("heading", "附录 A 验证记录与判定链"))
-    add(Block("prose",
-              "本附录给出完整的判定对象、逐条必要条件核验与证书指纹。"
-              "附录内容由冻结快照原样导出，**不得改写**；第 3 节的结论以本附录为准。"))
+    # P0-3: 附录前言同样按画像写。抽取前它**无条件**说"逐条必要条件核验与证书指纹",
+    # 对非设计类研究是错的领域描述。
+    if profile.allows_design_vocabulary():
+        add(Block("prose",
+                  "本附录给出完整的判定对象、逐条必要条件核验与证书指纹。"
+                  "附录内容由冻结快照原样导出，**不得改写**；第 3 节的结论以本附录为准。"))
+    elif not profile.allows_formal_vocabulary():
+        add(Block("prose",
+                  "本附录给出每条结论所依据的来源定位与完整的验证记录。"
+                  "附录内容由冻结快照原样导出，**不得改写**；正文的结论以本附录为准。"))
+    else:
+        add(Block("prose",
+                  "本附录给出完整的判定对象、逐条条件核验与证书指纹。"
+                  "附录内容由冻结快照原样导出，**不得改写**；正文的结论以本附录为准。"))
     for record in snapshot.verifications:
         if record.stale:
             continue
@@ -259,15 +292,28 @@ def _verdict_cn(verdict: str) -> str:
 
 def _abstract(question: str, supported: list[Claim],
               refuted: list[Claim], unresolved: list[Claim],
-              open_obligations: list) -> str:
-    """中文摘要：问题 → 方法 → 结论 → 边界。只组装, 不新造论断。"""
+              open_obligations: list, profile: TaskProfile | None = None) -> str:
+    """中文摘要：问题 → 方法 → 结论 → 边界。只组装, 不新造论断。
+
+    P0-3 现场缺陷 (抽取前): 方法句**无条件**写"把问题形式化为可机检的计数/组合结构，
+    逐条核验经典必要条件", 结尾**无条件**写"本文结论为纯数学判定，不含实验或仿真数据"。
+    对机理/案例/数据类研究这两句都是假陈述 —— 现在由任务画像决定措辞, 且只在确实
+    纯形式化时才写最后那句。
+    """
     parts: list[str] = []
     head = _first_sentence(question, 160)
     if head:
         parts.append(f"本文研究的问题：{head}。")
-    parts.append("方法：把问题形式化为可机检的计数/组合结构，逐条核验经典必要条件"
-                 "（计数恒等式、整除条件与具名定理的适用前提）；所有判定均由受限工具"
-                 "重算并由规则层验收，判定链与证书随文给出。")
+    if profile is not None and profile.allows_design_vocabulary():
+        parts.append("方法：把问题形式化为可机检的计数/组合结构，逐条核验经典必要条件"
+                     "（计数恒等式、整除条件与具名定理的适用前提）；所有判定均由受限工具"
+                     "重算并由规则层验收，判定链与证书随文给出。")
+    elif profile is not None and not profile.allows_formal_vocabulary():
+        parts.append("方法：先明确研究对象、依据来源与适用条件，再逐条给出可定位的依据；"
+                     "结论强度与未决部分如实标注，不以叙述代替依据。")
+    else:
+        parts.append("方法：先形式化研究对象、量词与约束，再逐条核验所依据的条件；"
+                     "所有判定均由受限工具重算并由规则层验收，判定链与证书随文给出。")
     if supported:
         parts.append("主要结论：" + "；".join(
             _claim_statement(c)[:120] for c in supported[:2]) + "。")
@@ -279,28 +325,48 @@ def _abstract(question: str, supported: list[Claim],
     if open_obligations:
         parts.append(f"仍有 {len(open_obligations)} 项义务未关闭，"
                      "相应表述在正文中标为条件性结论。")
-    parts.append("本文结论为纯数学判定，不含实验或仿真数据。")
+    # 只在**纯形式化**研究里才允许说"不含实验或仿真数据"; 否则这句话是假的
+    if profile is None or profile.is_purely_formal():
+        parts.append("本文结论为纯数学判定，不含实验或仿真数据。")
+    elif profile.has_empirical_scope:
+        parts.append("涉及经验/数据部分的结论仅为**方案与依据整理**，"
+                     "未执行的实验或仿真不构成证据。")
     return "".join(parts)
 
 
-def _keywords(snapshot: ResearchSnapshot, supported: list[Claim]) -> str:
-    """关键词: 只用可出版的概念词。
+def _keywords(snapshot: ResearchSnapshot, supported: list[Claim],
+              profile: TaskProfile | None = None) -> str:
+    """关键词: 只用可出版的概念词, 且**按任务画像**决定领域词。
 
     **不写内部工具名** (如 `design_necessity`): 那是系统实现细节, 出现在期刊关键词里
     是明显的表错。概念词从验证证书的判定链里识别 (如"射影平面""Bruck–Ryser–Chowla")。
+
+    P0-3 现场缺陷: 抽取前这里**无条件**追加 `"组合设计存在性"`、`"必要条件核验"` ——
+    于是一篇关于信道可分性的报告在关键词里声称自己是组合设计研究。现在设计论词只在
+    `profile.allows_design_vocabulary()` (快照里真的有声明的设计参数) 时出现。
     """
     words: list[str] = []
-    for claim in snapshot.claims:
-        if claim.design_v and claim.design_k and claim.design_lambda:
-            words.append(f"2-({claim.design_v},{claim.design_k},{claim.design_lambda})设计")
-            break
-    cert_text = " ".join(str(r.certificate or "") + str(r.raw_output or "")
-                         for r in snapshot.verifications)
-    if "射影平面" in cert_text:
-        words.append("射影平面")
-    if "Bruck" in cert_text or "BRC" in cert_text:
-        words.append("Bruck–Ryser–Chowla 定理")
-    words.extend(["组合设计存在性", "必要条件核验", "机器可复核判定链"])
+    # 领域词闸门: 设计论词只在**确认存在设计参数**时出现。
+    # 抽取前 `2-(v,k,λ)设计`、`射影平面`、`Bruck–Ryser–Chowla 定理`、`组合设计存在性`
+    # 这四类词都可能出现在与设计无关的稿件里 (前两类按快照猜, 后两类无条件追加)。
+    design_ok = (profile.allows_design_vocabulary() if profile is not None
+                 else bool(_design_params(snapshot)))
+    if design_ok:
+        for claim in snapshot.claims:
+            if claim.design_v and claim.design_k and claim.design_lambda:
+                words.append(
+                    f"2-({claim.design_v},{claim.design_k},{claim.design_lambda})设计")
+                break
+        cert_text = " ".join(str(r.certificate or "") + str(r.raw_output or "")
+                             for r in snapshot.verifications)
+        if "射影平面" in cert_text:
+            words.append("射影平面")
+        if "Bruck" in cert_text or "BRC" in cert_text:
+            words.append("Bruck–Ryser–Chowla 定理")
+        words.extend(["组合设计存在性", "必要条件核验"])
+    # 方法类词按**形式化范围**给: 经验类研究写"机器可复核判定链"同样是表错
+    if profile is None or profile.allows_formal_vocabulary():
+        words.append("机器可复核判定链")
     unique: list[str] = []
     for word in words:
         if word and word not in unique:
@@ -319,10 +385,26 @@ def _english_title(supported: list[Claim], refuted: list[Claim]) -> str:
 
 
 def _english_abstract(supported: list[Claim], refuted: list[Claim],
-                      unresolved: list[Claim]) -> str:
-    bits = ["Abstract: We formalize the stated problem as a machine-checkable "
-            "counting/combinatorial structure and verify the classical necessary "
-            "conditions one by one, including named theorems and their hypotheses."]
+                      unresolved: list[Claim],
+                      profile: TaskProfile | None = None) -> str:
+    """英文摘要: 与中文摘要同一份事实, 措辞按任务画像选。
+
+    抽取前这里**无条件**写 "counting/combinatorial structure" 与 "classical necessary
+    conditions" —— 非设计类研究因此得到一段与正文不符的英文摘要。
+    """
+    bits: list[str] = []
+    if profile is not None and profile.allows_design_vocabulary():
+        bits.append("Abstract: We formalize the stated problem as a machine-checkable "
+                    "counting/combinatorial structure and verify the classical necessary "
+                    "conditions one by one, including named theorems and their hypotheses.")
+    elif profile is not None and not profile.allows_formal_vocabulary():
+        bits.append("Abstract: We state the research question, make the sources and the "
+                    "applicable conditions explicit, and report each conclusion together "
+                    "with its locatable basis; unresolved parts are stated as such.")
+    else:
+        bits.append("Abstract: We formalize the objects, quantifiers and constraints of "
+                    "the stated problem and check the conditions each conclusion relies "
+                    "on; all checks are recomputed by restricted tools.")
     if supported:
         bits.append("Main result: the stated design does not exist under the declared "
                     "parameters." if any(c.design_verdict == "nonexistent" for c in supported)
@@ -350,7 +432,8 @@ def _english_keywords(supported: list[Claim]) -> str:
 def _introduction(question: str,
                   references: refmod.ReferenceList,
                   coverage: RetrievalCoverage,
-                  snapshot: ResearchSnapshot | None = None) -> str:
+                  snapshot: ResearchSnapshot | None = None,
+                  profile: TaskProfile | None = None) -> str:
     """引言: 研究背景 → 本文工作 → 主要结论 → 全文组织。
 
     **不再复述题面**: 题面属于"问题与形式化"一节; 引言要说明"为什么做、做了什么、
@@ -359,21 +442,31 @@ def _introduction(question: str,
     """
     parts: list[str] = []
     design = _design_params(snapshot)
-    parts.append(
-        "组合设计的存在性判定是组合数学中的经典问题：计数关系自洽并不蕴含设计存在，"
-        "真正起决定作用的是若干经典必要条件（计数恒等式、Fisher 不等式、"
-        "Bruck–Ryser–Chowla 定理（Bruck–Ryser–Chowla，1949/1950）等）。对给定参数而言，"
-        "逐条核验这些条件并给出可复核的判定链，比穷举关联矩阵更可靠，也更适合机器验证。")
+    # P0-3: 引言必须按任务画像写。抽取前这里**无条件**以"组合设计的存在性判定是组合
+    # 数学中的经典问题…"开头, 并在无设计参数时仍声称"本文采用必要条件路线" ——
+    # 通用入口因此输出了组合设计专用内容。
+    if design and (profile is None or profile.allows_design_vocabulary()):
+        parts.append(
+            "组合设计的存在性判定是组合数学中的经典问题：计数关系自洽并不蕴含设计存在，"
+            "真正起决定作用的是若干经典必要条件（计数恒等式、Fisher 不等式、"
+            "Bruck–Ryser–Chowla 定理（Bruck–Ryser–Chowla，1949/1950）等）。对给定参数而言，"
+            "逐条核验这些条件并给出可复核的判定链，比穷举关联矩阵更可靠，也更适合机器验证。")
+    elif profile is not None and not profile.allows_formal_vocabulary():
+        parts.append(
+            "本文的研究问题需要把结论建立在**可定位的依据**之上：所依据的来源、"
+            "假设与判定过程都随文给出，未决部分如实保留，不以结论语气代替依据。")
+    else:
+        parts.append(
+            "本文的研究问题需要把结论建立在**可复核的判定**之上：先形式化问题的对象、"
+            "域与约束，再逐条核验所依据的条件；所有判定均由受限工具重算并由规则层验收。")
     if design:
         v, k, lam = design
         parts.append(
             f"本文研究参数为 $v={v}$、$k={k}$、$\\lambda={lam}$ 的 2-设计的存在性。"
             f"该规模下穷举不可行（关联矩阵为 ${v}\\times{v}$），因此本文采用必要条件路线："
             "先形式化计数约束，再逐条核验必要条件，所有判定均由受限工具重算并由规则层验收。")
-    else:
-        parts.append(
-            "本文采用必要条件路线：先形式化问题的计数约束，再逐条核验经典必要条件，"
-            "所有判定均由受限工具重算并由规则层验收。")
+    elif question:
+        parts.append("本文研究的原始问题陈述如下；形式化与适用条件见下一节。")
     if question:
         # 题面在**引言**里出现一次 (论文需要自带问题陈述); 第 2 节只做形式化, 不重复
         quoted = "\n".join("> " + line.strip()
@@ -401,6 +494,20 @@ def _design_params(snapshot: ResearchSnapshot | None) -> tuple | None:
         if claim.design_v and claim.design_k and claim.design_lambda:
             return claim.design_v, claim.design_k, claim.design_lambda
     return None
+
+
+def _deliverables_from_spec(spec: ResearchSpec | None) -> list[str]:
+    """规格里声明的交付形态 (供没有 `ResearchBrief` 的旧调用点推断画像)。
+
+    规格 (`ResearchSpec`) 不直接带交付形态, 因此按"有没有契约/成功条件"保守推断:
+    有明确契约的当理论结论, 否则当问题报告。**不猜领域** —— 领域由设计参数是否存在决定。
+    """
+    if spec is None:
+        return ["problem_report"]
+    contract = getattr(spec, "contract", None)
+    if contract is not None and getattr(contract, "success_criteria", None):
+        return ["theoretical_conclusion"]
+    return ["problem_report"]
 
 
 def _conclusion_sentence(snapshot: ResearchSnapshot | None) -> str:

@@ -184,22 +184,32 @@ def test_reviewer_prompt_has_renumber_rule():
     assert "严禁沿用旧台账里对 [n] 的主题描述" in PAPER_REVIEWER_SYSTEM
 
 
-def test_writer_prompt_has_off_domain_replacement_rule():
-    from src.agents.paper_writer import PAPER_REVISION_SYSTEM
+def test_writer_prompt_forbids_off_domain_citation_topics():
+    """写作提示词必须禁止"引用主题错配"这种最常见的编造方式。
 
-    assert "引用主题错配" in PAPER_REVISION_SYSTEM
-    assert "recording/audio/multimedia" in PAPER_REVISION_SYSTEM
-    # 判据只能是"本次输入的研究主题 + 文献标题", 不得让提示词里的领域词表当判据
-    assert "任何领域词表都不是判据" in PAPER_REVISION_SYSTEM
+    迁移说明 (合并计划 §15.2 清理): 原来这条断言检查旧撰写模块
+    (`agents/paper_writer.py`) 的修订提示词。该模块只被默认关闭的长文附录路径调用,
+    已随该路径一起删除 —— 于是这里改为检查**真正在跑的**写作智能体
+    (`agents/writing.py::WritingAgent.SYSTEM`)。判据没有减少, 守护对象换成了活的。
+    """
+    from src.agents.writing import WritingAgent
+
+    prompt = WritingAgent.SYSTEM
+    # 引用只能是给定清单里的: 这是"引用主题错配"的结构性防线
+    assert "引用只使用**给定的来源清单**" in prompt
+    assert "清单里没有的来源一律不得出现" in prompt
+    # 不得把非形式化论证说成已证明 / 把类比说成普适结论
+    assert "把非形式化论证写成" in prompt
+    assert "把案例类比写成普适结论" in prompt
 
 
 def test_agent_prompts_carry_no_hardcoded_domain_vocabulary():
     """提示词不得把某一个领域的词表写死 (跨领域时会把模型带偏)。"""
     from src.agents.paper_reviewer import PAPER_REVIEWER_SYSTEM
-    from src.agents.paper_writer import PAPER_REVISION_SYSTEM
+    from src.agents.writing import WritingAgent
     from src.rag.subquery_generator import SUBQUERY_SYSTEM
 
-    for name, prompt in (("paper_writer", PAPER_REVISION_SYSTEM),
+    for name, prompt in (("writing", WritingAgent.SYSTEM),
                          ("paper_reviewer", PAPER_REVIEWER_SYSTEM),
                          ("subquery_generator", SUBQUERY_SYSTEM)):
         for leaked in ("射频", "RF fingerprint", "wireless", "emitter", "RFFI"):
@@ -214,7 +224,7 @@ if __name__ == "__main__":
         test_load_cache_filters_off_domain_refs,
         test_review_anchor_warns_about_renumbered_citations,
         test_reviewer_prompt_has_renumber_rule,
-        test_writer_prompt_has_off_domain_replacement_rule,
+        test_writer_prompt_forbids_off_domain_citation_topics,
     ]
     passed = 0
     for t in tests:

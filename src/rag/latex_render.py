@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re as _re
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -108,10 +109,17 @@ def _md_to_latex_body(md_text: str, fig_paths: list[str] | None = None) -> str:
             from pathlib import Path as _Path
 
             # fig_paths 可能是绝对路径或相对路径; 统一解析为绝对路径后,
-            # 再换算成相对 outputs/ 的路径 (figures/xxx.png), 供 \includegraphics 使用
+            # 再换算成相对**产物根**的路径 (figures/<run>/xxx.png), 供
+            # \includegraphics 使用; 产物根本身在 \graphicspath 里声明。
+            # 注意: 这里必须按**调用时**的 `config.OUTPUT_DIR` 解析 —— 写死
+            # `Path("outputs")` 时, 部署到别的产物根或测试隔离目录都会把图判成
+            # "不存在", 于是图被静默跳过 (表现: 编译成功但正文没有图)。
             full = _Path(fig_file).resolve()
             try:
-                rel = full.relative_to(_Path("outputs").resolve()).as_posix()
+                from src import config as _config
+
+                root = _Path(getattr(_config, "OUTPUT_DIR", "outputs")).resolve()
+                rel = full.relative_to(root).as_posix()
             except ValueError:
                 rel = full.name
             if full.exists():
@@ -265,6 +273,25 @@ def _convert_table_pandoc(md_table: str) -> str:
     return "\n".join(lines)
 
 
+def _graphics_path_preamble() -> str:
+    r"""声明 `\graphicspath`: 相对 `figures/` 与产物根下的绝对 figures 目录。
+
+    为什么需要: `\includegraphics{figures/x.png}` 的相对路径是相对**编译器的工作
+    目录**解析的, 而交付包在 `outputs/<run>/` 下编译 (M4 起图表也按 run 分目录),
+    于是"同一份稿子在两种工作目录下编译"必须都能找到图。两种都放进去最稳:
+    `{figures/}` 覆盖在产物根编译的情况, 绝对路径覆盖在交付包目录编译的情况。
+    """
+    try:
+        from src import config
+
+        root = Path(getattr(config, "OUTPUT_DIR", "."))
+        absolute = (root / "figures").resolve().as_posix()
+        return (r"\graphicspath{{figures/}{figures/*/}{" + absolute + "/}{"
+                + absolute + "/*/}}")
+    except Exception:  # noqa: BLE001 - 声明失败不阻断渲染, 退回原来的相对路径行为
+        return r"\graphicspath{{figures/}{figures/*/}}"
+
+
 def render_latex(draft_md: str, topic: str, verified_refs: list[dict],
                  fig_paths: list[str] | None = None) -> str:
     r"""Markdown 初稿 → 完整 .tex 源文件
@@ -302,6 +329,12 @@ def render_latex(draft_md: str, topic: str, verified_refs: list[dict],
     preamble = (LATEX_PREAMBLE
                 .replace("__TITLE__", _escape_latex(title))
                 .replace("__DATE__", datetime.now().strftime("%Y-%m-%d")))
+    # 图表目录也要显式声明: 图表按 run 分目录 (合并计划 M4), 而 \includegraphics 的
+    # 相对路径是相对**编译器工作目录**解析的。交付包在 outputs/<run>/ 下编译时,
+    # `figures/<run>/x.png` 相对该目录并不存在 —— 实测表现为"编译成功但图上没有"。
+    # 因此把 `figures/` 与产物根下的 figures 绝对路径都放进 \graphicspath。
+    preamble = preamble.replace("\\begin{document}",
+                                _graphics_path_preamble() + "\n\\begin{document}")
     if not biblio:
         # 草稿无参考文献章节时的兜底 (如初稿被剥离)
         biblio = _build_thebibliography(verified_refs)

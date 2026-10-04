@@ -108,14 +108,22 @@ def export_package(
 def _traceability(snapshot: ResearchSnapshot, manuscript_md: str) -> dict:
     """核对交付包里的正文与冻结快照是否一致 (可反查性); 失败不影响导出。
 
-    用快照**重建**一份正文对象, 再与落盘的 markdown 对照: 若写作阶段自行补足了
-    快照里没有的结论, 映射与正文就会对不上, 这里如实报出来。
+    两种检查口径, 必须能区分 (否则"自我一致"会被读成"正文与快照一致"):
+    - **落了正文** (交付包里有 manuscript.md): 用**快照**重建的映射去核对**真实正文**,
+      于是"写作阶段自行补足了快照里没有的结论"会如实报出来;
+    - **没落正文** (只给了快照): 只能核对快照渲染与快照本身是否一致, 在结果里
+      标注 `checked="snapshot_only"`, 不冒充"已核对正文"。
     """
     try:
         from src.agents.theory_writer import build_manuscript, trace_manuscript
 
         manuscript = build_manuscript(snapshot, topic=snapshot.project_id)
-        return trace_manuscript(snapshot, manuscript, manuscript_md)
+        report = trace_manuscript(snapshot, manuscript, manuscript_md)
+        report["checked"] = "markdown" if (manuscript_md or "").strip() else "snapshot_only"
+        if report["checked"] == "snapshot_only":
+            report["note"] = ("交付包未提供正文本体, 仅核对快照渲染与快照的一致性; "
+                              "正文级可反查需在导出后按 manuscript.md 复核")
+        return report
     except Exception as e:  # noqa: BLE001 - 追踪失败时如实记录, 不假装通过
         return {"ok": False, "error": type(e).__name__, "note": "可反查性检查未能执行"}
 

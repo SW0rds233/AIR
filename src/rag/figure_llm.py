@@ -17,6 +17,8 @@ from src.utils.cost_tracker import extract_usage_metadata, tracker
 
 logger = logging.getLogger(__name__)
 
+#: 保留给外部引用的**默认**图表目录 (不再被生成函数使用: 它们走 `_figure_dir()`,
+#: 那里按调用时的配置与 run 归属解析)。保留常量是为了不破坏既有导入点。
 FIGURE_DIR = Path(__file__).resolve().parent.parent.parent / "outputs" / "figures"
 
 # 注入沙箱的期刊级样式样板: 保证即使 LLM 代码极简, 渲染质量也达标
@@ -702,10 +704,25 @@ def generate_figure_with_llm(
     return False, f"图表生成失败（{max_rounds} 轮修正后仍未通过审阅）: {last_error[:300]}"
 
 
+def _figure_dir() -> Path:
+    """图表输出目录 (**调用时**按配置 + 当前 run 归属解析)。
+
+    此前这里写死模块级的 `FIGURE_DIR = <repo>/outputs/figures`: 有两个真实缺陷 ——
+    (a) `config.OUTPUT_DIR` 改了不生效 (测试隔离失效、部署到别的产物根会写错地方);
+    (b) 文件名只是局部序号 (`taxonomy_llm_0.png`), 所有运行共用一个目录, 于是一个
+    会话的图会覆盖另一个会话的同一张图 (合并计划 §7.4 / M4 "两任务不串图表")。
+    统一走 `figure_generator._ensure_figure_dir()` (它同时处理配置与 run 作用域)。
+    """
+    from src.rag.figure_generator import _ensure_figure_dir
+
+    return _ensure_figure_dir()
+
+
 def generate_taxonomy_figure(topic: str, taxonomy_text: str, index: int = 0) -> str:
     """用 LLM 生成分类体系图"""
-    FIGURE_DIR.mkdir(parents=True, exist_ok=True)
-    path = str(FIGURE_DIR / f"taxonomy_llm_{index}.png")
+    directory = _figure_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = str(directory / f"taxonomy_llm_{index}.png")
     desc = (
         f"绘制「{topic}」研究方法的分类体系图（树状层次结构）。\n"
         f"分类结构:\n{taxonomy_text}\n"
@@ -718,8 +735,9 @@ def generate_taxonomy_figure(topic: str, taxonomy_text: str, index: int = 0) -> 
 
 def generate_framework_figure(topic: str, index: int = 0) -> str:
     """用 LLM 生成研究框架总览图 (综述论文"图1"式总览)"""
-    FIGURE_DIR.mkdir(parents=True, exist_ok=True)
-    path = str(FIGURE_DIR / f"framework_llm_{index}.png")
+    directory = _figure_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = str(directory / f"framework_llm_{index}.png")
     desc = (
         f"绘制「{topic}」领域的研究框架总览图（分层框图）。\n"
         f"要求: 用一个自上而下或自左向右的分层结构，概括该领域的整体研究框架，"
@@ -732,8 +750,9 @@ def generate_framework_figure(topic: str, index: int = 0) -> str:
 
 def generate_timeline_figure(topic: str, timeline_text: str, index: int = 0) -> str:
     """用 LLM 生成研究时间线图"""
-    FIGURE_DIR.mkdir(parents=True, exist_ok=True)
-    path = str(FIGURE_DIR / f"timeline_llm_{index}.png")
+    directory = _figure_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = str(directory / f"timeline_llm_{index}.png")
     desc = (
         f"绘制「{topic}」领域研究发展时间线图。\n"
         f"时间线数据:\n{timeline_text}\n"

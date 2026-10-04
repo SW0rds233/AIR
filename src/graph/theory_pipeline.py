@@ -48,6 +48,49 @@ def _role_llm():
         return None
 
 
+def _writing_agent_inputs(snapshot, topic: str):
+    """为 WritingAgent 组装 (task, context, runtime, usage)。
+
+    为什么必须走 AgentRuntime: 写作角色通过运行时拿 LLM 与预算 (token/调用次数上限
+    与取消都在那里生效), 而不是自己 `build_llm()` —— 否则"预算与取消"在写作这一步
+    会失效。`THEORY_LLM=0` 时 `_role_llm()` 返回 None, 运行时的 `llm_available()`
+    为 False, 写作自动走确定性起草 (离线路径)。
+
+    任何组装失败都返回 None 组合: 主文必须能降级交付, 不能因为写作智能体不可用而中断。
+    """
+    try:
+        from src.agents.protocol import AgentTask, ContextPack, TaskBudget
+        from src.agents.runtime import AgentRuntime
+
+        run_id = str(getattr(snapshot, "run_id", "") or "")
+        project_id = str(getattr(snapshot, "project_id", "") or "")
+        problem_id = str(getattr(snapshot, "problem_id", "") or "")
+        budget = TaskBudget()
+        task = AgentTask(
+            task_id=f"writing-{run_id or project_id or 'run'}",
+            agent="writing",
+            objective=f"撰写研究正文: {topic}",
+            project_id=project_id, problem_id=problem_id, run_id=run_id,
+            acceptance_criteria=["每个段落给出它依据的对象 id", "未决项如实写出"],
+            budget=budget,
+            idempotency_key=f"writing:{run_id}:{getattr(snapshot, 'snapshot_id', '')}",
+        )
+        claims = [c.model_dump(mode="json") for c in getattr(snapshot, "claims", [])]
+        sources = [e.model_dump(mode="json") for e in getattr(snapshot, "evidence", [])]
+        context = ContextPack(
+            request=topic,
+            objects={"claim": claims, "evidence": sources,
+                     "brief": [{"main_question": topic, "deliverables": ["theoretical_conclusion"],
+                                "snapshot_id": str(getattr(snapshot, "snapshot_id", "") or "")}]},
+        )
+        runtime = AgentRuntime(llm_factory=lambda stage: _role_llm())  # type: ignore[arg-type,return-value]
+        from src.agents.protocol import UsageRecord
+
+        return task, context, runtime, UsageRecord()
+    except Exception:  # noqa: BLE001
+        return None, None, None, None
+
+
 def _knowledge_for(spec: ResearchSpec):
     """按**绑定资料源**组装知识底座; 无主题或不可用时返回 None (相关动作不暴露)。
 
@@ -453,7 +496,14 @@ def theory_finalize_node(state: TheoryState) -> dict:
                 f"附件不可用 [{item.get('status')}] {item.get('filename') or item.get('attachment_id')}: "
                 f"{item.get('detail')}")
 
-    manuscript_md, writing_map = run_theory_writing(snapshot, topic)
+    # ---- 主文: 统一交给 WritingAgent (合并计划 §7.3 "退役双正文主路径") ----
+    # 有模型时由写作智能体起草 (逐段带依据对象 id); 离线/未配置时它由冻结快照
+    # 确定性起草 —— 输出与旧渲染器逐字一致, 因此离线复现不因合并而下降。
+    writing_task, writing_context, writing_runtime, writing_usage = _writing_agent_inputs(
+        snapshot, topic)
+    manuscript_md, writing_map = run_theory_writing(
+        snapshot, topic, task=writing_task, context=writing_context,
+        runtime=writing_runtime, usage=writing_usage)
     snapshot.writing_map = writing_map
     # 排版映射写回冻结快照 (仅补充映射, 不改变任何研究结论)
     try:
@@ -502,9 +552,19 @@ def theory_finalize_node(state: TheoryState) -> dict:
     # 交付包会报 `executed=false / 命中 0`, 而实际入库了 7 条证据 (实测 livefinal),
     # 事后无法复核"研究阶段检索了什么"。仅当研究循环确实没检索过时才用出版层记录。
     coverage = engine_spec_coverage(engine) or evidence_bundle.coverage
+    # 任务画像 (合并计划 §7.3 / P0-3): 文稿的章节骨架与领域措辞由它决定。理论图这条
+    # 旧路径没有 `ResearchBrief`, 因此按快照里**是否真的声明了设计参数**降级推断 ——
+    # 这正是"通用入口曾经输出组合设计专用内容"的修复点。
+    from src.research.task_profile import profile_for_deliverables
+
+    task_profile = profile_for_deliverables(
+        ["theoretical_conclusion"],
+        has_design_parameters=any(c.design_v and c.design_k and c.design_lambda
+                                  for c in snapshot.claims))
     publication_doc, dangling = build_publication_paper(
         snapshot, topic, references, coverage=evidence_bundle.coverage,
-        spec=engine.spec, related_evidence=evidence_bundle.evidence)
+        spec=engine.spec, related_evidence=evidence_bundle.evidence,
+        profile=task_profile)
     # 正文里的引用占位 (`[[REF:key]]`) 由**两种渲染器各自解析**: Markdown 出 `[n]`,
     # LaTeX 出 `\upcite{key}`。在这里解析 Markdown 版本, 漏掉的键如实记进 notes
     # (占位符直接印进正文是明显的格式缺陷)。
@@ -527,24 +587,14 @@ def theory_finalize_node(state: TheoryState) -> dict:
     for warning in render_warnings:
         result.notes.append("出版层渲染警告: " + warning)
 
-    # 阶段 4 (方案 v2 M4): 撰写层长文, **作为附录**追加。
-    # 只读冻结快照; 产出不覆盖第 3 节的判定链, 失败就如实记原因并继续交付。
-    from src.research.writing_bridge import (
-        append_latex_appendix,
-        append_long_form_appendix,
-        write_long_form,
-    )
-
-    long_form = write_long_form(snapshot, topic, references,
-                               question=(engine.spec.problem_statement
-                                         or engine.spec.original_request or ""))
-    if long_form.produced:
-        publication_md = append_long_form_appendix(publication_md, long_form.draft,
-                                                   long_form.note)
-        publication_tex = append_latex_appendix(publication_tex, long_form.draft)
-        result.notes.append(f"长文附录已生成 ({len(long_form.draft)} 字符)")
-    elif long_form.note:
-        result.notes.append("长文附录未生成: " + long_form.note)
+    # 长文附录路径已删除 (2026-10-04, 合并计划 §15.2 清理)。
+    # 它受 `THEORY_LONG_FORM` 控制且**默认关闭**, 关闭时唯一效果是往 notes 里写一句
+    # "长文附录未生成" —— 也就是一条"从未启用"的路径。正文已由 WritingAgent 统一承担
+    # (见 `agents/writing.write_main_manuscript`), 因此删掉它不减少任何实际能力:
+    # 交付物里从来没有出现过经由这条路径生成的附录。
+    #
+    # 删除的模块: `src/research/writing_bridge.py` 与 `src/agents/paper_writer.py`
+    # (后者只被前者调用; 静态可达性检查确认它们只能从这条路径到达)。
 
     # 预算触顶时明确告知: 这是部分结果, 不是研究已完成 (§9.3)
     if result.stopped_reason:
