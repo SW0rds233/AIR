@@ -181,6 +181,83 @@ def test_review_gate_only_allows_downgrade():
     assert downgrade_only_gate("reasoning", higher)[0] is True
 
 
+def test_rejected_candidate_never_reaches_authoritative_storage():
+    """越权候选只能进审计记录, **不得**被登记为权威对象 (§3.2 G07)。
+
+    这是审计探针 `audit_probes.py::rejected_candidate_still_persisted` 的正式回归:
+    修复前, 一个 evidence 角色提交的 claim 被判违规、结果降级为 partial, **但候选
+    仍留在 `proposed_changes` 里**, 于是投影层照样登记, 库里出现 `status=supported`。
+    现在越权候选被移入 `rejected_changes`, 合法候选照常登记。
+    """
+    from src.agents.protocol import grant_for
+    from src.research.projection import TeamProjection
+    from src.research.store import ResearchStore
+
+    store = ResearchStore("g07", db_path=":memory:")
+    try:
+        task = AgentTask(agent="evidence", objective="read only",
+                         source_policy="user_kb")
+        grant = grant_for(task)
+        result = AgentResult(
+            task_id=task.task_id, agent="evidence", outcome="completed",
+            summary="候选",
+            proposed_changes=[
+                # 越权: evidence 角色不得提交 claim
+                ChangeProposal(kind="claim", object_id="bad-claim",
+                               payload={"statement": "未核验断言", "status": "supported"}),
+                # 合规: evidence 角色可以提交来源
+                ChangeProposal(kind="source", object_id="ok-source",
+                               payload={"title": "合法来源"}),
+            ])
+        runtime = AgentRuntime()
+        finalized = runtime.finalize(task, result, grant)
+        TeamProjection(store).register(task, finalized)
+
+        # 结构性保证: 越权候选已不在待登记列表里
+        assert [p.object_id for p in finalized.proposed_changes] == ["ok-source"]
+        # 审计留痕: 被拒候选与理由可见
+        assert [item["object_id"] for item in finalized.rejected_changes] == ["bad-claim"]
+        assert "不得提交 claim" in finalized.rejected_changes[0]["reason"]
+        # 权威库里没有越权对象, 合规对象正常落库
+        assert store.get("claim", "bad-claim") is None
+        # `source` 归入 evidence 存储族 (KIND_MAP), 但候选种类必须被保留下来
+        stored = store.get("evidence", "ok-source")
+        assert stored is not None
+        assert stored["_candidate_kind"] == "source"
+        # 结果**仍然降级**: 不能因为违规部分被隔离就把这次完成显示成干净的
+        assert finalized.outcome.value == "partial"
+        assert "不符合契约" in finalized.summary
+    finally:
+        store.close()
+
+
+def test_candidate_kind_survives_the_evidence_family_mapping():
+    """source / case / dataset 归同一存储族, 但各自种类不得丢失 (§6.1)。"""
+    from src.agents.protocol import grant_for
+    from src.research.projection import TeamProjection
+    from src.research.store import ResearchStore
+
+    store = ResearchStore("kinds", db_path=":memory:")
+    try:
+        task = AgentTask(agent="evidence", objective="收集材料",
+                         source_policy="user_kb")
+        grant = grant_for(task)
+        result = AgentResult(
+            task_id=task.task_id, agent="evidence", outcome="completed", summary="c",
+            proposed_changes=[
+                ChangeProposal(kind="source", object_id="s1", payload={"title": "来源"}),
+                ChangeProposal(kind="case", object_id="c1", payload={"title": "案例"}),
+                ChangeProposal(kind="dataset", object_id="d1", payload={"title": "数据"}),
+            ])
+        finalized = AgentRuntime().finalize(task, result, grant)
+        TeamProjection(store).register(task, finalized)
+        kinds = {row: store.get("evidence", row)["_candidate_kind"]
+                 for row in ("s1", "c1", "d1")}
+        assert kinds == {"s1": "source", "c1": "case", "d1": "dataset"}
+    finally:
+        store.close()
+
+
 def test_review_result_cannot_claim_conclusion_change():
     """审阅提交 may_change_conclusion=True 的候选 -> 违约并降级。"""
 
@@ -239,7 +316,9 @@ def test_tool_loop_executes_tools_and_feeds_results_back():
         {"content": "检索完成"},
     ])
     runtime = AgentRuntime()
-    grant = runtime.issue_grant(_task())
+    # 联网检索是**需要用户授权**的能力 (G09): 任务必须显式声明允许外部取数的资料
+    # 策略, 才会拿到 `tools:search`。此前不声明也能检索 —— 那是越权。
+    grant = runtime.issue_grant(_task(source_policy="autonomous"))
     text, observations = loop.run(llm, [], grant=grant, usage=UsageRecord())
 
     assert text == "检索完成"
@@ -249,6 +328,19 @@ def test_tool_loop_executes_tools_and_feeds_results_back():
     # 工具结果确实回灌进了对话 (而不是被丢弃)
     fed = [m for m in llm.calls[-1] if getattr(m, "type", "") == "tool"]
     assert fed and "T1" in str(fed[0].content)
+
+
+def test_search_capability_requires_declared_source_policy():
+    """未声明资料策略的任务**不得**获得联网检索能力 (G09 的回归点)。"""
+    runtime = AgentRuntime()
+    declared_none = runtime.issue_grant(_task())
+    assert "tools:search" not in declared_none.read_scopes
+    assert declared_none.allows_read("sources") is True   # 本地来源仍可读
+    local_only = runtime.issue_grant(_task(source_policy="user_kb"))
+    assert "tools:search" not in local_only.read_scopes
+    for policy in ("autonomous", "both"):
+        asserted = runtime.issue_grant(_task(source_policy=policy))
+        assert "tools:search" in asserted.read_scopes, policy
 
 
 def test_tool_loop_blocks_unauthorized_capability():

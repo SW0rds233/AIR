@@ -80,8 +80,10 @@ def team_projection(project_id: str, run_id: str) -> dict[str, Any]:
     store = ResearchStore(project_id)
     try:
         task_store = TaskStore(project_id, store)
-        tasks = [t for t in task_store.tasks() if not t.get("run_id") or
-                 t.get("run_id") == run_id]
+        # 只接受**本运行**的任务: 以前 `not t.get("run_id")` 也算通过, 于是任意运行
+        # 的窗口都会把"没有 run 的历史任务"一并算进来, 同项目多次运行互相串
+        # (§3.3 G14)。无 run_id 的旧记录宁可不出现在投影里, 也不冒充本次运行。
+        tasks = [t for t in task_store.tasks() if str(t.get("run_id", "")) == run_id]
         events = [e for e in store.events()
                   if str((e.get("payload") or {}).get("run_id", "")) == run_id]
     finally:
@@ -90,7 +92,9 @@ def team_projection(project_id: str, run_id: str) -> dict[str, Any]:
 
     store = ResearchStore(project_id)
     try:
-        objects = {kind: object_rows(store, kind, limit=50) for kind in KIND_MAP}
+        # 对象同样按本运行裁剪 (§3.3 G14): 项目级 list_latest 会把别的运行混进来
+        objects = {kind: object_rows(store, kind, limit=50, run_id=run_id)
+                   for kind in KIND_MAP}
     finally:
         store.close()
     return {

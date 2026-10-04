@@ -203,6 +203,116 @@ def _load_rows(data_ref: str, limit: int = 20) -> str:
             + "\n".join(str(row) for row in rows[:limit]))
 
 
+#: 每个核验工具的**操作契约**: 工具名 -> (适配器, 操作, 参数映射)。
+#:
+#: 为什么把操作名写死成契约而不是让调用方随便传: 审计复现过 G10 —— 工具用
+#: `operation="check"` 调 SymPy/Z3, 而两个适配器的 `OPERATIONS` 表里**没有** `check`,
+#: 于是每次调用都返回 `unsupported`, 却又看起来像"执行过了"。参数名同样错过:
+#: 统计工具传 `column`, 适配器读的是 `outcome_col`, 于是报"缺少 outcome_col"。
+#:
+#: 这张表在**导入时**与适配器的真实 `OPERATIONS` 对照 (见 `_assert_operation_supported`),
+#: 因此适配器改名会让这里立刻失败, 而不是等运行到才静默返回 unsupported。
+VERIFICATION_TOOLS: dict[str, tuple[str, str]] = {
+    "check_symbolic": ("sympy", "prove_identity"),
+    "solve_constraints": ("z3", "check_satisfiable"),
+    "describe_statistics": ("stats", "describe"),
+}
+
+
+def _assert_operation_supported(tool: str) -> str:
+    """核对工具声明的操作确实被适配器支持; 返回操作名。
+
+    失败即抛 —— 这是**装配期**错误 (代码与适配器不一致), 不该拖到用户任务里变成一句
+    "unsupported"。
+    """
+    import importlib
+
+    adapter_name, operation = VERIFICATION_TOOLS[tool]
+    module = importlib.import_module(f"src.verification.{adapter_name}_adapter")
+    operations = getattr(module, "OPERATIONS", {})
+    if operation not in operations:
+        raise RuntimeError(
+            f"核验工具 {tool} 声明的操作 {operation!r} 不被 {adapter_name} 适配器支持"
+            f" (可用: {', '.join(sorted(operations))})")
+    return operation
+
+
+def _format_verification(tool: str, result: Any) -> str:
+    """把 `VerificationResult` 呈现给模型时**保留**状态、证书与输入 hash。
+
+    只回一句字符串会丢掉判定所需的依据 (§3.2 G10: "保留完整 VerificationResult 和
+    输入 hash, 不只返回一句字符串")。这里把 hash 与证书摘出来, 让角色能把它作为核验
+    依据引用; 完整对象仍由判定层按同一 hash 存取。
+    """
+    status = getattr(result, "status", None)
+    status_value = getattr(status, "value", None) or str(status or "")
+    parts = [f"{status_value}: {getattr(result, 'detail', '') or ''}"]
+    certificate = getattr(result, "certificate", None)
+    if certificate:
+        parts.append(f"证书: {str(certificate)[:400]}")
+    input_hash = getattr(result, "input_hash", "") or getattr(result, "request_hash", "")
+    if input_hash:
+        parts.append(f"输入 hash: {input_hash}")
+    parts.append(f"工具: {tool}")
+    # 明确区分"不可用"与"证伪": 前者是环境问题, 不能当成结论
+    if status_value == "unavailable":
+        parts.append("提示: 该工具当前不可用, 这条结果不能作为结论依据")
+    elif status_value == "unsupported":
+        parts.append("提示: 该操作不被支持, 这条结果不能作为结论依据")
+    return "\n".join(part for part in parts if part)
+
+
+def _split_relation(expression: str, relation: str) -> tuple[str, str, str]:
+    """把 `"lhs == rhs"` / `"lhs >= rhs"` 拆成适配器要的 `(lhs, rhs, relation)`。
+
+    适配器读的是 `lhs` / `rhs` 两个字段 (见 `sympy_adapter.op_prove_identity`), 而模型
+    自然会说"证明 (x+1)^2 = x^2+2x+1"。工具层负责这层翻译, 否则传 `expression` 进去
+    会得到 `KeyError: 'lhs'` —— 实测就是这条 (G10)。
+    """
+    text = str(expression or "").strip()
+    wanted = str(relation or "").strip() or "=="
+    # 关系符按长度降序匹配, 避免 `>=` 被 `>` 抢先切开
+    for symbol in ("==", ">=", "<=", "!=", "=", ">", "<"):
+        index = text.find(symbol)
+        if index > 0:
+            lhs = text[:index].strip()
+            rhs = text[index + len(symbol):].strip()
+            if not lhs or not rhs:
+                break
+            resolved = wanted
+            if symbol == "=":
+                resolved = "=="
+            elif symbol == "!=":
+                # 适配器没有"不等"操作: 明确不支持, 不猜成别的
+                raise ValueError("不支持的关系 != (可选用 == / >= / > / <= / <)")
+            if resolved == "==" and symbol in (">=", ">", "<=", "<"):
+                resolved = symbol
+            return lhs, rhs, resolved
+    # 没有关系符: 按"求值为 0"处理 (例如传进来一个差式)
+    return text, "0", wanted
+
+
+def _declared_variables(names: list[str], explicit: str = "") -> dict[str, str]:
+    """构造 Z3 适配器要的变量声明 (`{"x": "Real"}`)。
+
+    适配器读的是**映射**而不是列表: 传列表会得到"未声明变量 x" (实测 G10)。
+    """
+    declared: dict[str, str] = {}
+    for name in [*names, *_names_in(explicit)]:
+        if name and name not in declared:
+            declared[name] = "Real"
+    return declared
+
+
+def _names_in(text: str) -> list[str]:
+    """从表达式/变量串里挑出变量名 (排除纯数字与已知函数名)。"""
+    import re
+
+    reserved = {"True", "False", "None", "Int", "Real", "Bool"}
+    found = re.findall(r"[A-Za-z_][A-Za-z_0-9]*", str(text or ""))
+    return [name for name in found if name not in reserved and not name.isdigit()]
+
+
 def math_tools() -> list[ToolSpec]:
     """符号/约束核验工具 (推理角色请求, 由判定层执行)。"""
     return [
@@ -215,21 +325,56 @@ def math_tools() -> list[ToolSpec]:
     ]
 
 
-def _check_symbolic(expression: str, variables: str = "") -> str:
+def _check_symbolic(expression: str, variables: str = "",
+                    relation: str = "==") -> str:
+    """核验一条符号命题。
+
+    关系符决定用哪个**真实支持**的操作: `==` 走 `prove_identity`,
+    `>=`/`>`/`<=`/`<` 走 `prove_inequality`。
+    """
     from src.verification.runner import run_request
 
-    result = run_request("sympy", "check",
-                         {"expression": expression,
-                          "variables": [v for v in str(variables).split(",") if v]})
-    return f"{result.status.value}: {result.detail}"
+    try:
+        lhs, rhs, resolved = _split_relation(expression, relation)
+    except ValueError as exc:
+        return f"unsupported: {exc}"
+    operation = ("prove_inequality"
+                 if resolved in (">=", ">", "<=", "<") else "prove_identity")
+    if operation not in _adapter_operations("sympy"):
+        raise RuntimeError(f"sympy 适配器不支持 {operation}")
+    result = run_request("sympy", operation, {
+        "lhs": lhs,
+        "rhs": rhs,
+        "relation": resolved,
+        # 适配器读 `assumptions` (符号域声明); 不传会拿到 None 并在内部报错
+        "assumptions": {},
+        "variables": [v.strip() for v in str(variables).split(",") if v.strip()]
+                     or _names_in(f"{lhs} {rhs}"),
+    })
+    return _format_verification("check_symbolic", result)
 
 
-def _solve_constraints(constraints: str) -> str:
+def _adapter_operations(adapter: str) -> dict:
+    import importlib
+
+    return dict(getattr(importlib.import_module(f"src.verification.{adapter}_adapter"),
+                        "OPERATIONS", {}))
+
+
+def _solve_constraints(constraints: str, variables: str = "") -> str:
+    """判定约束是否可满足 (Z3 的真实操作是 `check_satisfiable`)。
+
+    `variables` 可留空 —— 留空时从约束文本里推断变量名并按实数域声明。
+    """
     from src.verification.runner import run_request
 
     lines = [c.strip() for c in str(constraints).splitlines() if c.strip()]
-    result = run_request("z3", "check", {"constraints": lines})
-    return f"{result.status.value}: {result.detail}"
+    operation = _assert_operation_supported("solve_constraints")
+    result = run_request("z3", operation, {
+        "constraints": lines,
+        "variables": _declared_variables([], str(variables) or " ".join(lines)),
+    })
+    return _format_verification("solve_constraints", result)
 
 
 def stats_tools() -> list[ToolSpec]:
@@ -241,10 +386,17 @@ def stats_tools() -> list[ToolSpec]:
 
 
 def _stats(data_ref: str, column: str) -> str:
+    """描述统计。
+
+    参数名必须是适配器读的那个 (`outcome_col`), 不是 `column` —— 传错会得到
+    "缺少 outcome_col" 这种**看起来像数据问题**的错误 (§3.2 G10 实测复现)。
+    """
     from src.verification.runner import run_request
 
-    result = run_request("stats", "describe", {"data_ref": data_ref, "column": column})
-    return f"{result.status.value}: {result.detail}"
+    operation = _assert_operation_supported("describe_statistics")
+    result = run_request("stats", operation,
+                         {"data_ref": data_ref, "outcome_col": column})
+    return _format_verification("describe_statistics", result)
 
 
 def figure_tools() -> list[ToolSpec]:

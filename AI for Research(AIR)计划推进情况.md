@@ -1,5 +1,55 @@
 # 计划推进情况
 
+## 10.6 最新一轮（按 2026-10-04 重构版合并计划执行：安全/状态底座 +
+
+> 新计划（重构版，撤销"长期保留两种研究引擎"）落地记录。**本轮只做 §9 的 R0/R1 切片**：
+> 先把"越权/状态/工具契约"这类**正确性与权限**问题修掉，再谈让团队接管研究（R2）。
+> 依据：`audit_probes.py` / `audit_sources.py`（审查方放在仓库根的两个只读探针）。
+
+### 一、本轮修掉的问题（都有可失败回归）
+
+| 缺口 | 问题（审计复现） | 本轮处置 | 回归 |
+|---|---|---|---|
+| **G07 / P0** | 校验拒绝**不阻止落库**：`finalize()` 只把结果降为 partial，候选仍留在 `proposed_changes` 里，投影照样登记 —— 一个 evidence 角色提交的 claim 被判违规后，库里仍出现 `status=supported` | `finalize()` 改为**候选级隔离**：违规候选移入新增的 `AgentResult.rejected_changes`（带理由与载荷字段摘要），只有合规候选才可能被登记。结果仍降级为 partial（不把违规那次显示成干净完成） | `test_agent_runtime.py::test_rejected_candidate_never_reaches_authoritative_storage`（直接查库断言越权对象不在） |
+| **G09 / P0** | 授权只按角色，不按本次资料策略：`grant_for()` 未与 `source_policy` 求交 —— `user_kb` 任务照样拿到 `tools:search`（"只用本地库"却能联网外搜） | 新增 `SOURCE_POLICY_SCOPES`（策略 → 允许的外部取数能力）；`grant_for()` 按 **角色能力 ∩ 用户授权 ∩ 任务范围**签发，并把 `source_set_ids` / `allowed_paths` 写进令牌，附 `allows_source_set()` / `allows_path()`（路径做规范化前缀比较，`../` 逃逸被拒）。未声明策略按**最保守**处理 | `test_agent_runtime.py::test_search_capability_requires_declared_source_policy` 等 |
+| **G10 / P0** | 数学工具契约错误：工具传 `operation="check"`，而 SymPy/Z3 的 `OPERATIONS` 里没有 `check` → 每次返回 `unsupported` 却像"执行过"；统计工具传 `column` 而适配器读 `outcome_col` | 工具改用**真实操作**（`prove_identity` / `prove_inequality` / `check_satisfiable` / `describe`）；参数按适配器实际读取的名字传（`lhs`/`rhs`/`relation`/`assumptions`、`outcome_col`、Z3 变量声明用映射）；关系符自动拆分（`"x+1 == x+2"` → lhs/rhs）；返回值保留状态、证书与输入 hash，并区分"不可用/不支持"与"证伪" | `test_agent_tools_contract.py`（13，**不 mock 适配器**：静态核对操作/参数名 + 真实跑真命题/矛盾约束） |
+| **G11 / P0** | 导出数据失真/缺失：`_model_of()` import 一个**不存在**的 `ModelRecord`（异常被裸 `except` 吞掉，模型一个都没进包）；`_evidence_of()` 丢 `locator→location`、`relation→support`，并 `pop` 掉 `version` → 定位为空、支持关系退化成 insufficient、版本回到 1 | 新增显式字段差异表与支持关系映射；`version` 保留；`_model_of` 改用真实类 `ResearchModel`；快照汇集**引用闭包**（新增 obligation/assumption/definition/validation_plan）；单条坏数据仍可跳过但**必须留下**"哪一条、为什么"（写入缺口列表 + 事件），存储读取失败不再被当成"该类为空" | `test_snapshot_export_mapping.py`（14） |
+| **G14 / P0** | 跨运行混用：`plan()` 产出的任务 `run_id` 全为空；`team_projection()` 用 `not t.get("run_id")` 放行；对象查询读项目全部最新对象 | 运行身份由 `TeamRun.prepare()` **统一注入**计划的每条任务；投影端点只接受 `run_id == 本次运行` 的任务；对象写入时记录 `_scope{project,problem,run}`，`object_rows(run_id=...)` 按运行裁剪，`rows()` 默认裁剪、`project_rows()` 才是项目级视图 | `test_team_wiring_and_identity.py`（10） |
+| **G02 / P0** | 团队入口**没有模型工厂** → `llm_available()` 恒为 False，主控与七类角色全退化成规则模板却照样产出"完整"交付包 | `server._build_team_app()` 注入 `_team_llm_factory`（角色 → 模型配置键：主控 coordinator / 审阅 reviewer / 推理 theorist / 证据 cheap…）；`THEORY_LLM=0` 仍是显式离线开关。**顺带修掉一个真实缺陷**：`llm_available()` 原先只判断"工厂是否存在"，而工厂可返回 None（离线），于是角色以为模型可用、调用抛异常再退回确定性实现——症状被掩盖成"跑通了"；现在按角色**实测并缓存**，取模型失败落 `llm_unavailable` 事件 | `test_team_wiring_and_identity.py`（含"工厂失败必须可见"与"离线开关被尊重"） |
+
+另修一处**顺带发现**的类型丢失：投影登记时 `source`/`card`/`case`/`dataset` 都归入 `evidence`
+存储族（这是有意的，为了查询与版本化只有一处实现），但**候选自己的种类**此前彻底消失。
+现在保留为 `_candidate_kind`（族用于存储，该字段用于语义），符合 §6.1"不能把 case/dataset
+无区别映成 evidence 丢类型"。
+
+### 二、仍未闭合（**不得当成已完成**）
+
+`audit_probes.py` 现在能直接打印逐条状态；以下是它仍报 `STILL BROKEN` 的项，按计划
+§9 属于后续切片（R1 余项 / R2）：
+
+| 缺口 | 现状（探针输出） | 计划归属 |
+|---|---|---|
+| **G01 / P0** | 仍是双引擎：`server._resolve_engine()` + `DEFAULT_ENGINE`/`SURVEY_ENGINE_ENABLED` + `main.py --mode` / `_run_theory_mode()` | R2：所有科研请求进同一 TeamRun，删除引擎选择与分流测试 |
+| **G04 / P1** | 主控仍是规则分类器：注入 spy 模型后 `llm_calls == 0`（`SupervisorAgent` 保存了 llm 却未调用） | R2：模型驱动的 ResearchBrief / 子问题 DAG / 复盘重规划 |
+| **G05 / P0** | 推理先于证据：首轮顺序 `reasoning, reasoning, evidence`，且 reasoning 的依赖为空 | R2：按子问题缺口建依赖 |
+| **G06 / P0** | 团队形式化路径未闭环：内核路径把计划/推导压成 claim 候选，未提交完整义务/推导/验证对象 | R2 |
+| **G08 / P0** | 事务与 read-set 未接入：`TaskStore.commit_result()` 已具备能力但团队走 `finish()` 后逐条 `put()` | R1 |
+| **G12 / P1** | 角色跑过即被当成交付依据（partial 也算满足；导出异常被吞） | R1/R3 |
+| **G13 / P1** | 用量边界未接通：常规入口未注入 `RunBudget`；`bind_tools` 可能绕开记账 | R1 |
+| **G15–G19 / P1** | 事件多订阅、任务落盘≠恢复团队、双 Manuscript/IR、图表路径未隔离、前端多份状态 | R4/R3 |
+
+**本轮明确没有做的事**（避免误解）：没有删除 `TheoryEngine`，没有改前端状态层，
+没有跑真实模型任务。`test_engine_boundary_contract.py` 里"保留双引擎"的断言**保留原样**，
+等真正删除 `TheoryEngine` 的那个提交里一并替换（计划 §5.6.3）。
+
+### 三、验证基线
+
+| 命令 | 结果 |
+|---|---|
+| `pytest -q`（离线全量） | **1053 passed, 1 skipped**（本轮 +14：工具契约 13 + 导出映射 14 + 装配/身份 10，另含既有基线） |
+| `audit_probes.py` | 输出里 G07/G09/G10/G11 为 `FIXED`，G01/G04/G05/G14(旧探针口径)/G02 的处置见上表 |
+| `ruff check --select F,E9 src/ tests/` | All checks passed |
+
 ## 文档索引（哪份文档说了算）
 
 | 文档 | 作用 | 权威性 |
@@ -10,6 +60,7 @@
 | `AI for Research(AIR)S1命题化交接.md` | S1 的接入点交接（已完成，留作过程记录） | 已被实现覆盖 |
 | 本文件 | 面向"看板"的推进情况汇总 | 结论摘要，细节以执行进度为准 |
 | `AI for Research(AIR)智能体团队合并计划.md` | 目标架构、功能归属、M0–M5/F0–F5、验收矩阵 | 合并实施的主计划 |
+| `audit_probes.py` / `audit_sources.py` | 审查方的两个**只读探针**（离线、内存库、不联网）。`audit_probes.py` 逐条打印 §3 缺口的当前状态（`FIXED` / `STILL BROKEN`） | 缺口状态的机器可查依据；不是生产代码 |
 
 ## 10.5 本轮推进情况（彻底合并重构：主文统一给 WritingAgent + Session 拆分 + 统一入口 + §13 前端 + 追溯视图）
 

@@ -459,15 +459,25 @@ class SupervisorAgent:
     def plan(self, brief: ResearchBrief, *, version: int | None = None,
              input_refs: Iterable[ObjectRef] = (), source_set_ids: Iterable[str] = (),
              budget: TaskBudget | None = None,
-             depends_on: dict[str, list[str]] | None = None) -> TeamPlan:
+             depends_on: dict[str, list[str]] | None = None,
+             run_identity: dict[str, str] | None = None) -> TeamPlan:
         """把画像变成**版本化**团队计划。
 
         每个子问题一条 `AgentTask`, 带上子问题目标、预期收益、验收标准、依赖与预算。
         第一阶段串行执行, 因此依赖关系如实写出, 由运行时决定何时可跑。
+
+        `run_identity` (`project_id`/`problem_id`/`run_id`) 会写进**每条**任务:
+        审计复现过"计划的 `run_id` 全为空"(§3.3 G14), 于是
+        `team_projection()` 只能把无 run 的任务算进任意一次运行 —— 同项目两次运行
+        的对象会互相串。身份由**运行时统一注入** (而不是要求每个调用点都记得传),
+        只在任务自己已显式写了该字段时才保留任务的值。
         """
         plan_version = version if version is not None else (brief.version or 1)
         plan = TeamPlan(version=plan_version, brief_id=brief.brief_id,
                         rationale=brief.basis)
+        # `project_id` / `problem_id` 由下面显式传入, 因此身份里只补**运行身份**;
+        # 直接 `**identity` 会与显式关键字撞车 (TypeError: multiple values)。
+        identity = {"run_id": str((run_identity or {}).get("run_id", "") or "")}
         task_by_sub: dict[str, str] = {}
         depends = dict(depends_on or {})
         for sub in sorted(brief.subquestions, key=lambda s: s.priority):
@@ -479,6 +489,7 @@ class SupervisorAgent:
                 subquestion=sub.subquestion_id,
                 expected_gain="; ".join(sub.needs) or "给出可核查的新信息",
                 project_id=brief.project_id, problem_id=brief.problem_id,
+                run_id=identity["run_id"],
                 plan_version=plan_version,
                 input_refs=list(input_refs),
                 depends_on=[task_by_sub[d] for d in depends.get(sub.subquestion_id, [])

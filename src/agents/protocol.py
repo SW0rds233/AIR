@@ -39,7 +39,7 @@ import hashlib
 import hmac
 import json
 from enum import Enum
-from typing import Any
+from typing import Any, Sequence
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -59,7 +59,9 @@ __all__ = [
     "OBJECT_KINDS",
     "OBJECT_KIND_ALIASES",
     "OUTCOME_TERMINAL",
+    "EXTERNAL_SCOPES",
     "READ_SCOPES",
+    "SOURCE_POLICY_SCOPES",
     "RETIRED_STATUSES",
     "ROLE_LABELS",
     "WORKER_ROLES",
@@ -410,6 +412,25 @@ CAPABILITY_TOOLS: frozenset[str] = frozenset({
     "propose_review",
 })
 
+#: 资料策略 → **只有这些策略才允许**的外部取数能力 (G09)。
+#:
+#: 角色能力表 (`AGENT_CAPABILITIES`) 说的是"这个角色**能**做什么", 用户授权说的是
+#: "这次**准**做什么"。两者必须求交: 此前 `grant_for()` 只看角色表, 于是一个
+#: `source_policy="user_kb"` 的任务照样拿到 `tools:search` —— 也就是"只用本地库"
+#: 的任务可以联网外搜。这不只是越权, 还会把外部来源混进本该受控的证据链。
+#:
+#: `both` 同时包含本地与外部; 空策略 (未声明) 按**最保守**处理 (只给本地), 因为
+#: "没说要联网"不等于"可以联网"。
+SOURCE_POLICY_SCOPES: dict[str, frozenset[str]] = {
+    "user_kb": frozenset(),
+    "both": frozenset({"tools:search", "tools:pdf", "tools:vector"}),
+    "autonomous": frozenset({"tools:search", "tools:pdf", "tools:vector"}),
+    "": frozenset(),
+}
+
+#: 需要用户外部授权才能使用的读范围 (与 `SOURCE_POLICY_SCOPES` 的取值并集一致)。
+EXTERNAL_SCOPES: frozenset[str] = frozenset({"tools:search", "tools:pdf", "tools:vector"})
+
 
 class CapabilityGrant(BaseModel):
     """运行时签发的权限令牌。
@@ -429,6 +450,13 @@ class CapabilityGrant(BaseModel):
     tools: list[str] = Field(default_factory=list)
     may_submit: bool = False
     may_change_conclusion: bool = False
+    #: 本次任务**允许**使用的资料源 (来自用户授权 ∩ 任务范围)。空 = 未指定集合。
+    source_set_ids: list[str] = Field(default_factory=list)
+    #: 本次任务生效的资料策略 (`user_kb` / `autonomous` / `both`)。
+    #: 它决定了外部检索能力是否被签发 —— 见 `SOURCE_POLICY_SCOPES`。
+    source_policy: str = ""
+    #: 允许读写的本机路径 (路径导入等按范围授权的动作据此校验)。
+    allowed_paths: list[str] = Field(default_factory=list)
     issued_by: str = ""
     issued_at: str = ""
     expires_at: str = ""
@@ -458,6 +486,36 @@ class CapabilityGrant(BaseModel):
     def allows_tool(self, tool: str) -> bool:
         """可写能力检查。读工具走 `allows_read('tools:xxx')`。"""
         return self.is_valid() and self.may_submit and tool in self.tools
+
+    def allows_source_set(self, source_set_id: str) -> bool:
+        """该资料源是否在本次任务的授权范围内。
+
+        **未指定集合时按"未授权"处理**: 令牌里 `source_set_ids` 为空意味着这次派工
+        没有携带任何用户资料库授权 (例如纯自足的形式化任务), 而不是"任意资料源都行"。
+        这一条正是 G09 的修复点 —— 此前工具可以拿任意 `source_id` 去读。
+        """
+        if not self.is_valid():
+            return False
+        return bool(source_set_id) and source_set_id in self.source_set_ids
+
+    def allows_path(self, path: str) -> bool:
+        """本机路径是否在授权目录内 (前缀匹配, 大小写按平台)。
+
+        用规范化后的路径做前缀比较, 避免 `../` 之类逃逸出授权目录。
+        """
+        if not self.is_valid() or not path:
+            return False
+        import os
+
+        def norm(value: str) -> str:
+            return os.path.normcase(os.path.normpath(str(value)))
+
+        target = norm(path)
+        for root in self.allowed_paths:
+            base = norm(root)
+            if target == base or target.startswith(base.rstrip("\\/") + os.sep):
+                return True
+        return False
 
     def require_tool(self, tool: str) -> None:
         if not self.allows_tool(tool):
@@ -551,18 +609,46 @@ def writable_kinds(agent: str) -> frozenset[str]:
 
 
 def grant_for(task: AgentTask, *, extra_reads: tuple[str, ...] = (),
-              extra_tools: tuple[str, ...] = ()) -> CapabilityGrant:
-    """按角色能力表为一个任务签发令牌 (运行时是唯一调用方)。
+              extra_tools: tuple[str, ...] = (),
+              authorized_source_sets: Sequence[str] | None = None,
+              allowed_paths: Sequence[str] | None = None) -> CapabilityGrant:
+    """按 **角色能力 ∩ 用户授权 ∩ 本次任务范围** 为一个任务签发令牌。
 
-    `extra_*` 供运行时按任务契约**显式**加授权 (例如某次检索任务额外读取一个
-    已授权数据源); 它不是给模型用的入口 —— 模型没有调用 `grant_for` 的路径。
+    三者的分工 (§3.2 G09):
+    - **角色能力** (`AGENT_CAPABILITIES`): 这个角色能做什么 (静态);
+    - **用户授权** (`source_policy` + `authorized_source_sets`): 这次准做什么
+      (例如"只用本地库"的任务**不得**获得联网检索能力);
+    - **任务范围** (`task.source_set_ids`): 本次派工实际携带哪些资料源。
+
+    `extra_*` 供运行时按任务契约**显式**加授权 (例如某次检索任务额外读取一个已授权
+    数据源); 它不是给模型用的入口 —— 模型没有调用 `grant_for` 的路径。
+    注意 `extra_reads` 也必须过用户授权: 例外只对"本地只读"生效, 不能用来绕过
+    资料策略拿到联网能力。
     """
     role = role_of(task.agent)
     spec = AGENT_CAPABILITIES.get(role)
     if spec is None:
         raise GrantError(f"未登记的角色 {task.agent!r} 无法签发权限令牌")
+    policy = str(task.source_policy or "").strip()
+    if policy not in SOURCE_POLICY_SCOPES:
+        raise GrantError(
+            f"未登记的资料策略 {policy!r} 无法签发权限令牌"
+            f" (可选: {', '.join(sorted(k for k in SOURCE_POLICY_SCOPES if k))})"
+        )
+    permitted_by_policy = SOURCE_POLICY_SCOPES[policy]
     tools = list(dict.fromkeys([*spec["tools"], *extra_tools]))
-    reads = list(dict.fromkeys([*spec["reads"], *extra_reads]))
+    reads = [
+        scope for scope in dict.fromkeys([*spec["reads"], *extra_reads])
+        # 外部取数能力必须逐项得到用户授权 (本地范围不受影响)
+        if scope not in EXTERNAL_SCOPES or scope in permitted_by_policy
+    ]
+    # 授权的资料源 = 用户给的合法集合 ∩ 本次任务声明的范围
+    declared = [str(value) for value in (task.source_set_ids or []) if str(value)]
+    if authorized_source_sets is None:
+        source_sets = declared
+    else:
+        allowed = {str(value) for value in authorized_source_sets if str(value)}
+        source_sets = [value for value in declared if value in allowed]
     unknown_tools = [t for t in tools if t not in CAPABILITY_TOOLS]
     if unknown_tools:
         raise GrantError(f"能力表含未登记的可写能力: {', '.join(unknown_tools)}")
@@ -574,6 +660,9 @@ def grant_for(task: AgentTask, *, extra_reads: tuple[str, ...] = (),
         tools=tools,
         may_submit=bool(tools),
         may_change_conclusion=bool(spec["may_change_conclusion"]),
+        source_set_ids=source_sets,
+        source_policy=policy,
+        allowed_paths=[str(value) for value in (allowed_paths or []) if str(value)],
         issued_by=GRANT_ISSUER,
         issued_at=utcnow(),
     )
@@ -1150,6 +1239,13 @@ class AgentResult(BaseModel):
     input_versions: dict[str, int] = Field(default_factory=dict)
     artifact_refs: list[ArtifactRef] = Field(default_factory=list)
     proposed_changes: list[ChangeProposal] = Field(default_factory=list)
+    #: 被运行时**拒绝**的候选 (越权 / 越界 / 令牌不允许)。
+    #:
+    #: 它们只进审计记录, **绝不进权威对象库** (§3.2 G07)。此前 `finalize()` 只把整条
+    #: 结果降级为 partial, 候选仍留在 `proposed_changes` 里, 于是投影层照样登记 ——
+    #: 实测一个 evidence 角色提交的 claim 被判违规后, 库里仍出现 `status=supported`。
+    #: 保留(而不是丢弃)是为了让"模型提了什么、为什么被拒"可追溯。
+    rejected_changes: list[dict[str, Any]] = Field(default_factory=list)
     verification_refs: list[ObjectRef] = Field(default_factory=list)
     followup_needs: list[ResearchNeed] = Field(default_factory=list)
     unresolved: list[str] = Field(default_factory=list)
@@ -1263,4 +1359,5 @@ def signature_of(payload: Any, secret: str = "air.protocol") -> str:
     """
     body = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
     return hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).hexdigest()
+
 

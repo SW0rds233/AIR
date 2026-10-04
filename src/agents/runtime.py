@@ -443,8 +443,32 @@ class AgentRuntime:
         self._llm_factory = llm_factory
         self.max_tool_rounds = max_tool_rounds
         self.run_budget = run_budget
+        #: 各角色已解析出的模型 (`stage -> 模型或 None`)。
+        #:
+        #: 为什么需要它: `llm_available()` 原先只判断"工厂是否存在", 而工厂**可以返回
+        #: None** (显式离线)。两者混在一起, 离线模式下角色会以为模型可用、调用时抛
+        #: `RuntimeError`, 再退回确定性实现 —— 症状被掩盖成"跑通了", 实际每次都在
+        #: 走异常路径。这里按需解析一次并缓存, 让"有没有模型"成为**实测事实**。
+        self._resolved_llm: dict[str, Any] = {}
         #: 事件计数 (供测试与运行指标断言)。
         self.events: list[dict[str, Any]] = []
+
+    def _resolve_llm(self, stage: str) -> Any:
+        """解析某个角色的模型 (缓存); 工厂返回 None 或抛错都如实记为该角色无模型。"""
+        key = str(stage or "")
+        if key in self._resolved_llm:
+            return self._resolved_llm[key]
+        if self._llm_factory is None:
+            self._resolved_llm[key] = None
+            return None
+        try:
+            model = self._llm_factory(key)
+        except Exception as e:  # noqa: BLE001 - 取模型失败要可见, 但不能拖垮研究
+            self.emit("llm_unavailable", {"stage": key,
+                                          "reason": f"{type(e).__name__}: {e}"})
+            model = None
+        self._resolved_llm[key] = model
+        return model
 
     # ---- 事件 ----
     def emit(self, kind: str, payload: dict[str, Any]) -> None:
@@ -484,19 +508,24 @@ class AgentRuntime:
     def llm(self, task: AgentTask, usage: UsageRecord, stage: str = "") -> Any:
         """取一个**计入本任务用量**的 LLM。
 
-        未配置 LLM 工厂时抛 `RuntimeError` —— 明确失败胜过让角色偷偷改成单趟调用。
+        未配置模型时抛 `RuntimeError` —— 明确失败胜过让角色偷偷改成单趟调用。
         角色应先用 `llm_available()` 判断, 不可用时走确定性实现。
         """
-        if self._llm_factory is None:
-            raise RuntimeError("运行时未注入 LLM 工厂 (离线模式请用确定性实现)")
-        inner = self._llm_factory(stage or task.agent)
+        inner = self._resolve_llm(stage or task.agent)
+        if inner is None:
+            raise RuntimeError("运行时未注入可用的 LLM (离线模式请用确定性实现)")
         return BudgetedLLM(inner, usage, task.budget, self.cancel, task.task_id,
                            stage=stage or task.agent,
                            on_usage=lambda rec: self.emit("llm_call", {
                                "task_id": task.task_id, "agent": task.agent, **rec}))
 
-    def llm_available(self) -> bool:
-        return self._llm_factory is not None
+    def llm_available(self, stage: str = "") -> bool:
+        """是否真的有可用模型。
+
+        `stage` 留空时按**主控**解析 —— 它是"这次运行有没有模型"的代表, 与
+        `TeamRun.runtime.llm_available()` 的既有语义一致 (审计就是用它判断 G02)。
+        """
+        return self._resolve_llm(stage or "supervisor") is not None
 
     # ---- 成果校验 ----
     def validate_result(self, task: AgentTask, result: AgentResult,
@@ -507,31 +536,78 @@ class AgentRuntime:
             problems.append(f"结果的 task_id ({result.task_id}) 与任务 ({task.task_id}) 不一致")
         if result.agent and result.agent != task.agent:
             problems.append(f"结果的 agent ({result.agent}) 与任务 ({task.agent}) 不一致")
-        allowed = writable_kinds(task.agent)
-        for proposal in result.proposed_changes:
-            if proposal.kind not in allowed:
-                problems.append(
-                    f"角色 {task.agent} 不得提交 {proposal.kind} 类变更 "
-                    f"(允许: {', '.join(sorted(allowed)) or '无'})")
-            if proposal.may_change_conclusion and task.agent == "review":
-                problems.append("审阅只能提出降级建议, 不得提交改变结论真值的候选")
-            if proposal.may_change_conclusion and grant is not None \
-                    and not grant.may_change_conclusion:
-                problems.append(
-                    f"令牌不允许提交改变结论的分支 (proposal {proposal.proposal_id})")
+        for proposal, _reason in self._proposal_violations(task, result, grant):
+            problems.append(_reason)
         if result.outcome == TaskOutcome.completed and not (
                 result.summary or result.artifact_refs or result.proposed_changes
                 or result.verification_refs or result.payload):
             problems.append("完成但没有任何成果 (summary/产物/候选/核验/载荷全为空)")
         return problems
 
+    def _proposal_violations(self, task: AgentTask, result: AgentResult,
+                             grant: CapabilityGrant | None) -> list[tuple[ChangeProposal, str]]:
+        """逐条候选的违规说明 —— 违规是**候选级**的, 不是整条结果级的。
+
+        这一点很关键: 若按"整条结果违规"处理, 一个越权候选会把同一任务里合法的候选
+        一起拖下水; 若只降级整条结果 (修复前的行为), 越权候选本身仍会被登记。
+        因此这里给出**每条候选自己的**理由, 由 `finalize()` 精准隔离 (§3.2 G07)。
+        """
+        allowed = writable_kinds(task.agent)
+        violations: list[tuple[ChangeProposal, str]] = []
+        for proposal in result.proposed_changes:
+            reasons: list[str] = []
+            if proposal.kind not in allowed:
+                reasons.append(
+                    f"角色 {task.agent} 不得提交 {proposal.kind} 类变更 "
+                    f"(允许: {', '.join(sorted(allowed)) or '无'})")
+            if proposal.may_change_conclusion and task.agent == "review":
+                reasons.append("审阅只能提出降级建议, 不得提交改变结论真值的候选")
+            if proposal.may_change_conclusion and grant is not None \
+                    and not grant.may_change_conclusion:
+                reasons.append(
+                    f"令牌不允许提交改变结论的分支 (proposal {proposal.proposal_id})")
+            if reasons:
+                violations.append((proposal, "; ".join(reasons)))
+        return violations
+
     def finalize(self, task: AgentTask, result: AgentResult,
                  grant: CapabilityGrant | None = None) -> AgentResult:
-        """校验并落事件; 违规时把结果**降级为 partial** 并写明原因。
+        """校验、**隔离**越权候选并落事件; 违规时把结果降级为 partial 并写明原因。
 
-        降级而不是丢弃: 成果本身可能仍然有用, 但调用方必须看到"它不符合契约"。
+        两条并行的处置 (§3.2 G07):
+        1. **候选级隔离**: 违规候选从 `proposed_changes` 移入 `rejected_changes`
+           (带理由)。只有留在 `proposed_changes` 里的候选才可能被登记为权威对象 ——
+           "拒绝候选不得进权威库"因此是**结构性**保证, 而不是靠调用方自觉。
+        2. **结果级降级**: 仍把 `completed` 降为 `partial` 并写明原因, 让调用方看到
+           "这次成果不符合契约"。降级而不是整体丢弃: 合规的那部分成果仍然有用。
         """
+        violations = self._proposal_violations(task, result, grant)
+        quarantined: list[ChangeProposal] = []
+        if violations:
+            rejected_ids = {proposal.proposal_id for proposal, _r in violations}
+            for proposal, reason in violations:
+                result.rejected_changes.append({
+                    "kind": proposal.kind,
+                    "object_id": proposal.object_id,
+                    "proposal_id": proposal.proposal_id,
+                    "may_change_conclusion": proposal.may_change_conclusion,
+                    "reason": reason,
+                    # 只留结构摘要: 被拒的载荷不再往下游传播, 但审计时能看出提了什么
+                    "payload_keys": sorted((proposal.payload or {}).keys()),
+                    "agent": task.agent,
+                    "task_id": task.task_id,
+                })
+            quarantined = [p for p in result.proposed_changes
+                           if p.proposal_id in rejected_ids]
+            result.proposed_changes = [p for p in result.proposed_changes
+                                       if p.proposal_id not in rejected_ids]
         problems = self.validate_result(task, result, grant)
+        if violations:
+            # 越权候选同样把整条结果降级: 让下游一眼看出"这次成果里有不合契约的东西",
+            # 而不是因为违规部分已被隔离就显示成一次干净完成。
+            problems = problems + [
+                f"候选 {proposal.object_id or proposal.proposal_id} 被拒: {reason}"
+                for proposal, reason in violations]
         if problems:
             self.emit("result_rejected", {"task_id": task.task_id,
                                           "problems": problems})
@@ -539,6 +615,12 @@ class AgentRuntime:
                 result.outcome = TaskOutcome.partial
                 result.summary = (result.summary + " | " if result.summary else "") + \
                     "成果不符合契约: " + "; ".join(problems)
+        if quarantined:
+            self.emit("candidates_quarantined", {
+                "task_id": task.task_id, "agent": task.agent,
+                "rejected": [p.proposal_id for p in quarantined],
+                "kept": [p.proposal_id for p in result.proposed_changes],
+            })
         result.usage = result.usage
         self.emit("task_result", {"task_id": task.task_id, "agent": task.agent,
                                   "outcome": result.outcome.value,

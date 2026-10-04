@@ -367,59 +367,154 @@ def _snapshot_from_store(store, team: TeamRun):
     (如实写清缺什么、下一步怎么办), 而不是"没有可交付物"。把它当作空包丢掉,
     会让"研究没做出来"在界面上与"没跑过"无法区分 —— 交付级别里的"研究备忘录"
     正是为这种情形准备的。
+
+    两条**不得静默**的规则 (§3.2 G11):
+    1. 单条坏数据不阻断整次导出, 但必须**记下是哪条、为什么** (以前是裸 `continue`,
+       于是"库里 3 条证据、包里 0 条"这种情况完全无声);
+    2. 只汇集 evidence/claim/model 是不够的 —— 义务、验证方案、图表、审阅问题同样属于
+       引用闭包, 缺了它们交付包讲不出"结论依赖什么"。
     """
     from src.research.schemas import ResearchSnapshot
 
     snapshot = ResearchSnapshot(
         project_id=team.project_id, problem_id=team.problem_id, run_id=team.run_id)
-    try:
-        evidence = store.list_latest("evidence") or []
-        claims = store.list_latest("claim") or []
-        models = store.list_latest("model") or []
-    except Exception:  # noqa: BLE001 - 存储不可读时不导出
-        return None
-    for row in evidence:
+    #: 存储 kind -> (目标字段, 映射函数)
+    plan = (
+        ("evidence", snapshot.evidence, _evidence_of),
+        ("claim", snapshot.claims, _claim_of),
+        ("model", snapshot.models, _model_of),
+        ("obligation", snapshot.obligations, _obligation_of),
+        ("assumption", snapshot.assumptions, _assumption_of),
+        ("definition", snapshot.definitions, _definition_of),
+        ("validation_plan", snapshot.experiment_specs, _validation_plan_of),
+    )
+    skipped: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    for kind, target, mapper in plan:
         try:
-            snapshot.evidence.append(_evidence_of(row))
-        except Exception:  # noqa: BLE001 - 单条坏数据不阻断导出
+            rows = store.list_latest(kind) or []
+        except Exception as e:  # noqa: BLE001 - 某类对象读不出来要如实记, 不是当没有
+            skipped.append({"kind": kind, "reason": f"读取失败: {type(e).__name__}: {e}"})
             continue
-    for row in claims:
-        try:
-            snapshot.claims.append(_claim_of(row))
-        except Exception:  # noqa: BLE001
-            continue
-    for row in models:
-        try:
-            snapshot.models.append(_model_of(row))
-        except Exception:  # noqa: BLE001
-            continue
+        counts[kind] = len(rows)
+        for row in rows:
+            try:
+                target.append(mapper(row))
+            except Exception as e:  # noqa: BLE001 - 单条坏数据不阻断导出, 但要可见
+                skipped.append({
+                    "kind": kind,
+                    "object_id": str(row.get("id", "")) or "(无 id)",
+                    "reason": f"{type(e).__name__}: {e}",
+                })
+    if skipped:
+        # 写进快照的缺口列表: 交付包必须能回答"有多少登记对象没能进包、为什么"。
+        # `GapType` 里没有"导出映射"这一类, 用 `encoding_mismatch` (字段/结构对不上)
+        # 最贴近, 并在 statement 里写清具体原因, 不另造枚举值。
+        from src.research.schemas import GapType, ObjectRef, ResearchGap
+
+        for item in skipped:
+            snapshot.gaps.append(ResearchGap(
+                gap_type=GapType.encoding_mismatch,
+                target_ref=ObjectRef(id=str(item.get("object_id", "")) or "export"),
+                statement=(f"{item['kind']} 对象未能进入交付快照: "
+                           f"{item.get('reason', '')}"),
+                blocking=["交付包缺少这部分依据"],
+                resolving_actions=["修正字段映射或补全该对象的必填字段后重新导出"],
+                resolution_criteria="该对象出现在快照对应列表里, 且没有 export 缺口",
+            ))
+        team.runtime.emit("snapshot_export_incomplete",
+                          {"skipped": skipped, "registered": counts})
     return snapshot
+
+
+#: 存储行的字段名与领域 schema 的差异表 (§6.1 "统一领域 schema、显式映射并校验")。
+#:
+#: 为什么要显式映射而不是直接 `model_validate(row)`: 存储行用的是**投影层写入时的
+#: 字段名**, 领域 schema 用的是自己的名字。靠"名字碰巧一样"就会静默丢数据 ——
+#: 实测 `locator` 进不了 `location` (定位变空)、`relation` 进不了 `support`
+#: (支持关系退化成 insufficient)、`version` 被 `pop` 掉 (版本回到 1)。
+EVIDENCE_FIELD_ALIASES: dict[str, str] = {
+    "locator": "location",
+    "relation": "support",
+}
+#: 投影层写入的支持关系取值 -> `SourceEvidence.support` 的取值。
+SUPPORT_RELATION_MAP: dict[str, str] = {
+    "supports": "supports",
+    "support": "supports",
+    "refutes": "contradicts",
+    "contradicts": "contradicts",
+    "context": "context",
+    "insufficient": "insufficient",
+    "": "insufficient",
+}
+
+
+def _row_payload(row: dict[str, Any]) -> dict[str, Any]:
+    """去掉投影层加的元数据字段 (`_` 前缀), **保留** `version`。"""
+    return {k: v for k, v in row.items() if not k.startswith("_")}
 
 
 def _evidence_of(row: dict[str, Any]):
     from src.research.schemas import SourceEvidence
 
-    data = {k: v for k, v in row.items() if not k.startswith("_")}
-    data.pop("version", None)
+    data = _row_payload(row)
+    for stored_name, schema_name in EVIDENCE_FIELD_ALIASES.items():
+        if stored_name in data and schema_name not in data:
+            data[schema_name] = data.pop(stored_name)
+    if "support" in data:
+        data["support"] = SUPPORT_RELATION_MAP.get(str(data["support"]).lower(),
+                                                  str(data["support"]))
     return SourceEvidence.model_validate(data)
 
 
 def _claim_of(row: dict[str, Any]):
     from src.research.schemas import Claim
 
-    data = {k: v for k, v in row.items() if not k.startswith("_")}
-    data.pop("version", None)
+    data = _row_payload(row)
     # 团队提交的是**候选**: 没有判定层结论时一律按 proposed, 不得冒充已确证
     data.setdefault("status", "proposed")
     return Claim.model_validate(data)
 
 
 def _model_of(row: dict[str, Any]):
-    from src.research.schemas import ModelRecord
+    """模型候选 -> `ResearchModel`。
 
-    data = {k: v for k, v in row.items() if not k.startswith("_")}
-    data.pop("version", None)
-    return ModelRecord.model_validate(data)
+    这里曾 import 一个**不存在**的 `ModelRecord`, 抛出的 `ImportError` 又被上层的
+    裸 `except` 吞掉 —— 于是"模型一个都没进包"完全无声 (§3.2 G11)。真实类名是
+    `ResearchModel`。
+    """
+    from src.research.schemas import ResearchModel
+
+    return ResearchModel.model_validate(_row_payload(row))
+
+
+def _obligation_of(row: dict[str, Any]):
+    from src.research.schemas import ProofObligation
+
+    return ProofObligation.model_validate(_row_payload(row))
+
+
+def _assumption_of(row: dict[str, Any]):
+    from src.research.schemas import Assumption
+
+    return Assumption.model_validate(_row_payload(row))
+
+
+def _definition_of(row: dict[str, Any]):
+    from src.research.schemas import Definition
+
+    return Definition.model_validate(_row_payload(row))
+
+
+def _validation_plan_of(row: dict[str, Any]) -> dict[str, Any]:
+    """验证方案以 dict 形式进入 `experiment_specs` (schema 未定义专门类型)。
+
+    补上 `executed=False`: 本轮**不运行**仿真/实验, 方案不是成功证据 (§4 角色表)。
+    """
+    data = _row_payload(row)
+    data.setdefault("executed", False)
+    data.setdefault("status", "proposed")
+    return data
 
 
 def _manuscript_markdown(store) -> str:

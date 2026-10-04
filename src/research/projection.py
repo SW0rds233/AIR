@@ -53,8 +53,11 @@ KIND_MAP: dict[str, str] = {
 class TeamProjection:
     """把团队成员提交的候选登记进研究存储, 并提供角色视图所需的查询。"""
 
-    def __init__(self, store: ResearchStore) -> None:
+    def __init__(self, store: ResearchStore, *, run_id: str = "") -> None:
         self.store = store
+        #: 本投影所属的运行 (§3.3 G14): `rows()` 据此只返回本次运行的对象。
+        #: 留空 = 项目级投影 (调用方要显式这样构造, 例如归档浏览)。
+        self.run_id = str(run_id or "")
         self.registered: dict[str, int] = {}      # proposal_id -> 存储版本
         self.skipped: list[dict[str, str]] = []   # 未登记的候选与原因
 
@@ -93,6 +96,18 @@ class TeamProjection:
         payload["_submitted_at"] = utcnow()
         payload["_may_change_conclusion"] = proposal.may_change_conclusion
         payload["_rationale"] = proposal.rationale
+        # 保留**候选自己的种类** (§6.1): `KIND_MAP` 把 source/card/case/dataset 都归到
+        # `evidence` 存储族 (为了让查询与版本化只有一处实现), 但若不额外留一个区分字段,
+        # "这条是原始来源 / 案例卡 / 数据集卡"就在权威记录里彻底消失 —— 计划书明确要求
+        # "不能把 case/dataset 无区别映成 evidence 丢类型"。族用于存储, 这个字段用于语义。
+        payload["_candidate_kind"] = str(proposal.kind)
+        # 对象必须记住自己的**运行身份** (§3.3 G14): 否则查询只能读"项目全部最新对象",
+        # 同项目两次运行的对象会互相串; 有了这三个字段才能按 problem/run 裁剪。
+        payload["_scope"] = {
+            "project_id": str(task.project_id),
+            "problem_id": str(task.problem_id),
+            "run_id": str(task.run_id),
+        }
         try:
             version = self.store.put(kind, object_id, payload,
                                      expected_revision=proposal.expected_revision)
@@ -114,6 +129,17 @@ class TeamProjection:
 
     # ---- 查询 (角色视图) ----
     def rows(self, kind: str, *, limit: int = 40) -> list[dict[str, Any]]:
+        """本运行的对象行。
+
+        默认**按本运行的 `run_id` 裁剪**: `TeamProjection` 总是绑定在某次运行上,
+        返回项目全部最新对象会让"同项目的另一次运行"混进当前画面 (§3.3 G14)。
+        需要项目级视图时调用 `project_rows`。
+        """
+        return object_rows(self.store, kind, limit=limit,
+                           run_id=getattr(self, "run_id", "") or "")
+
+    def project_rows(self, kind: str, *, limit: int = 40) -> list[dict[str, Any]]:
+        """项目级对象行 (刻意跨运行, 用于历史归档/对比)。"""
         return object_rows(self.store, kind, limit=limit)
 
     def evidence_rows(self) -> list[dict[str, Any]]:
@@ -129,10 +155,20 @@ class TeamProjection:
         return latest_versions(self.store)
 
 
-def object_rows(store: ResearchStore, kind: str, *, limit: int = 40) -> list[dict[str, Any]]:
-    """取某类对象的最新版本行 (带版本号)。"""
+def object_rows(store: ResearchStore, kind: str, *, limit: int = 40,
+                run_id: str = "") -> list[dict[str, Any]]:
+    """取某类对象的最新版本行 (带版本号)。
+
+    `run_id` 非空时**只返回该次运行产出的对象** (§3.3 G14): 项目级 `list_latest`
+    会把同一项目的历史运行全部混在一起, 默认视图必须按当前运行裁剪。
+    留空表示"刻意要项目级视图" (例如历史归档浏览), 调用方要显式选择。
+    """
     stored = KIND_MAP.get(kind, kind)
-    rows = store.list_latest(stored)[:limit]
+    rows = store.list_latest(stored)
+    if run_id:
+        rows = [row for row in rows
+                if str((row.get("_scope") or {}).get("run_id", "")) == run_id]
+    rows = rows[:limit]
     for row in rows:
         object_id = str(row.get("id", ""))
         if object_id:

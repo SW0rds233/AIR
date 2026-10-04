@@ -210,7 +210,8 @@ class TeamRun:
         if projection is None:
             from src.research.projection import TeamProjection
 
-            projection = TeamProjection(self.task_store.store)
+            # 投影绑定本运行: 查询默认只返回本次运行产出的对象 (§3.3 G14)
+            projection = TeamProjection(self.task_store.store, run_id=run_id)
         self.projection = projection
         self.max_rounds = max(1, max_rounds)
         self.attachments = list(attachments or [])
@@ -271,7 +272,12 @@ class TeamRun:
         self.loop.brief = brief
         self.outcome.brief = brief
         plan = self.supervisor.plan(brief, version=1,
-                                    source_set_ids=self.source_set_ids)
+                                    source_set_ids=self.source_set_ids,
+                                    # 身份由运行时统一注入: 计划里每条任务都必须带
+                                    # run_id, 否则投影无法区分同项目的两次运行
+                                    run_identity={"project_id": self.project_id,
+                                                  "problem_id": self.problem_id,
+                                                  "run_id": self.run_id})
         self.loop.plan = plan
         self.outcome.plan = plan
         self.runtime.emit("brief_ready", {"project_id": self.project_id,

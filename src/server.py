@@ -223,6 +223,35 @@ def _build_app_for_mode(checkpointer, mode: str, *, session=None):
     return _build_team_app(session)
 
 
+def _team_llm_factory(stage: str = ""):
+    """按角色取一个模型实例 (团队会话的角色模型接线, §3.1 G02)。
+
+    为什么必须有这一层: 团队入口此前**完全没有注入** `llm_factory`, 于是
+    `AgentRuntime.llm_available()` 恒为 `False` —— 主控与七类角色全都退化成规则模板,
+    却照样能跑出一份"完整"交付包。审计复现的正是这一条。
+
+    离线约定: `THEORY_LLM=0` 时返回 `None` (沿用项目既有的离线开关, 不再造第二个),
+    此时角色走确定性实现 —— 这是**显式**离线, 而不是"忘了接线"。
+
+    取模型失败时**如实抛错**, 不返回 None: 把"模型不可用"混进"离线模式"会让
+    "自主科研没跑成"看起来像"故意离线", 那正是要防的含糊。
+    """
+    import os
+
+    from src.agents.registry import AGENT_ROLES  # noqa: F401  (导入即校验角色表)
+
+    if os.getenv("THEORY_LLM", "").strip() == "0":
+        return None
+    from src.config import build_llm
+
+    # 角色 -> 模型配置键; 未登记的角色用主模型
+    key = {"writing": "main", "review": "reviewer", "reasoning": "theorist",
+           "modeling": "theorist", "validation": "verifier",
+           "evidence": "cheap", "figures": "main", "supervisor": "coordinator"}.get(
+        str(stage or ""), "main")
+    return build_llm(key)
+
+
 def _build_team_app(session):
     """构建团队会话的"图应用" (供会话驱动逐轮调用)。
 
@@ -245,6 +274,8 @@ def _build_team_app(session):
         source_set_ids=[str(request.get("source_set_id", "") or "")],
         source_policy=str(request.get("source_policy", "user_kb") or "user_kb"),
         max_rounds=int(request.get("max_rounds", 24) or 24),
+        # 角色模型接线 (G02): 不注入的话整个团队只会跑规则模板
+        llm_factory=_team_llm_factory,
     )
     return TeamApp(TeamSession(team, emit=session.emit))
 
