@@ -1,6 +1,439 @@
 # 计划推进情况
 
-## 10.6 最新一轮（按 2026-10-04 重构版合并计划执行：安全/状态底座 +
+> **接手请先读 `交接文档-统一多智能体科研系统.md`**（现状 / 验收证据 / 复现命令 / 下一步 / 环境 / 坑）。
+> 本文件是**逐轮记录**；权威待办在《未完成工作清单.md》。
+
+## 10.16 第十一轮（2026-10-04：交接文档 + 本轮结束状态）
+
+本轮不改变任何行为，只做**交接**：新增 `交接文档-统一多智能体科研系统.md`，并把它的入口链接
+写进本文件与《未完成工作清单.md》的"下一步"一节。文档里逐条列出：验收口径对照、复现全部证据的
+命令、已完成的 10 项缺口（含实现位置）、未完成的四块（G01 文件删除的批次方案 / G13 / §8.4 /
+R5 剩余）、环境与开关、以及**本次会话踩过的 14 个坑**（对象归属读 `_scope`、`run_id` 唯一性、
+冻结快照、交付角色必须有计划任务、依赖终止后的下游、提交口重建载荷丢元数据、候选种类登记、
+删旧模块前先确认新家覆盖、Windows 引号地狱等）。
+
+**自检**：交接文档里提到的 27 个 `.py` 路径已用脚本逐个确认存在（脚本用完即删）。
+
+## 10.15 上一轮（2026-10-04 第十轮：R5 清仓 —— 文档与"没人读的旋钮"）
+
+| 项 | 处置 | 判据/证据 |
+|---|---|---|
+| `pyproject.toml` 项目名 | `langgraph-survey-pipeline` → **`air-research-team`**，描述改为"统一的多智能体学术科研系统（一个主控 + 七类角色）" | 与 README 首段、`/api/team/roles` 的定位一致 |
+| README 的失效说明 | 删除/改写：`--mode theory` 用法、"survey / theory 切换"、`main_chat` / `gui.py` 入口、"理论模式"小节标题、`THEORY_LONG_FORM` 开关行、`pipeline_cache`+`--skip-retrieval` 段落；"系统正在收敛"改为"已收敛为团队"，并把判定层/门槛/受限核验描述为**所有研究共用**（不再是某个模式的能力） | `README.md` 里已无 `--mode` / `main_chat` / `gui.py` / `survey`（除"没有综述/理论模式之分"这句正面陈述）/ `THEORY_LONG_FORM` |
+| `--max-revisions` / `--skip-retrieval` / `MAX_REVISIONS` | **退役**（CLI、`StartRequest`、输入快照、初始状态、README 参数表一并删除） | 先确认**没有读者**：全库 grep 这两个名字，除了"透传赋值"再无使用点（修订循环已随旧流水线删除；检索与否由资料授权策略 + 覆盖记录决定）。留着会让使用者以为"设了就生效"。旧会话记录里的同名键由 Pydantic 忽略（`test_server.py` 的续跑用例仍用旧记录快照覆盖这条） |
+| 用例同步 | `test_build_initial_state` 改为断言**这两个键不存在**（判据从"透传生效"改成"拨盘已删"，更强）；`test_build_initial_state_carries_the_request_text` 保留"请求原样进入状态"的语义 | 35 passed（入口/会话相关文件） |
+
+### 仍未闭合
+
+1. **G01 的文件删除**：真正的前置是"把 35 个用例文件从 `theory_pipeline` 迁走"（批次见 §10.14）。
+2. **G13 用量边界**；**§8.4 前端 8 个验收场景**；R5 剩余项（LangGraph 依赖盘点、固定
+   2019–2026 检索窗）。
+3. 工作区累计 100+ 项改动**仍未提交**。
+
+## 10.14 上一轮（2026-10-04 第九轮：R5 清仓 —— 旧综述图状态退役）
+
+> 本轮是"小刀口"：`src/graph/state.py`（`PipelineState`，127 行）的最后几个使用者是上一轮
+> 删除的引用守门/预检旧 Agent。删之前用 **AST** 全库确认"代码里没有任何引用"
+> （只剩注释与文档字符串），再删并把退役理由写进 `test_engine_retirement.py` 的清单表。
+
+| 判据 | 结果 |
+|---|---|
+| AST 扫描 `src/` + `tests/`：`graph.state` import / `PipelineState` 名字 | **0 处**（排除注释与字符串） |
+| 删除后受影响的用例 | `test_engine_retirement` / `test_agent_protocol` / `test_agent_runtime` / `test_new_features` → 75 passed |
+| 文档同步 | `graph/unified_state.py` 的"与旧状态的关系"改写为"`PipelineState` 已随流水线删除、能力去向"；`test_engine_retirement.py` 的退役表新增一行 |
+
+### 仍未闭合（含一处**顺序修正**）
+
+1. G01 剩余删除步骤：**第 1 步（`theory_writer`/`theory_render`）实际被第 5 步挡住** ——
+   `theory_pipeline.py` 与 `publication_paper.py` 也 import 它们，而 `theory_pipeline` 有
+   **35 个用例文件**在驱动。因此真正的前置是"**把测试从 `theory_pipeline` 上迁走**"：
+   先迁行为用例（判据换成真实组件：推理角色 + `AgentRuntime` + 唯一提交口，或已抽出的
+   判定层服务如 `VerificationService`/`research.obligations`），再一次性删掉整簇文件。
+   建议的迁移批次（按依赖清晰度）：① 纯判定层服务类用例（`test_design_feasibility` 的
+   服务部分、`test_research_invariants`、`test_research_derivation`）→ 直接调服务；
+   ② 交付/出版类（`test_delivery_level`、`test_publication_*`）→ 走团队 + 交付包；
+   ③ 端到端与"方向→候选确认"类（`test_theory_mode`、`test_research_identity`）→ 最后处理。
+2. **G13 用量边界**、**§8.4 前端 8 个验收场景**、**R5 其余清仓项**（README/`pyproject` 名称、
+   LangGraph 依赖盘点、`--skip-retrieval`/`--max-revisions` 去向、固定检索窗）。
+
+## 10.13 上一轮（2026-10-04 第八轮：**旧 Agent 七件套退役** —— 先迁能力，再删实现）
+
+> 上表第 3 步。判据始终是"**语义有没有减少**"：先把还在提供的能力搬进唯一层、把行为断言
+> 换成活的守护对象，再删旧模块。本轮删掉 **7 个旧 Agent（约 2000 行）**。
+
+### 一、先迁能力（新增两个通用件）
+
+| 新家 | 内容（逐字迁出，未改判定口径） |
+|---|---|
+| `publication/citation_checks.py`（236 行） | `check_citation_semantics`（引用与论述是否真的对应）、`auto_fix_citations`（只删无效编号 + 重编号，不生成新引用）、`validate_draft_citations` 及其私有 helper |
+| `publication/evidence_ledger.py`（86 行） | `build_evidence_ledger`（证据台账）、`build_verified_reference_sheet`（写作可用的引用清单）、`verify_reference_list`（候选文献逐篇验证 + 撤稿剔除） |
+
+迁移是**逐字搬运**（用脚本按函数真实边界抽取，避免手抄改错），只改模块头与 import。
+`server`/`writing`/`package` 等生产路径此时并未使用它们（旧 Agent 已无生产使用者），
+因此这次搬迁的直接价值是：**删旧 Agent 不再删掉这层语义检查**。
+
+### 二、把"血的教训"迁到活的守护对象
+
+`paper_reviewer` 的提示词里有一条来自真实事故的规则：**引用编号每轮重排**，沿用旧台账对
+`[n]` 的主题描述会让同一个问题被连续 4 轮误判成 Critical 未解决。删模块前把这条规则
+写进**真正在跑**的 `agents/review.py::ReviewAgent.SYSTEM`，并把断言迁到它上面
+（`test_relevance_cache.py::test_review_prompt_warns_about_renumbered_citations`）。
+同类迁移：`test_agent_prompts_carry_no_hardcoded_domain_vocabulary` 的守护对象由
+`PAPER_REVIEWER_SYSTEM` 换成 `ReviewAgent.SYSTEM`。
+
+### 三、删除清单与"语义去向"
+
+| 删除 | 行数 | 生产使用者 | 语义去向（覆盖更强或等价） |
+|---|---|---|---|
+| `agents/citation_checker.py` | 160 | 无 | `publication/evidence_ledger.build_evidence_ledger`（用例迁到新家） |
+| `agents/citation_guard.py` | 277 | 无 | `publication/citation_checks`（5 条语义用例迁到新家，断言未减） |
+| `agents/citation_prechecker.py` | 237 | 无 | `publication/evidence_ledger.verify_reference_list`（撤稿剔除用例迁到新家） |
+| `agents/literature_reviewer.py` | 367 | 无 | 工具循环 → `AgentRuntime.run`；`tests/test_agent_runtime.py` **11 项**覆盖（执行工具并回喂／未授权能力／未授权读范围／未知工具与异常区分／上限／取消／事件记账），强于原 3 项 |
+| `agents/outline_generator.py` | 98 | 无 | `agents/writing.py`（合并计划 §15.2 早已合并；无用例引用） |
+| `agents/paper_reviewer.py` | 692 | 无 | `agents/review.py` + `research/critic`；提示词规则与无领域硬编码断言已迁 |
+| `agents/pdf_ingestor.py` | 196 | 无 | `kb/ingest`；无用例引用 |
+
+保留（有意）：`protocol.ROLE_ALIASES` 里的旧角色名映射（**一次性迁移识别**，计划 §5.6 允许）、
+`graph/node_progress.py` 的旧节点名分支（历史 checkpoint 里仍是旧名）。
+删除的是"旧实现的断言"，不是行为判据 —— 每个模块的语义去向都记在上表里。
+
+### 四、验证基线
+
+| 命令 | 结果 |
+|---|---|
+| `pytest -q`（离线全量） | 见 §10.13 结尾 |
+| 三个混装测试文件 | 44 passed（重新指向新家后；其中引用类用例会跑真实网络校验，约 2 分钟） |
+| `ruff check --select F,E9 src/ tests/` | All checks passed |
+
+### 五、仍未闭合
+
+1. G01 剩余删除步骤（顺序见 §10.12 第三节）：`theory_writer`/`theory_render` →
+   `publication_paper`/`theory_state`/`publication_render`/`latex_render` →
+   **最后** `theory_pipeline` + `loop`（35 个用例文件靠它驱动，须先把驱动换成真实组件）。
+2. **G13 用量边界**、**§8.4 前端 8 个验收场景**、**R5 清仓**。
+
+## 10.12 上一轮（2026-10-04 第七轮：**G17 收官** —— Markdown 与 LaTeX/PDF 同一份稿件）
+
+> 上一轮把"选引擎"从运行时删掉之后，本轮处理**唯一文稿 IR 的最后一处裂缝**：交付的
+> Markdown 来自旧快照 IR，而 `.tex`/`.pdf` 来自唯一 IR —— 同一次运行的两份产物来自两种
+> 表示，"同源同版"只能靠人工比对。现在两者都从 `publication.schemas.Manuscript` 出来。
+
+### 一、改了什么
+
+| 位置 | 改动 |
+|---|---|
+| `agents/writing.py::write_main_manuscript` | 两条路径（模型起草 / 离线确定性起草）都先把稿件转成**唯一 IR**（`to_publication_manuscript`），再用 `render_markdown` 渲染 —— 与 `.tex`/`.pdf` 同一份稿件。删除只服务旧 IR 的 `_legacy_render` |
+| `agents/writing.py::to_publication_manuscript` | **块锚点改为确定性**（按文档序 `blk-<位置>`）。此前 `Block.block_id` 默认随机：同一份冻结快照渲染两次会得到**不同的正文锚点** —— 离线交付不可复现（同一输入两次产物不同），版本之间也无法按锚点对齐。这个缺陷是本轮新写的"确定性"断言抓出来的 |
+
+### 二、可验证的结果
+
+| 判据 | 结果 |
+|---|---|
+| Markdown 与唯一 IR 同源 | `write_main_manuscript(...)` 返回的稿件是 `publication.schemas.Manuscript`，且 `markdown == render_markdown(manuscript)` |
+| 确定性 | 同一快照连续渲染两次**逐字相同**（含锚点）；断言写进 `test_main_text_writing_agent.py` |
+| 可追溯 | 正文含 `<!-- block:… -->` 锚点，`manuscript_traceability.checked == "markdown"` 仍成立 |
+| 交付等级 | `problem2.md` 端到端仍为 **完整论文**，`manuscript.pdf` 落盘（`test_unified_entry_http.py`） |
+
+### 三、G01 文件删除的**顺序**（剩余工作的执行清单）
+
+删除必须自下而上，每一步都要在同一提交里迁移掉该模块的最后一批使用者：
+
+| 步 | 目标 | 先决条件（谁还在用） |
+|---|---|---|
+| 1 | `agents/theory_writer.py` + `rag/theory_render.py` | `writing.manuscript_from_snapshot` 仍用它把快照渲染成**旧 IR** —— 需改为直接由快照构造唯一 IR 的块（`publication.schemas`），此后这两个模块对生产路径无使用者 |
+| 2 | `research/publication_paper.py`（680 行） | 仅 `theory_pipeline` 与它自己的用例（`tests/test_publication_paper.py`）使用；用例的行为断言并入 `publication/render_latex` 的用例后删除 |
+| 3 | 旧 Agent 七件套（`citation_checker`/`citation_guard`/`citation_prechecker`/`literature_reviewer`/`outline_generator`/`paper_reviewer`/`pdf_ingestor`，约 2000 行） | 生产路径**已无使用者**（只有 `test_new_features`/`test_refactor_features`/`test_relevance_cache` 引用）→ 按 §5.3 D1 先确认新家覆盖（引用守门 → `publication/checks`、审阅定位 → `ReviewIssueStore`、PDF 入库 → `kb/ingest`），再迁行为用例、删旧断言 |
+| 4 | `graph/theory_state.py`、`rag/{theory_render,publication_render,latex_render}` | 随第 1–2 步的使用者一起消失 |
+| 5 | `graph/theory_pipeline.py` + `research/loop.py`（3326 行） | 最后一步：这两个模块是**测试驱动形式化研究的入口**（35 个用例文件）。要先把它们驱动的行为用例迁到真实路径（推理角色 + 唯一提交口），再删 |
+
+第 5 步是最大的一块：`tests/test_theory_mode.py`（约 1000 行、40 处引用）以及
+`test_research_*` 系列目前都通过 `theory_pipeline.run_theory_pipeline` 驱动判定层。
+迁移口径是**把驱动换成真实组件**（`ReasoningAgent` + `AgentRuntime` + 唯一提交口），
+不是"再造一个小引擎"（计划 §5.6 明确禁止）。
+
+### 四、仍未闭合
+
+1. 上表第 1–5 步（G01 的文件删除）。
+2. **G13 用量边界**（用户已明确本轮不考虑，但是真实模型自主运行的前置）。
+3. **§8.4 前端 8 个验收场景**、**R5 清仓**（README/`pyproject` 名称/LangGraph 依赖盘点、
+   `--skip-retrieval`/`--max-revisions` 去向、固定 2019-2026 检索窗）。
+
+## 10.11 上一轮（2026-10-04 第六轮：**G01 入口收敛** —— 只剩一张图）
+
+> 本轮把"选引擎"从**运行系统里彻底删除**：所有研究请求（综述型、形式化、方向型）都进
+> 同一张团队图。旧引擎的文件本身还在（`research/loop.py`、`graph/theory_pipeline.py` 等），
+> 但**运行时已经不可达**，只在测试里作为库被直接调用；下一轮按 §3 R5 的清单删除文件并
+> 改写剩余的引擎行为用例。
+
+### 一、改了什么
+
+| 位置 | 改动 |
+|---|---|
+| `src/server.py` | `DEFAULT_ENGINE`/`SURVEY_ENGINE_ENABLED`/`_resolve_engine(mode, request)`/`_build_app_for_mode` 的理论分支/`from ... theory_pipeline import build_theory_pipeline` **全部删除**；新增 `TEAM_ENGINE` 常量与不收参数的 `_resolve_engine()`；`StartRequest.mode` 删除（旧客户端传了会被 Pydantic 忽略，不会报错也不会换引擎）；`build_theory_initial_state`、`_research_progress`（**为了显示进度又建了一个引擎**）删除；反馈端点的引擎分支删除 |
+| `src/server.py::start_session` | 顺序改为：规范化输入 → 校验资料授权 → **落规格并判冲突** → 建 run/session → 注入同一快照 → 启动。新增 `_ensure_problem_spec()`：把"同 ID 改题必须 409"从旧引擎入口**搬到统一入口**（团队运行此前会静默沿用旧规格） |
+| `src/server.py::resume_session` | 旧引擎创建的会话无法用团队图续跑 → 如实返回 409 + 可执行下一步，而不是"看起来在续跑" |
+| `src/main.py` | 删除 `--mode`、`_run_theory_mode`、`--candidate`/`--max-actions`/`--max-tool-calls`；**`--source-policy` 此前被硬编码忽略**，现在真的传下去 |
+| 测试 | 建图桩从 `server.build_theory_pipeline` 迁到唯一入口 `server._build_team_app`（会话生命周期/流式/interrupt 语义不变）；`test_engine_boundary_contract`/`test_engine_retirement`/`test_unified_entry_*` 里"选择点"断言改写为**断言它不存在**（更多不是更少）；`tests/test_theory_state_contract.py` 删除，语义去向记入退役表（团队用 dataclass 状态，缺字段直接报错而不是静默变默认值） |
+
+### 三、被既有断言抓出来的**真实缺陷**（都已修）
+
+| # | 缺陷 | 后果 | 修法 |
+|---|---|---|---|
+| 1 | **R6 隔离对团队运行失效** | 命题载荷里没有 `problem_id`（归属只记在 `_scope`），而所有按问题过滤的读法把"空"当成"归属不明"→ **同项目两个问题互相看得到对方的结论**（实测两个问题的 id 集合完全相同） | `inspection.claims()` 增加 `_scope` 回退 + fail-closed；`projection.object_payload_for()` 从**运行身份**同步 `problem_id`（覆盖候选自填值，否则智能体能用字段把对象挂到别人的问题上） |
+| 2 | **工作台里 `run_id` 恒为空** | 身份只读旧引擎的运行记录；团队运行不写它 → "HTTP 返回的 ID = 工作台 = 交付包"这条链在团队路径断掉（G03 的核心要求） | `inspection.identity()` 增加团队运行状态回退 |
+| 3 | **团队运行从不冻结快照** | 交付包目录存在、界面显示"已冻结"，但对象库里没有快照 → `fork` 报"未找到可派生的快照" | `TeamSession.export()` 调 `research/snapshot.freeze_snapshot()`（冻结的唯一入口，`allow_replace` 保证重复导出幂等），失败抛 `ExportError`；写入点清单相应登记该模块 |
+| 4 | **`final_state.snapshot_id` 为空** | 会话终态无法指向交付包里的同一份快照 | 由包目录/manifest 派生 |
+| 5 | **`run_id` 会碰撞** | 主题 + 秒级时间戳：同一秒用同一主题启动两次 → **同一个 run_id**，而对象按 run 归属 → 两次运行混在一起 | 追加 4 位随机后缀 |
+| 6 | **反馈不检查对象归属** | 可以改到同项目**另一个问题**的对象 | 定位时读 `_scope`/`problem_id`，不属于本问题则澄清拒绝 |
+| 7 | `start_session` 里一行重复的 `build_initial_state` | 合同与 `spec_reused` 刚写就被覆盖（脚本化编辑的产物，被 e2e 断言抓到） | 删除重复行；并把 409 提前到**建会话之前**，不再留下悬挂会话 |
+| 8 | `usage.cost_usd` 在 `llm_calls=0` 时报 `null` | 交付清单看起来"花了多少不知道"，而离线运行的花费是确定的 0 | `UsageRecord.to_dict()`：无模型调用 ⇒ 花费**已知为 0**（有调用但缺价目时仍保持 `null`） |
+| 9 | **交付形态要求的角色可能没有任务** | 子问题来自任务分类/模型提议，而"需要哪些角色"来自 `_DELIVERABLE_ROLES`；两张表对不上时计划里没有该角色的任务，主控却在"没有可派发的任务, 且交付形态要求未满足"处收尾 → **任务全跑完、一条结论都没有**（实测：带"问题说明附件"运行，4 个任务跑完，命题数 0，等级掉到研究备忘录） | `SupervisorAgent._ensure_required_roles()`：在 `brief()` 与 `plan()` 各兜一次（幂等，只补缺失角色，不覆盖已有措辞），默认措辞表 `_DEFAULT_ROLE_SUBQUESTION` |
+| 10 | **依赖键对不上会永久卡死下游** | `settled` 按"角色+目标"文本键匹配；目标文本里带附件正文/计数时键会变，于是**已经受阻返回**的前置永远"未 settled"，下游永不就绪 | `settled` 追加"**有成果行**的任务"（成果行是"已尝试过"的直接证据） |
+| 11 | **补派任务提交的对象没有运行身份** | `needs_to_tasks` 生成的任务不带 `run_id` → 其对象 `_scope.run_id` 为空 → 按 run 裁剪的视图（交付摘要的登记对象计数、按 run 过滤的产物清单）把它们当成"不是这次运行产出的"（实测：工作台有命题，摘要 `claim: 0`） | `TeamRun._execute_one()` 在唯一执行口回填 `run_id`/`project_id`/`problem_id` |
+| 12 | **义务对象丢元数据** | `commit._normalise_obligation` / `_apply_obligation_disposition` 会**重建**载荷，把唯一提交口刚写的 `_scope` 一起丢掉 → 义务没有运行身份 | 新增 `_keep_meta()`/`_scope_meta()` 并在两处重建后重新带上元数据 |
+| 13 | **交付清单没记问题附件** | 团队导出的 `input_snapshot` 只有 request/资料源/策略 → 事后无法区分"用户交来的题面"与"检索到的证据文献"（旧路径记了，团队路径漏了） | `export()` 的输入快照补 `attachment_ids`/`attachments`/`problem_id`/`run_id` |
+
+### 四、验证基线
+
+| 命令 | 结果 |
+|---|---|
+| `pytest -q`（离线全量） | **1159 passed, 1 skipped**（起点 1082） |
+| `ruff check --select F,E9 src/ tests/` | All checks passed |
+| 离线 e2e（HTTP 全链路） | 4 passed：启动 → 事件流 → 工作台同一 run_id → 产物清单 → 对象级反馈 → 从快照派生 |
+| **真实 Chromium 九项** | **9 passed**（含"附件上传 → 启动 → 工作台出现结论对象"整条链路） |
+| 团队验收（`problem2.md`） | `mode=team`、交付等级 **完整论文**、`manuscript.pdf` 落盘、`usage.cost_usd == 0.0` |
+| 新增回归 | `tests/test_team_planning_and_scope.py`（10 项：交付形态角色全覆盖 + 兜底不覆盖已有措辞 + 补派对象带 run 身份 + 计划任务执行前回填身份） |
+
+### 五、仍未闭合
+
+1. **删除引擎文件**：`research/loop.py`、`graph/theory_pipeline.py`、`graph/theory_state.py`、
+   `rag/{theory_render,publication_render,latex_render}`、`publication_paper.py`、
+   `theory_writer.py`、7 个旧 Agent 与旧 `PipelineState` 仍在（**运行时已不可达**，只在测试里
+   作为库被直接调用）。删除时要在同一提交里处理 `tests/test_theory_mode.py` 等仍直接调它们的用例。
+2. **G13 用量边界**、**§8.4 前端 8 个验收场景**、**R5 清仓**（README/`pyproject`/LangGraph 依赖盘点）。
+
+## 10.10 上一轮（2026-10-04 第五轮：新颖性对照回到团队 + 排序口径抽出 + G01 准入判据）
+
+> 继续按 §9 的 R2（"抽取旧引擎能力"）推进。**仍未删除 `TheoryEngine`**，但本轮把"能不能删"变成了**可执行的判据**（见第三节第二条）。
+
+### 一、本轮的切片
+
+| 切片 | 问题（已核实） | 本轮处置 | 回归 |
+|---|---|---|---|
+| **新颖性对照在团队路径上缺失** | `_act_compare_novelty` + `novelty.assess` 只在引擎里；团队没有新颖性对象，于是交付包 `_limitation()` 只能落到 `not snapshot.novelty` 分支 —— **"没比过"和"比过没问题"在交付物里长得一样** | 新增 `research/novelty_service.py`：`novelty_lookup_for(service, source_policy=)` 选对照来源（本地库优先；**只有授权外搜时才走外部检索**），`assess_novelty_for()` 落记录；注册 `novelty` 为可写对象种类（`OBJECT_KINDS`/`WRITABLE_KINDS`/`KIND_MAP`）；证据角色产出**确定性 id**（`nov-<claim>-v<version>`）的记录；`snapshot_from_store` 收集 novelty（交付包/出版层据此写局限） | 新增 `tests/test_team_novelty.py`（7 项：`user_kb` 绝不外搜／`autonomous` 才外搜且声明覆盖范围／无来源也落 `unchecked` 并写原因／有本地库时记 `local_kb` 与库名／团队运行留下记录且快照与 `_limitation()` 都能看到"新颖性未确认"／种类已登记／受阻结果仍可携带候选） |
+| **"受阻"被当成"什么都没产出"** | `AgentBase.blocked()` 不接受 `changes` —— 调用方一传就 `TypeError`，整条证据任务 `failed`，而卡片上只显示"成果不符合契约"（症状离原因很远） | `blocked(..., changes=)` 接受候选：检索受阻时"新颖性未对照"这条记录仍要落盘 | `test_blocked_results_may_still_carry_candidates` |
+| **排序口径长在引擎里** | `OBLIGATION_PRIORITY` / `_obligation_kind` / `_claim_of` 都在 `loop.py`，只读检视层为了排缺口顺序必须 import 引擎 —— 引擎退役时工作台会跟着消失 | 新增 `research/obligations.py`（唯一口径，含"为什么是这个顺序"的说明），`loop.py` 转发，`inspection.py` 改从这里取 | 既有缺口/工作台用例（`test_store_inspection` 的差异测试逐条比对缺口顺序） |
+| **"可以删引擎了吗"没有判据** | 只能靠人工读代码判断还有哪些能力挂在引擎上 | `tests/test_engine_retirement.py::test_extracted_services_do_not_depend_on_the_engine`：用 AST 扫描 **11 个已抽出的服务/只读模块**，任何一个出现 `src.research.loop` 的 import 即失败 | 该用例本身（它在有人把引擎依赖写回去时立刻变红） |
+
+### 二、可验证的结果
+
+| 场景 | 结果 |
+|---|---|
+| 离线团队运行（`user_kb`、无资料库） | 落 `nov-clm-pre-v2`（确定性 id）`status=unchecked`、结论"未接入已有工作检索, 无法判定新颖性"；`snapshot.novelty` 有 1 条；`_limitation(snapshot)` 含**"新颖性未确认"** |
+| 授权边界 | `novelty_lookup_for(None, source_policy="user_kb")` → `(None, {})`（不联网）；`"autonomous"` → 外部 lookup 且声明覆盖 `arXiv/Semantic Scholar/OpenAlex` |
+| 已抽出的能力不再依赖引擎 | AST 扫描 11 个模块 → 0 处 `src.research.loop` 依赖（`inspection`/`reporting`/`budget`/`obligations`/`feedback`/`forking`/`novelty_service`/`snapshot`/`delivery`/`commit`/`verification_service`） |
+
+### 三、验证基线
+
+| 命令 | 结果 |
+|---|---|
+| `pytest -q`（离线全量） | **1154 passed, 1 skipped**（起点 1082） |
+| `ruff check --select F,E9 src/ tests/` | All checks passed |
+| `npx tsc --noEmit` / `npx vitest run` | 0 error / 256 passed（20 files） |
+| `pytest tests/test_browser_web_flow.py`（真实 Chromium） | 9 passed |
+
+### 四、仍未闭合
+
+1. **G01 / P0 的最后一步**：`server.py` 只剩 1 处 `TheoryEngine`（无团队状态的旧问题的反馈迁移开关）；CLI `--mode theory` / `_run_theory_mode` / `_resolve_engine` / `DEFAULT_ENGINE` / `SURVEY_ENGINE_ENABLED` / `StartRequest.mode` 仍在；`research/loop.py`、`graph/theory_pipeline.py`、`rag/{theory_render,publication_render,latex_render}`、`publication_paper.py`、`theory_writer.py`、7 个旧 Agent 与旧 `PipelineState` 仍在。删它们要在**同一提交**里改写 §3 R5 列出的双引擎断言。
+2. **G13 用量边界**（用户已明确本轮不考虑，但是真实模型自主运行的前置）。
+3. **§8.4 前端 8 个验收场景**、**R5 清仓**（README/`pyproject` 名称/LangGraph 依赖盘点）。
+
+## 10.9 上一轮（2026-10-04 第四轮：只读检视层去引擎化 + 反馈/派生回到团队 + 团队运行进入工作台）
+
+> 继续按 §9 的 R2（"抽取旧引擎能力"这一组）推进。**仍未删除 `TheoryEngine`**（原因见第四条）。
+
+### 一、本轮的切片
+
+| 切片 | 问题（已核实） | 本轮处置 | 回归 |
+|---|---|---|---|
+| **工作台只读端点依赖研究引擎** | `server._research_state` 建 `TheoryEngine(spec, store, …)` 才读得出对象；`reporting.workbench_projection(engine=…)` 依赖 `engine.metrics/model_selection/model_comparison/_gaps/event_digest/decisions/budget`。一个**只读**端点因此依赖了"能执行研究动作"的组件 —— 引擎退役时工作台会被迫跟着重写 | 新增 `research/inspection.py::StoreInspection`：只读检视层（对象读取、逐命题证据归属、运行身份/用量/预算、事件摘要、指标、模型选择/比较、缺口），**不写任何对象、不执行任何动作**；`reporting.workbench_projection` 改为只接受**已算好的值**（不再收 engine）；`server._research_state` 改用检视层 | 新增 `tests/test_store_inspection.py`（14 项，**差异测试**：同一份存储逐项比对检视层与引擎的 id/版本/事件摘要/缺口/模型选择/身份/预算）；**决定性用例** `test_workbench_endpoint_never_constructs_a_research_engine`（把 `TheoryEngine` 打成一构造就抛错，端点仍须 200 并返回正确内容） |
+| **团队运行在工作台里"没有研究问题"** | 团队路径从不写 `ResearchSpec`，而工作台/问题列表/交付清单都按 `problem_id` 找规格 —— 同一个项目在团队模式下只读端点直接 404，对象明明在库里 | `TeamRun.prepare()` 落盘输入规格（`_persist_spec`，**不覆盖已有规格**：它是冻结的输入契约），并落 `spec_persisted` 事件 | `test_team_run_is_browsable_in_the_research_workbench`（团队跑完后工作台 200、能看到结论/义务/事件，且结论状态是判定层给的 `supported`）；`test_a_second_team_run_does_not_overwrite_the_frozen_spec` |
+| **摘要/预算/分类各写一份** | ① 事件摘要在 `loop._summarize_event`（110 行）里；② `ResearchBudget` 长在 `loop.py`，只读侧要用它就只能 import 引擎；③ `_claim_category` **有两份且已分叉**：内核只回 `causal/empirical/scenario/normative/formal`，引擎还回 `monotonicity/identity/inequality` —— 而团队建模角色用的是内核那份，能力声明因此说"未知问题类型 formal: 需先澄清类型再研究"（内核文档还声称有一条一致性断言，**实际不存在**） | ① 事件摘要逐字迁到 `reporting.summarize_event`，引擎转发；② `ResearchBudget` 迁到 `research/budget.py`，引擎再导出；③ `_claim_category` 完整规则收进内核，`loop._claim_category` 转发 | 摘要迁移由既有 `test_research_logging.py`（15 项，含 digest 逐字断言）与差异测试把守；`test_claim_category_has_one_implementation` 补齐**那条不存在的**断言（9 个样本逐项比对 + 三态期望） |
+| **用户反馈 → 对象级修订** | 该能力只在 `TheoryEngine.submit_feedback` 里，于是 `/api/research/{p}/feedback` 必须建引擎；团队路径没有任何入口 | 新增 `research/feedback.py`（定位对象 → 选承接角色 → 交回主控）与 `TeamRun.submit_feedback()`：意见变成**跨职责需求**，由主控转成 `AgentTask`，成果仍经唯一提交口落盘；**不猜对象**（没给 id 就返回澄清 + 候选项，状态零改动）；已收尾的运行允许继续，并给这次意见**自己的轮次额度**（否则 `rounds >= max_rounds` 会立刻收尾，需求根本派不出去 —— 实测踩到） | 新增 `tests/test_team_feedback.py`（7 项：无对象澄清且不改对象／指定对象则**目标对象换版**而非新建／已收尾能继续且真的派工／未知对象拒绝／候选项只列本问题／HTTP 端点两条路径／需求种类与角色一致） |
+| **派生（fork）** | 同上：只在 `TheoryEngine.fork_from_snapshot` 里，派生接口必须建引擎 —— 而派生是**用户可见功能**（从快照派生新问题、不复制验证记录） | 新增 `research/forking.py::fork_from_snapshot(store, spec, …, on_claim=)`：复制命题并**重置状态** + 同一步创建新问题规格与血缘；引擎的同名方法改为转发（它额外用 `on_claim` 登记自己的研究路线），HTTP 端点不再建引擎 | `test_workbench_api.py::test_fork_endpoint_does_not_need_a_research_engine`（把引擎打成一构造就抛错，派生仍须 200 且新问题可打开、不复用验证记录）；既有 fork 用例（`test_research_autonomy` / `test_workbench_api` / `test_e2e_http`）全部保持通过 |
+
+### 二、可验证的结果
+
+| 场景 | 结果 |
+|---|---|
+| 团队运行 → 工作台 | `GET /api/research/proj-team-wb/state?problem_id=p1` → **200**，`claims[0].status == "supported"`（判定层给出）、义务与事件都在、`budget.max_actions == 40` |
+| 只读路径不构造引擎 | 把 `src.research.loop.TheoryEngine` 换成"一构造就抛 AssertionError"后，端点仍返回 200 且内容正确 |
+| 检视层与引擎一致性 | 对象 id/版本、`event_digest`（逐字）、`metrics`（events/counts/anomalies/actions/tool_calls）、`gaps`（类型/目标/陈述逐条）、`model_selection`、`model_comparison`、`identity`、`budget` 全部相同 |
+| 检视层真的只读 | 调用全部读方法后，对象版本索引与事件条数**一个都没变** |
+| 反馈 → 修订 | HTTP：无对象 → **400 + 澄清 + 4 个候选**；指定对象 → **200**、`owner=reasoning`、`rounds_used=3`，目标命题 **v1 → v2**（修订而非新建） |
+| 派生不建引擎 | 把引擎打成一构造就抛错后 `POST /api/research/fork` → **200**、新问题可打开、`reused_verifications == []` |
+
+### 三、验证基线
+
+| 命令 | 结果 |
+|---|---|
+| `pytest -q`（离线全量） | **1146 passed, 1 skipped**（起点 1082） |
+| `ruff check --select F,E9 src/ tests/` | All checks passed |
+| `npx tsc --noEmit` / `npx vitest run` | 0 error / 256 passed（20 files） |
+| `pytest tests/test_browser_web_flow.py`（真实 Chromium） | 9 passed |
+
+### 四、仍未闭合
+
+1. **G01 / P0 仍未做**：`server.py` 只剩 **1 处** `TheoryEngine` 实例化
+   —— `/api/research/{p}/feedback` 对**没有团队运行状态**的问题仍走引擎（迁移开关）；
+   另有 CLI `--mode theory` 与 `_resolve_engine`/`DEFAULT_ENGINE`/`SURVEY_ENGINE_ENABLED`、
+   `StartRequest.mode`。`research/loop.py` 与 `graph/theory_pipeline.py` 的文件本身也还在。
+   本轮把**只读**、**反馈（有团队状态时）**、**派生**三处从引擎里拿了出来。
+2. **新颖性对照**仍未在团队里实现（内核函数已有）。
+3. **G13 用量边界**未做（用户已明确本轮不考虑，但它是真实模型自主运行的前置）。
+4. **R5 清仓**未做；§8.4 前端 8 个验收场景未做。
+5. `research/inspection.py` 仍从 `loop` 取三样排序口径（`OBLIGATION_PRIORITY`、
+   `_obligation_kind`、`_claim_of`）；`feedback.py` 的候选项分组也依赖存储 kind 名。
+   **引擎退役时必须把它们一起搬走**，否则工作台会跟着引擎消失。
+
+## 10.8 上一轮（2026-10-04 第三轮：唯一出版层 + 可反驳路径 + 多订阅者事件流）
+
+> 继续按 §9 的 R2/R3/R4 推进。**仍未删除 `TheoryEngine`**（原因见 10.7 与本节第四条）。
+
+### 一、本轮的四个切片（都有可失败回归）
+
+| 切片 | 问题（已核实） | 本轮处置 | 回归 |
+|---|---|---|---|
+| **G17 出版层（唯一渲染）** | 交付包**只有 Markdown**：`rag/{theory_render,publication_render,latex_render}` 三套排版入口各自解析一种表示，"预览/Markdown/PDF 同源同版"只能对其中一条成立；交付等级因此永远封顶在"论文草稿" | 新增 `publication/render_latex.py`（**只接受唯一文稿 IR** 的 LaTeX 渲染器：转义/前言/表格/`thebibliography`；`\cite{refN}` 只对参考文献表里真有的条目发，杜绝自造悬空引用）与 `publication/compiler.py`（编译实现从 `rag/latex_compiler.py` 迁来，旧模块改为**转发**，无第二份实现）；`rag/latex_render.py` 的前言与转义改为从 `publication.render_latex` 取用；`TeamSession.export()` 渲染 `.tex` →**真编译**→ 用编译事实**重评**交付等级并回写 manifest | 新增 `tests/test_research_commit_and_closure.py::test_latex_render_uses_the_same_ir_and_has_no_dangling_references` / `::test_team_delivery_writes_markdown_latex_and_pdf_from_one_source`；`test_team_session.py` 的等级断言从"只能是草稿"收紧为"说完整论文就必须真有编译好的 PDF" |
+| **可反驳路径（§5.4 反例搜索）** | 团队没有反例搜索：命题**不成立**时只会得到 unsupported，结论停在"受阻"——验收矩阵要求的"可证明/可反驳各一例"在团队里走不到 | `verification_service` 增 `check_counterexample()`（判定用内核 `counterexample_verdict_for`：只有**可回代反例**才算反驳；没找到反例只记有限测试证据）；`ReasoningAgent` 对可编码命题补一条 `refute` 义务（`required=False`）；`claim_state_for` 改为**反例不受 `required` 过滤** | `test_research_commit_and_closure.py::test_refutation_is_not_filtered_by_required_flag` / `::test_unclosed_counterexample_search_does_not_block_a_proven_claim` / `::test_team_decides_provable_and_refutable_claims`（`x**2>=0` → supported；`x**2>=x` → refuted 且带机器反例） |
+| **G15 多订阅者事件流** | `session_events()` 回放后仍 `session.events.get()` —— **两个页面互相抢事件**；`connected`/合成终止帧用 `current_seq+1`，**占用了下一条业务序号**（实测：日志最大 6，帧却发 `id: 7`），于是下一条真实事件被客户端当成重复丢掉 | `EventLog` 增条件变量与 `wait_for(cursor)`；SSE 改为**每订阅者自带游标读持久日志**（不再消费共享队列）；`connected`/心跳/合成终止帧**不带业务 id**；缺口如实发 `event_log_truncated`；断线后继续等待（"断开连接"不等于"研究停止"） | 新增 `tests/test_sse_subscribers.py`（3 项，**真并发**双 SSE 连接：两端事件集合相同、带 id 的帧必须落在真实日志序号内、从中间游标只收到之后的事件） |
+| **顺带修掉的形式化缺陷（3 个，都导致"可判定题变成不可判定"）** | ① `extract_design_params()` 不认标准记号 `t-(v,k,λ)`；② 量词段后的"变量列表+连接词"没剥掉，`lhs` 解析成 `"x 都有 x**2"`；③ 题面尾部的指令（"并给出严格证明"）留在右端，`rhs` 变成 `"0, 并给出严格"` | 分别补上记号抽取（`2-(211,15,1)` 与"设计/区组+`(v,k,λ)`"两种写法）、连接词切分（只在连接词后仍有内容时才切）、尾部指令正则（允许"并/请/再 + 给出/说明 + 严格/完整 + 证明/反例/…"）；另把反例探测网格从**纯整数**扩到有理数（`x**2>=x` 的反例是 `x=1/2`，整数网格上该命题处处成立） | 上述可反驳/可证明用例全部走这条链路；`test_research_derivation` / `test_reasoning_kernel` / `test_theory_mode` 等 128 项回归不变 |
+
+### 二、本轮的端到端事实
+
+| 场景 | 结果 |
+|---|---|
+| 离线 `problem2.md`（团队路径） | `status=completed`、交付等级 **完整论文**、`manuscript.md` + `manuscript.tex` + **`manuscript.pdf`（66 KB，xelatex 编译 ok）**、`llm_calls=0` |
+| 离线"可证明" | `x**2 >= 0` → 命题 **supported**（`symbolic_check`、义务 closed、核验记录 passed） |
+| 离线"可反驳" | `x**2 >= x` → 命题 **refuted**（义务 refuted、机器反例 `{"x": "1/2"}`、记录 failed） |
+| 真实模型（上一轮已验） | `llm_calls=3`、成本 $0.0336、19 个交付文件；本轮出版层使其同样能产出 `.tex`/`.pdf` |
+
+### 三、验证基线（本轮实测）
+
+| 命令 | 结果 |
+|---|---|
+| `pytest -q`（离线全量） | **1118 passed, 1 skipped**（起点 1082；本轮新增 3 + 4 + 3 项用例） |
+| `ruff check --select F,E9 src/ tests/` | All checks passed |
+| `npx tsc --noEmit` / `npx vitest run` | 0 error / 256 passed（20 files） |
+| `pytest tests/test_browser_web_flow.py`（真实 Chromium） | 9 passed |
+
+### 四、仍未闭合
+
+1. **G01 / P0 仍未做**（同上轮）：引擎里仍有一批团队没有的能力 —— 证据挂接到指定命题
+   （`EvidenceLink`）、新颖性对照、快照冻结/续跑/**派生（fork）**、用户反馈→对象级修订、
+   `writing_gap_feedback`、对象级指标。本轮把**出版层**与**反例搜索**从清单里划掉了，
+   剩下的抽取完才能删文件。
+2. **G13 / P1 未做**（按要求暂不考虑预算上限）。
+3. **G16 / P1 未做**：`TeamRun` 每次创建空 `TeamLoopState`，`recovery_view()` 只是查询，
+   没有重建 brief/plan/results/open_needs/dispatched；`TaskStore.create()` 同键复用不返回旧 identity。
+4. **R5 清仓未做**：`pyproject` 项目名、README 的 `main_chat`/`gui`/模式切换、
+   `protocol.py` 旧角色映射、`StartRequest.mode`、`--skip-retrieval`/`--max-revisions` 去向。
+5. **真实模型的引用纪律**：实测模型仍会在正文写 `[1][2][3]`（无来源可引），出版门槛
+   如实拦下并把等级降为"论文草稿"；这说明"渲染时只按来源清单分配编号"这条下游约束
+   还需要更强的实现（当前只做到"标出并降级"，没有改写模型文本）。
+
+## 10.7 上一轮（2026-10-04 第二轮：团队形式化闭环 + 唯一提交口 + 交付门槛 + 图表/前端收敛）
+
+> 依据《智能体团队合并计划》§9 的 R1（G08/G12/G13）与 R2 前段（G03/G06），外加 R3 的
+> G18 与 R4 的 G19。**本轮没有删除 `TheoryEngine`**（原因见"四、仍未闭合"第一条）。
+
+### 一、本轮修掉的问题（都有可失败回归）
+
+| 缺口 | 问题（审计复现） | 本轮处置 | 回归 |
+|---|---|---|---|
+| **G03 / P0** | 请求绑定时机错误：`start_session()` 先 `_make_session()`（已建 `TeamRun`）后填 `session.request`/`run_id`；`TeamApp.stream()` 不消费初始字典里的研究身份与资料；附件未进团队 | 入口改成固定顺序：**规范化输入与文件 → 校验资料授权 → 分配身份 → 创建 run/session → 注入同一输入快照 → 启动**。新增 `_normalized_input()` 作为**唯一**输入快照（`initial_state`/`session.request`/团队装配都取自它）；`_make_session(..., request=)` 在建图**之前**落位请求；`_build_team_app()` 现在把附件清单与附件正文一并交给团队 | `test_team_wiring_and_identity.py::test_http_identity_reaches_the_team_and_its_research_store`（一路核对到团队持有的研究库）/ `::test_team_entry_consumes_attachments_and_source_policy`；`test_session_entry_contract.py` 的旧断言"团队拿不到 project/problem"已按新契约改写 |
+| **G06 / P0** | 团队形式化路径未闭环：内核路径把计划/推导压成一条 claim 候选，未提交义务/推导/验证对象；`KIND_MAP` 里根本没有 `obligation`/`verification`，团队写的义务被登记层当"未登记种类"整批丢掉 | 新增 `research/verification_service.py`（**核验服务**：工具核验 / 规则核验 / 独立审查三分派，产出 `VerificationRecord` + 义务处置）与 `research/formulation.py`（**形式化服务**，从旧引擎按职责抽出）；`ReasoningAgent.formal_closure()` 走完"命题 → 义务 → 工具核验 → 结构化记录 → 状态归并"，全部作为**候选**提交；`KIND_MAP` 补齐 `obligation`/`verification`/`gap`；命题状态判据抽到 `reasoning_kernel.claim_state_for`（引擎与团队共用同一份，差异测试把守） | 新增 `tests/test_research_commit_and_closure.py`（14 项，含状态归并三态与"候选不得自报等级"）；`test_team_run.py::test_math_request_uses_the_formal_derivation_kernel` 收紧为"必须提交义务候选" |
+| **G08 / P0** | 事务与 read-set 未接入：`TaskStore.commit_result()` 已有能力，团队走 `finish()` 后逐条 `put()` | 新增 `research/commit.py::ResearchCommitService` —— **唯一提交口**：校验（角色可写种类）→ read-set 检查 → 丢弃候选自报的科学等级 → 按核验记录重算义务处置 → 按内核判据重算命题状态 → **一个事务**提交任务终态/对象/事件/幂等收据。`TeamRun._persist_result()` 改走它 | `test_research_commit_and_closure.py` 的"过期不合入""重放不产生第二个对象""越权种类在提交口被拒"；另修一个**真实缺陷**：`submit_step` 给同一步的每条事件都挂同一个幂等键，第二条就撞唯一索引并整步回滚 |
+| **G12 / P1** | 角色跑过即被当成交付依据：`_missing_roles()` 把 partial 也算满足；导出未传研究/出版门槛；`TeamApp.stream()` 吞导出异常；达到轮次上限也不走统一收尾 | 新增 `research/delivery.py::assess_delivery()`（研究有效性 + 论文表达 + 出版完备三道门槛，`classify_deliverable` 定级）；`TeamRun._finish()` 在交付时按门槛复核，未过一律 `completed → partial` 并把理由写进未决报告与 `stop_reason`；`TeamSession.export()` 抛 `ExportError`（可恢复）；`TeamApp.stream()` 如实发出 `research_team_export_failed`；轮次上限出口也走同一 finalize；`_DELIVERABLE_ROLES` 与"要不要派写作/审阅"改由同一张表决定（补上"要求写作却从不派工"） | `test_research_commit_and_closure.py::test_export_failure_is_a_recoverable_error_not_an_empty_package` / `::test_run_status_completed_equals_delivery_gate_passed`；另修 `delivery_gate` 一个**真实缺陷**：0 条命题 + 只有骨架正文时仍报"论文草稿" |
+| **G18 / P1** | 图表路径未隔离（多 run 互相覆盖）、校验问题记录后仍渲染、`input_versions` 为空、公式直接 `parse_expr`（实测可执行任意 Python） | 见下"三、并行切片" | `tests/test_figure_artifact_service.py`（26 项） |
+| **G19 / P1** | 前端三份状态并存（`air-global.research` / `app.currentResearch` + ID 镜像 / `team-controller` 的 reducer store），`syncSelectionFromLegacy()` 表明新 store 不是唯一权威 | 见下"三、并行切片" | `src/web/tests/single-source-of-truth.test.ts` + `tests/test_browser_web_flow.py` 新增真实 Chromium 用例 |
+
+**顺带修掉的真实缺陷（都因此前"跑不到"而从未暴露）**：
+
+1. `AgentBase.partial()` 不收 `needs` 参数，而写作角色在"有未决项"时必传它 ——
+   结果是**只要稿件有未决项，写作任务就整条 `failed`**，交付判定只看到
+   "交付形态要求未满足"，真正原因埋在 `failure_reason` 里；
+2. `TeamRun` 建 `SupervisorAgent(llm=None)`：G04 把"主控真调模型"修进了
+   `SupervisorAgent.brief()`，但**装配层一直没把模型交给主控** ——
+   角色模型被解析出来了却从未使用（这正是审计用 `llm_calls == 0` 判断的那条；
+   实测修复前 `llm_calls=0` 而 `tool_calls=38`）。现由 `bootstrap.role_llm_factory()`
+   统一解析并计入运行用量（主控用量并入 `outcome.usage`）；
+3. 达到轮次上限时 `step()` 直接返回 `False` 而不 `_finish()` —— 运行停在
+   `status="queued"`、没有停止原因、没有交付评估（`TeamRun.run()` 有兜底，
+   `TeamSession.run_to_completion()` 没有，于是 CLI 路径就是这种状态）；
+4. 快照的引用闭包缺 `verification`/`attempt`/`evidence_link`：交付门槛因此报
+   "结论缺少有效验证记录"，而记录就在库里（实测 claims=1, verifications=0）；
+5. `writing_map` 在团队路径上从未计算，导致"结论明明写进了正文"仍被判
+   "主要结论未映射到正文位置"。
+6. `extract_design_params()` 只认叙述性措辞（"每轮恰好…"），不认标准参数记号
+   `t-(v,k,λ)`：一个**有唯一确定答案**的判定题因此被当成研究方向并停在未决。
+
+### 二、验证基线（本轮实测）
+
+| 命令 | 结果 |
+|---|---|
+| `pytest -q`（离线全量） | **1108 passed, 1 skipped**（本轮起点 1082） |
+| `ruff check --select F,E9 src/ tests/` | All checks passed |
+| `npx tsc --noEmit` | 0 error |
+| `npx vitest run` | **256 passed / 20 files**（起点 227 / 19） |
+| `pytest tests/test_browser_web_flow.py`（真实 Chromium） | **9 passed** |
+| `audit_probes.py` | G02/G04/G05/G07/G09/G10/G11/G14 全部 `FIXED` |
+| **真实模型端到端（离线之外）** | `problem2.md` 走团队：`status=completed`、交付等级**论文草稿**、`llm_calls=3`、tokens 43,929、成本 $0.0336、模型 `deepseek-v4-flash`、19 个交付文件 |
+| 离线 `problem2.md` | 完整论文包、`llm_calls=0`、命题状态由判定层从 `design_necessity` 证书算出（**2-(211,15,1) 不存在**，引 Bruck–Ryser–Chowla） |
+
+### 三、并行切片（G18 / G19，各自独立完成并验证）
+
+- **G18 图表产物服务**：新增 `rag/figure_formula.py`（AST 白名单解析 + 受限求值，
+  指数上限，无 `eval`/内建函数）；`agents/figures.py` 成为唯一校验式 FigureSpec 服务，
+  目录按 `figures/<run>/<task>/v<n>/` 分层，校验（来源登记/单位/模型域/权限）**先于**渲染，
+  拒绝时不落盘并返回结构化失败；`rag/figure_llm.py` 的**自由脚本路径整段删除**
+  （旧 `parse_expr` 路径实测可执行 `open(...)` 写文件）；`input_versions` 与真实
+  `ArtifactRef`（含 sha256）补齐。
+- **G19 前端单一状态**：`state/research-store.ts` 成为唯一可写状态（进程级单例 +
+  reducer + selector），`current-research.ts` 降为只读冻结投影，`window.AIR.research`
+  改成无 setter 的 getter；`syncSelectionFromLegacy`/`legacyResearch`/`app.currentResearch`
+  与 6 个 ID 镜像/`workbenchData` 等全部删除；新增真实 Chromium 用例核对
+  `#projid` = `window.AIR.research.projectId` = 团队 store 的 `selection.projectId`。
+
+### 四、仍未闭合（**不得当成已完成**）
+
+1. **G01 / P0 未做（有意）**：本轮**没有**删除 `TheoryEngine`。计划 §9 的顺序要求
+   "先让团队覆盖已支持任务 → 逐组抽取旧引擎能力 → 删对应旧分支 → 最后删文件"，
+   而引擎里仍有一批团队尚未具备的能力：证据挂接到指定命题（`attach_evidence` +
+   `EvidenceLink`）、模型提议/比较与选择、新颖性对照、验证方案生成、反例搜索、
+   快照冻结/续跑/派生（`submit_feedback`/`fork_from_snapshot`）、LaTeX/PDF 出版层。
+   现在删文件会**净损失**这些能力，因此下一步是在团队路径上逐个补齐后再删
+   （`research/loop.py`、`graph/theory_pipeline.py`、`main.py::_run_theory_mode()`、
+   `server._resolve_engine()`/`DEFAULT_ENGINE`/`SURVEY_ENGINE_ENABLED`、
+   `StartRequest.mode`）。
+2. **G17 / P1 部分闭合**：稿件 IR 层已统一（`finalise_manuscript()` 在 IR 层补齐摘要/
+   关键词/参考文献章节/论断锚点，模型起草与确定性起草走同一套结构契约；确定性路径
+   与模型路径都已能产出"论文草稿"）。**未做**：`rag/{theory_render,publication_render,
+   latex_render}` 与 `TheoryEngine` 的出版层仍未迁到 `publication/render_*`，
+   因此交付包目前**只有 Markdown**，没有 `.tex`/`.pdf`（交付等级因此封顶在"论文草稿"）。
+3. **G13 / P1 未做**（按要求本轮不考虑预算上限）：常规入口仍未注入 `RunBudget`，
+   `BudgetedLLM.__getattr__` 仍直接透传 `bind_tools`。
+4. **G15 / G16 未做**：事件多订阅（`session-stream` 的游标按 thread、store 的
+   `cursorBySession` 按 session，两套 key 空间）与"任务落盘 ≠ 恢复团队"
+   （`TeamRun` 每次创建空 `TeamLoopState`，`recovery_view()` 只是查询）。
+5. **R5 清仓未做**：`pyproject` 项目名仍是 `langgraph-survey-pipeline`；README 仍写
+   `main_chat`/`gui`/模式切换；`protocol.py` 旧角色映射、`StartRequest.mode`、
+   `--skip-retrieval`/`--max-revisions` 的处置未逐项确认。
+6. **真实模型的引用纪律**：实测模型仍会在正文里写 `[1][2][3]`（无来源可引），
+   出版门槛如实拦下并把等级降为"论文草稿"。这是**系统按设计拦住**，但也说明
+   写作提示词的引用约束还需要更强的下游校验（例如渲染时只按来源清单分配编号）。
+
+## 10.6 上一轮（按 2026-10-04 重构版合并计划执行：安全/状态底座 +
 
 > 新计划（重构版，撤销"长期保留两种研究引擎"）落地记录。**本轮只做 §9 的 R0/R1 切片**：
 > 先把"越权/状态/工具契约"这类**正确性与权限**问题修掉，再谈让团队接管研究（R2）。
