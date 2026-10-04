@@ -9,8 +9,207 @@
 | `AI for Research(AIR)未完成工作清单.md` | 迁移用：还没做完的事 + 已核实的接入点 | 待办的权威 |
 | `AI for Research(AIR)S1命题化交接.md` | S1 的接入点交接（已完成，留作过程记录） | 已被实现覆盖 |
 | 本文件 | 面向"看板"的推进情况汇总 | 结论摘要，细节以执行进度为准 |
+| `AI for Research(AIR)智能体团队合并计划.md` | 目标架构、功能归属、M0–M5/F0–F5、验收矩阵 | 合并实施的主计划 |
 
-## 10.3 本轮推进情况（S1 命题化 + R6/R7 收尾 + 去领域硬编码）
+## 10.5 本轮推进情况（彻底合并重构：主文统一给 WritingAgent + Session 拆分 + 统一入口 + §13 前端 + 追溯视图）
+
+依据《智能体团队合并计划》继续实施。**本轮不复跑付费真实任务**；所有证据均为离线命令。
+
+### 一、按阶段完成的工作包
+
+| 阶段 | 状态 | 关键交付 | 证据 |
+|---|---|---|---|
+| **§13 前端「从本机路径添加资料」** | **完成** | 新建 `web/src/contracts/library.ts`（契约 + 逐行路径解析 + 幂等键）、`library-controller.ts`（**先预览再确认**流程：未扫描不得导入、部分失败不报成功、扫描失败不产生"可导入"假状态）、`views/library.ts`（预览清单按 ok/跳过/拒绝/已截断分组、资料工作区按来源类型分组并显示失效文件）；`index.html` 增路径入口与「资料库」标签页；`styles/team.css` 增样式 | `tests/library.test.ts`（19）、`tests/e2e/library_paths.mjs` + `test_library_path_import_in_real_browser`（真实 Chromium） |
+| **契约按域分组 + 长文附录路径删除（第 7 轮）** | **完成** | ① `contracts.ts`(215 行) 拆成 `contracts/{session,research,publication}.ts` + `index.ts` 分组入口（`library.ts` 本就在自己的域里）：会话身份/SSE、问题形式化与工作台行、交付包清单三域各自演进，`contracts.ts` 已删除；manifest 读取判据（文本/二进制/错误三种返回形态 + 按 basename 挑条目）从 `app.ts` 内联代码提为 `pickManifestEntry`/`readManifestBody` 并补 10 项用例。② 删除**默认关闭的长文附录路径**：`src/agents/paper_writer.py`(458)、`src/research/writing_bridge.py`(251) 与 `tests/test_writing_bridge.py`(196) 共 **905 行**；`THEORY_LONG_FORM` 未设时这条路径唯一效果是往 notes 写一句"长文附录未生成"，交付物里从未出现它生成的附录。`protocol.py` 的旧名映射与测试同步收敛（`paper_writer`/`writing_bridge` 不再映射到 writing） | Python **1018 passed**（-14 长文用例 +1 重指向的提示词用例）；前端 **222 passed / 18 files**（+10 manifest 判据） |
+| **追溯视图拆分（第 8 轮）** | **完成** | `views/paper.ts`(340 行) → `views/paper/{types,traceability,figure-gallery,numbering}.ts` + `views/paper.ts` 分组入口（§9.6 点名的三块各成一模块；公共类型与转义放 `types.ts`，避免三个子视图互相反向依赖）。**拆分过程中真的改坏过两处用户可见的东西**（状态文案 `可反查`→`已追溯`、缺失锚点那条记录把 anchor 丢成空串），当时的用例只断言了其中一句所以两处都"通过"；发现后已逐字还原，并新增 `paper-wording-parity.test.ts`（5 项）把**真的被改坏过的**文案与标记写成窄红线 | `web/tests/paper-wording-parity.test.ts`（5，含"缺锚点记录必须保留 anchor"）；原有 `paper.test.ts`(13)/`paper-tab.test.ts`(8) 不变 |
+| **M5 契约闭环（第 6 轮）** | **完成** | 新增两条**跨前后端**的回归：①`tests/test_web_api_contract.py`——前端 `ENDPOINTS` 端点表里的每个路径都必须在**后端真实路由**里存在（含 `include_router` 进来的 `/api/team/*` 与 `/api/library/*`；FastAPI 0.141 把子路由保留为 `_IncludedRouter`，必须递归展开才看得到），且模板代入参数后的 URL 形状必须匹配；②客户端把"非 GET 的方法"显式写进 `VERBS` 表（不再靠测试去猜调用点），测试断言表里每个方法都被后端接受，并**反查调用点**确保没有"发了 POST 却没登记"的端点 | `tests/test_web_api_contract.py`（9）、`tests/test_web_asset_publish.py`（4） |
+| **两种研究形态定稿（第 9 轮）** | **完成（有意选择）** | 把"为什么保留两支引擎"从"看起来没合并完"定稿成**设计选择**（合并计划 §15.2.2）：判定层必须零 LLM 且是唯一状态写入点，`AgentTask` 只提交候选不做判断；两者已共用研究对象存储、判定层与推理内核、会话与事件层、写作入口、交付包导出与门槛、预算计量。设计说明写在 `_resolve_engine` 的决策点旁边，并有 6 条用例把守 | `tests/test_engine_boundary_contract.py`（5，含写入口清单 + 旧撰写路径防回流 + 决策点说明存在性） |
+| **M5 产物原子发布（第 6 轮）** | **完成** | `vite.config.ts` 的发布插件改为**先写新、后删旧**：同代码先落 `.tmp` 再原子改名，旧哈希产物在新页面就位后才清理。原实现"先删旧再拷新"有一个真实窗口——用户正好在这期间刷新，`index.html` 会引用一个不存在的脚本/CSS（表现为"样式没了/按钮全不响应"） | `tests/test_web_asset_publish.py`（4：引用产物都存在且非空 / 无死产物 / 发布顺序只能是先写后删 / 落盘产物可独立部署） |
+| **M5 取数入口收敛（第 5 轮完成）** | **完成** | `web/src/api/research-client.ts`：**唯一** HTTP 出口 + `ENDPOINTS` 端点表（URL 只在这里出现）；三条语义写死: **自动重试只限幂等请求**（GET 与带幂等键的变更，否则一次超时重试可能把同一动作施加两遍）、所有请求接受 `AbortSignal`、4xx 把后端 `detail` 如实抛出；支持 multipart 表单（不手写 Content-Type，边界交给浏览器）。**全库只剩这一个 `fetch`**（`grep` 核对）：`app.ts`/`session-controller`/`team-controller`/`library-controller`/`intake`/`session-stream` 全部切过来；`team-controller`/`library-controller` 的私有端点表改为引用共享端点表；SSE 端点也取自端点表（`EventSource` 本身仍必须用它）。旧的 `research-api.ts` 被取代并**删除** | `web/tests/research-client.test.ts`（14，含两条防回流断言：六个模块不得出现 `fetch(`，端点字符串只能在 `api/` 层——注释不计） |
+| **团队会话引擎** | **完成** | `TeamRun.prepare()`/`step()` + 显式 `TeamLoopState`（主控循环可**逐步驱动**，`run()` 与逐轮走同一实现）；新建 `src/graph/team_session.py`（`TeamSession`：逐轮事件、澄清 interrupt、`submit_response()` 续跑、交付包导出；`TeamApp`：适配会话驱动的 `stream/get_state`）；新建 `src/research/intake.py::is_survey_request()`（保守判据，形式化意图优先）；`server._resolve_engine()` 把**综述型请求**分流到团队引擎、形式化请求仍走理论引擎 | `tests/test_team_session.py`（7）、`tests/test_team_run.py::test_stepwise_loop_matches_a_single_run`（差异测试）、`tests/test_unified_entry_survey_gap.py`（3） |
+| **M4 全局资源归属** | **完成** | **stdout**: 不再替换全局 `sys.stdout`，改为按线程派发的 `_StdoutDispatcher` + 桥接器注册表（此前后启动的会话会把先启动的桥接器当成"原始 stdout"包起来 → A 的日志转发给 B，且断开一个会话会让另一个彻底丢日志）；**用量**: `cost_tracker` 增会话级 `ContextVar` 绑定与 `tracker` 转发代理（每个 run 的成本报告不再包含历史累计）；**图表目录**: `figure_generator` 增 `figure_scope_bound(run_id)`，图表落到 `figures/<run>/`（文件名只是局部序号，共用目录会互相覆盖）；`latex_render` 增 `\graphicspath` 并把图表路径解析改为按**调用时** `OUTPUT_DIR` | `tests/test_resource_ownership.py`（4）、`test_publication_layout.py::test_graphicspath_declared_so_run_scoped_figures_are_found` |
+| **M4 会话事件模块** | **完成** | `src/sessions/events.py`（`EventLog`：全序序号、有界可重放日志、按游标 `replay()` 并**如实报告缺口**、事件→会话消息映射与连续重复 interrupt 去重）；SSE 在日志截断时增发 `event_log_truncated`（前端按未知事件 → resync 重新加载投影） | `tests/test_session_events.py`（9） |
+| **M4 Session 拆分** | **完成** | `server.py` **2055 → 1548 行**；`Session` 与停止语义 → `src/sessions/controller.py`，按线程日志桥 + 会话级用量 + 运行身份作用域 + 停止哨兵 → `src/sessions/runtime.py`，会话注册表与持久化 → `src/sessions/store.py`；`server.py` 只保留端点与装配（`_make_session()` 是唯一装配入口），**全库各实现只有一处**（已 grep 核对 `class Session`/`StdoutBridge`/`persist_session`/`shutdown_sessions`/`final_summary`）。公共 API 保持：`server.Session`/`server.SESSIONS`/`server.shutdown_sessions()`/`server._persist_session`/`server._run_session`/`server._STOP` 等名字仍可用 | `tests/test_session_lifecycle.py`（15，关闭时序/并发/停止收尾；重构前后同一命令均 48 passed，即行为零变化） |
+| **M2 剩余：判定层边界** | **完成（研究侧）** | `reasoning_kernel` 增**纯映射** `obligation_disposition_for(result, obligation) -> ObligationDisposition`：把"工具结果 → 义务处置"（关闭/反驳/未决、是否解除记录 stale、是否写路线失败、估计类失败的独立语义）从 `loop._act_check_step` 抽出，**不写状态**；引擎改为"执行工具 → 调内核 → 落盘 + 领域化收尾"，判定层仍是唯一状态写入点 | `test_reasoning_kernel.py` 新增 5 项（含与引擎 `_to_validation_status` 的**差异测试**） |
+| **M3 主文统一（退役双正文）** | **完成** | `agents/writing.py` 增**唯一正文生产入口** `write_main_manuscript()`：有 LLM/运行时 → WritingAgent 起草（逐段带依据对象 id，块 id 写入正文作追溯锚点）；离线、预算耗尽、调用失败或输出不可解析 → 由**冻结快照**确定性起草，输出与旧渲染器**逐字一致**，降级原因写进 note。`theory_writer.run_theory_writing()` 不再自己组装正文，改为委托该入口；`theory_pipeline` 通过 `_writing_agent_inputs()` 注入 `AgentTask`/`ContextPack`/`AgentRuntime`（预算与取消在写作这步同样生效）。`package._traceability` 增 `checked` 字段区分"核对正文本体"与"仅核对快照" | `tests/test_main_text_writing_agent.py`（7，含**差异测试**：替换唯一入口即改变理论主文；离线逐字一致；降级原因；以 `problem2.md` 为题的离线整链 `llm_calls=0` 且 PDF 产出） |
+| **M4 旧检索缓存清除（用户决策）** | **完成** | `pipeline_cache.clear_all_caches()`：清空按主题的旧缓存与按 run 分片的新缓存，逐条报告；服务器启动时执行一次（旧格式**不迁移、不保留**）。同时把缓存目录解析改为 `cache_dir()`（**调用时**读 `DATA_DIR`），修掉"改了数据根后清理仍指向旧目录"的真实缺陷 | `tests/test_server.py::test_clear_cache_endpoint`（判据改为"缓存确实为空"，并补齐 `config.DATA_DIR` 隔离） |
+| **人工复核改为"只看最终产出"（用户决策）** | **完成** | `evals/rubric.md` 从"领域人审表（含签字栏）"改写为**交付物复核清单**：复核对象是交付包里的文件（§0 列出来源），系统**不读取**该清单、也不因未勾选而拒绝交付；删除签字表与"送审前另行准备封存材料"的前置要求。期望答案仍不得进入子智能体上下文（防泄漏，与审批无关） | `tests/test_evals_contract.py`（17） |
+| **M5 前端拆分（`app.ts` 只装配）** | **完成** | `app.ts` **2137 → 994 行**；新增 `session-controller.ts`、`features/intake/controller.ts`、`events/session-stream.ts`、`views/research-overview.ts`、`views/interrupt-cards.ts`、`views/project-navigation.ts`、`views/research-input.ts`。硬约束保持: 无内联事件处理器（全部 `data-action` + 文档级委托）、`window.AIR`/`AIRTeam`/`AIRLibrary` 兼容转发保留、唯一状态仍是 `window.AIR.research`、未加 `@ts-nocheck` | `research-overview.test.ts`(16)、`session-controller.test.ts`(13)、`session-stream.test.ts`(8)、`intake-controller.test.ts`(7)、`paper-tab.test.ts`(8) |
+| **M5 论文/公式/图表追溯（F3–F5）** | **完成** | `views/paper.ts`(312)：三类追溯状态、三个门槛各自独立、来源索引、图表归属、"没有编号数据就不自己编号"；`index.html` 增「论文与追溯」标签页；`refreshPaperTrace()` 读交付物清单 + `manifest.json`，任一步失败**追加原因并保留已加载内容** | `paper.test.ts`(13)、`paper-tab.test.ts`(8)、`e2e/web_flow.mjs` 面板步骤 |
+| **M5 契约类型去重** | **完成** | `RunMode`/`RunStatus` 统一到 `contracts.ts`（`current-research.ts` 与 `state/research-store.ts` 不再各写一份）；`views/paper.ts` 不另立平行 manifest 契约 | `npx tsc --noEmit` |
+| **M5 统一入口（无模式）** | **完成（本轮）** | `StartRequest.mode` 默认值改为空串，`start_session` 用 `DEFAULT_ENGINE = "theory"` 决定引擎；界面不再提供模式选择（前端迁移另见下）。旧客户端显式传 `mode` 仍可用，但不再是用户可见的选择 | `tests/test_unified_entry_http.py`（`problem2.md` 题面走真实 HTTP 入口：不带 mode 启动、事件序号递增可回放、交付包为完整论文且 `llm_calls=0`、追溯口径明确）、`test_survey_mode.py` 契约用例改写 |
+
+### 二、本轮同时落地的行为改动
+
+| # | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | 同时跑两个会话时 A 的日志转发给 B；断开一个会话后另一个的日志**静默消失** | `_run_session` 全局替换 `sys.stdout`，后启动者把先启动者的桥接器当"原始 stdout"包起来 | 全局只挂一个按线程派发的 dispatcher；桥接器按线程查表；解绑只解本线程 |
+| 2 | 每个 run 的成本报告都是**历史累计** | `cost_tracker.tracker` 是进程级单例，从不复位 | 会话线程绑定时创建独立 `UsageTracker`（ContextVar，派生线程继承） |
+| 3 | 两个会话的图表会互相覆盖 | 图表文件名是局部序号（`taxonomy_0.png`），目录是所有运行共用的 `outputs/figures/` | 图表目录按 run 分层；`\graphicspath` 声明相对/绝对 figures 目录 |
+| 4 | 嵌套折叠 `<details>` 里的资料入口"存在但控件用不了" | 嵌套折叠默认收起时子控件不可见（Playwright 与用户都点不到） | 改为**不折叠**的区块（并把这条写进模板注释，避免再犯） |
+| 5 | 图表路径写死 `Path("outputs")` 解析 | `config.OUTPUT_DIR` 改了或被测试隔离时不生效，图被判"不存在"后静默跳过 | 按调用时的 `OUTPUT_DIR` 解析 |
+| 6 | `tests/test_reasoning_kernel.py` 用了 `pytest.skip` 但没导入 `pytest`（F821） | 静态检查发现（运行时恰好被间接导入掩盖） | 显式导入 |
+
+### 三、验证基线（离线）
+
+| 命令 | 结果 |
+|---|---|
+| `pytest -q`（全量、离线） | **1023 passed, 1 skipped**（演进：第 1 轮起点 1030 → 第 3 轮删 101 项旧 stage 用例 = 1019（+8 防回流）→ 第 6 轮 +13 契约 = 1032 → 第 7 轮 −14 长文用例 +1 重指向 = 1018 → 第 9 轮 +5 引擎边界 = 1023） |
+| `pytest tests/test_browser_web_flow.py -q` | **8 passed**（真实 Chromium；含 §13 路径导入用例） |
+| `pytest tests/test_browser_web_flow.py tests/test_web_frontend.py tests/test_workbench_api.py -q` | **50 passed** |
+| `cd src/web && npx tsc --noEmit` | 0 error |
+| `cd src/web && npx vitest run` | **227 passed / 19 files**（起点 124 / 11 files） |
+| `cd src/web && npm run build` | 成功（`dist/assets/index-JNK61YzL.js` + `index-HZ3oLGQN.css`，已复制到 `src/web/assets/`） |
+| 离线实跑（真实 Chromium，**统一入口，不带 `mode`**） | 页面加载 → 提交请求 → **工作台出现结论对象** → 反馈控件 → `data-action` 委托生效 → 论文与追溯面板 → 窄屏 → 键盘，全程无 mode |
+| 离线实跑（真实 Chromium，§13 路径导入） | 入口**始终可见**且不在折叠高级选项内 → 未扫描时「确认导入」禁用 → 预览列出拒绝项 → 导入"新增 1 / 拒绝 1"且**未报成功** → 原目录内容与 mtime 未变 → 资料工作区归入"本机路径导入"且**不泄露绝对路径** → 解除登记未删除原文件 |
+| 离线整链（`problem2.md` 走真实 HTTP 入口） | 不带 `mode` 启动 → 完整论文交付包 → `llm_calls=0` / `cost_usd=0.0` → 事件序号递增可回放 → 追溯检查口径为 `markdown` |
+
+新增用例：M2 判定层 5 + M4 资源归属 5 + 会话事件 9 + 排版契约 1 + 跨项目共享库 1 + 主文统一 7 + 会话生命周期 15 + 统一入口 1 + 综述分流 3 + 团队会话 7 + 逐轮等价 1 + 引擎退役 8 + 过渡契约迁移 5 + 前后端端点契约 9 + 产物发布契约 4 = **81**（Python）；
+§13 路径导入 19 + 追溯视图 13 + 前端拆分 44 + 追溯面板接入 8 + 取数入口 14 = **98**（TS）。
+（前端 vitest 由 124 → 212；Python 见下方边界说明：删除了 101 项覆盖已退役 stage 机制的旧用例。）
+
+> 跑批注意：`pyproject.toml` 的 `addopts = --basetemp=.pytest_tmp` 是**全工作区共享**的，
+> 并行跑 pytest 必须各自带独立 `--basetemp`，否则会互相删临时目录并产生假红。
+
+### 四、诚实边界（不要当成已完成）
+
+- **旧综述图已删除（本轮完成，§15.2.1）**：`src/graph/pipeline.py`(2166 行)、
+  `src/gui.py`(428 行)、`src/main_chat.py`(190 行) 与 **101 项**覆盖已退役 stage 机制的
+  旧用例一并删除；通用件抽为 `src/graph/node_progress.py`；`test_survey_mode.py` 的
+  5 项**引擎无关**会话契约迁移为 `tests/test_session_entry_contract.py`（走团队引擎）。
+  语义去向逐条对照与防回流用例见 `tests/test_engine_retirement.py`(8 项)。
+  **Python 用例数因此从 1114 降到 1019**：-101 旧机制用例 +8 防回流 +其余；这是删除
+  机制的必然结果，每条删除项的语义都有新守护点，不是"删断言换绿灯"。
+- **两种研究形态是定稿的设计选择，不是未完成的合并**（详见合并计划 §15.2.2）：
+  形式化请求走理论引擎（命题/义务/核验/门槛），综述型请求走团队会话引擎；界面不暴露
+  这个选择。**为什么不合并成一支**：判定层必须零 LLM 且是唯一状态写入点，而
+  `AgentTask` 的契约是"只提交候选、不做判断"——把理论引擎的动作改造成任务，要么多一层
+  无意义转发，要么把判定权交给智能体。两者**已经共用**真正该共用的部分（研究对象存储、
+  判定层与推理内核、会话与事件层、写作入口、交付包导出与门槛、预算计量）。
+  这一点由 6 条用例把守（内核共用 / 内核不写状态 / 写入口清单 / 旧撰写路径不得回来 /
+  设计说明在决策点 / 分流对形式化请求保守），见 `tests/test_engine_boundary_contract.py`。
+  **诚实边界**：写入口清单只在代码写出写入口（`ResearchStore.put(` 等）时生效；
+  经注入句柄只调 `.put(...)` 的写入它看不见——真正的保证来自"内核用例 + 本清单"的组合。
+- **顺带修掉一个真实缺陷**：续跑原来只看落盘 `request.mode`，而旧记录的 request 没有该
+  字段 —— 会让一个**形式化研究会话在续跑时被换成团队引擎**（实测续跑后等的是团队事件，
+  收不到原来的 interrupt）。现在续跑与启动共用同一条引擎判据。
+- **旧代码的发现方式（重要经验，第 7 轮）**：删除 `paper_writer`/`writing_bridge` 之前，
+  我先用 **AST 依赖图 + 可达性**算"从真实入口走不到谁"，再 `grep` 逐个人工核对调用者。
+  这条路只走通了一半：
+  - **有用的一半**：可达性确实指出了 `paper_writer`（唯一 import 者 `writing_bridge`）
+    与 `writing_bridge`（唯一调用者是 `theory_pipeline` 里那条默认关闭的长文附录分支）。
+  - **踩坑的一半**：我一度把它做成正式用例（"所有模块都必须从入口可达"），**两次都写坏了**
+    —— 先是"包可达 ⇒ 子模块全可达"让判据失去区分度（放一个 `src/zz_dead_probe.py` 进去
+    照样通过），改成严格版后又把 `src.config`、`src.research.intake` 这类真实在用的模块
+    报成孤儿（函数内的 `from x import y` 让静态边解析不可靠）。
+  - **处置**：把这个不可靠的守卫**删掉**，而不是留着一条只会让人忽略的红线 ——
+    一个总是误报（或总是通过）的守卫比没有守卫更糟，它给人"已经守住"的错觉。
+  - 结论：死代码清理目前**靠人工核对调用者**；可复用的做法是"用可达性分析得到候选，
+    再逐个核对 import 与调用点"。这条经验留在这里，避免下次又去造一个不可靠的守卫。
+- **M5 仍未迁出的部分（整理项，不是功能缺口）**：追溯视图仍以 `views/paper.ts` 一个模块
+  落地，未再细分 `paper-workspace` / `figure-gallery` / `review-panel`。
+  **契约已按域分组**（`contracts/{session,research,publication,library}.ts` + `index.ts`）；
+  **取数入口已收敛**（全库只有 `api/research-client.ts` 里一处 `fetch`）；
+  **产物发布已原子化**，并有跨前后端的端点/方法契约把守。
+- **长文附录路径已删除（第 7 轮）**：`writing_bridge.write_long_form → paper_writer`
+  与 `THEORY_LONG_FORM` 开关一并移除（共 905 行）。它在默认配置下唯一效果是往 notes 里
+  写一句"长文附录未生成"；正文早已统一由 WritingAgent 承担。
+- **`pipeline_cache` 的归属仍未按 run 分片**：旧按主题缓存已按要求**直接清除、不再迁移**；
+  但新建缓存仍以主题为键（跨项目同主题共用），删除时按"项目或主题"判存活（不会误删）。
+- **人工复核**（不是系统门槛，用户已决策）：`evals/rubric.md` 已改为**交付物复核清单**
+  —— 人只看系统的最终产出，系统里**不再有"专家签字"环节**，也不再有"送审前另行准备
+  封存材料"的前置要求；D1/D2 不再是评分约定，而是由复核人按清单在产出上判定。
+- **限额真实测试**：本轮未跑付费任务（按要求）。
+
+### 五、下一步
+
+**目标五项已全部落地**（M3 / M4 / M5 / problem2 端到端 / 回归绿 + 签字移出系统），
+两种研究形态也已**定稿为有意选择**（合并计划 §15.2.2）。剩下的是可选项：
+
+1. **`publication/{inputs,rendering,gates}.py` 未按计划书拆**：能力都在
+   （`publication/schemas.py` + `research/publication_paper.py` + `rag/latex_*`），
+   只是模块边界与计划书里画的图不完全一致 —— 整理项，不影响行为。
+2. **`pipeline_cache` 按 run 分片**：当前仍是主题键（跨项目同主题共用），
+   删除时已按"项目或主题"判存活（不会误删）。
+3. **限额真实测试**：按 runbook 先填 token/费用预估与硬上限，授权后运行并对照 `manifest.usage`。
+4. **人工复核**：交付包产出后由人按 `evals/rubric.md`（交付物复核清单）逐条判定；
+   系统内不再登记审批状态，也不要求送审前准备额外材料。
+
+---
+
+## 10.4 上一轮推进情况（智能体团队合并: M0 + M1 + M4 核心 + §13 路径导入）
+
+依据《智能体团队合并计划》实施。**本轮不复跑付费真实任务**；所有证据均为离线命令。
+
+### 一、按阶段完成的工作包
+
+| 阶段 | 状态 | 关键交付 | 证据 |
+|---|---|---|---|
+| **M0 基线与契约** | **完成** | 新建 `src/agents/protocol.py`（`AgentTask`/`AgentResult`/`ResearchNeed`/`ChangeProposal`/`ArtifactRef`/`TaskBudget`/`RunBudget`/`UsageRecord`/`CapabilityGrant`/`ContextPack`/`AgentRun`）；`registry.py` 注册 8 个角色并**探测真实可用能力** | `tests/test_agent_protocol.py`（23） |
+| **M1 最小团队闭环** | **完成** | 新建 `agents/runtime.py`（有界工具循环/权限闸门/预算/取消）、`agents/supervisor.py`（画像+计划+结构化决策+复盘）、7 个功能角色、`graph/research_graph.py`（团队外层循环）、`research/projection.py`（候选登记，不做判定） | `tests/test_agent_runtime.py`（27）、`test_agent_supervisor.py`（31）、`test_team_run.py`（26） |
+| **M4 任务持久化与一致性** | **核心完成** | 新建 `research/task_store.py`（任务生命周期/幂等续跑/read-set 事务检查/恢复视图）、`graph/unified_state.py`（小状态：只存身份与引用） | `test_team_run.py` 内 M4 用例 + `read_set` 冲突拒绝 |
+| **§13 路径构建人工文献库** | **完成** | 新建 `kb/path_import.py`（授权根/敏感拒绝/不复制/幂等去重/stale 检测/逐条报告）；`SourceSet` 增 `origin`/`imported_files`/`stale_files`；`GET/POST/DELETE /api/library/*` 与 `GET/POST /api/team/*` | `tests/test_path_import.py`（19）、`test_team_api.py`（9） |
+| **M3 文稿中间表示与任务画像** | **完成（研究侧）** | 新建 `publication/schemas.py`（`WritingPacket`/`Manuscript`/`Block`，稳定 block ID + 引用追溯 + stale 判定 + 渲染期编号）与 `research/task_profile.py`（`TaskProfile`：章节骨架与领域措辞的**唯一依据**）；写作角色产出并登记稿件；**P0-3 领域硬编码退役**：`publication_paper` 的关键词/摘要/引言/第 2 节/附录前言与 `writing_bridge` 的关键词/章节骨架全部改为按画像决定 —— 抽取前它们**无条件**输出"组合设计/2-设计/必要条件的判定链"，让一篇信道可分性的报告声称自己在做组合设计判定 | `tests/test_task_profile.py`（14：块级 + **渲染后**双重回归 + 设计类反向保护）、`test_writing_bridge.py` 新增画像用例 |
+| **M2 动作抽取** | **完成（研究侧）** | 新建 `research/reasoning_kernel.py`，把 `loop.py` 里的**推理/建模/验证方案**计算抽成纯函数（返回 `writes`/`events`/`idempotency_key`，**不写状态**）：证明计划、推导步骤 + 反方审查、设计证书判定链、反例判定映射、新颖性对照、模型提案、验证方案。引擎侧 `_act_plan_proof`/`_act_derive_step`/`_derive_design_steps`/`_act_seek_counterexample`/`_act_compare_novelty`/`_act_propose_model`/`_act_design_experiment` 全部改为"定位对象 → 调内核 → 落盘"；角色侧 `ReasoningAgent`/`ModelingAgent`/`ValidationPlanningAgent` 在对应策略下**直接调内核** —— 团队路径与旧引擎路径**共用同一份实现** | `tests/test_reasoning_kernel.py`（27，含差异测试与三条反向保护）、`test_team_run.py` 新增 3 项 |
+| **M5 前端切换** | **部分完成** | 新建 `web/src/state/research-store.ts`（唯一状态入口: selection/entities/transport/ui）、`events/session-events.ts`（会话级游标 + 去重 + 缺口重同步 + 有上限退避）、`views/team-board.ts`（团队状态条/任务表/角色能力/审阅面板）、`team-controller.ts`（只读接入 + 迟到响应丢弃）、`styles/team.css`；`app.ts` 只在工作台容器前端插入团队区块并把旧状态**单向**映射进 selection | `research-store.test.ts`（22）、`session-events.test.ts`（19）、`team-board.test.ts`（17）、`test_team_board_in_real_browser`（真实 Chromium） |
+
+### 二、修掉的真实缺陷（都由离线实跑暴露, 不是静态审阅）
+
+团队闭环第一版在离线实跑中**连续踩到四种循环/卡死**, 逐个定位并加回归:
+
+| # | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | 同一句需求被派 10–17 次直到轮次上限 | 幂等键含 `plan_version`, 升版即变新任务; 需求措辞里的计数也在变 | 幂等键**去掉计划版本**; 需求去重用 `need.assignment_key`（只由需求类型+角色决定） |
+| 2 | 补检索成功, 写作却永不派发, 以 "wait" 收尾 | `replan()` 克隆计划时换了任务 id, 依赖边指向已不存在的任务 | `replan()` 保持任务身份不变; 补派任务用 `adopt()` **并入**计划 |
+| 3 | 补派成功后交付判定仍不通过 | 等价完成只按 task_id 判, 补派任务换了 id 就不算数 | 依赖与交付判定都按"角色+目标"键算等价完成 |
+| 4 | 已失败的前置永久阻塞下游 | `ready()` 要求依赖全部"完成" | 引入 `settled`: **已尝试过**的任务不再阻塞下游, 但同一件事不重复派 |
+| 5 | 检索命中 0 条、研究卡住 | 检索式取自**子任务措辞**（"收集支撑或反驳候选结论的可定位来源"）, 而不是研究问题 | 检索目标优先取 `brief.main_question`/原始请求 |
+
+### 三、验证基线（离线）
+
+| 命令 | 结果 |
+|---|---|
+| `pytest -q`（全量、离线） | **1030 passed, 1 skipped**（本轮起点 876） |
+| `pytest tests/test_browser_web_flow.py` | **7 passed**（真实 Chromium；含新增团队工作台用例） |
+| `cd src/web && npx tsc --noEmit` | 0 error |
+| `cd src/web && npx vitest run` | **124 passed**（本轮起点 73） |
+| `node tests/js/bundle_security.test.js` | 全部通过 |
+| 离线实跑（真实 KB, 一条自然语言任务） | `检索 → 综合 → 写作 → 审阅` 全通, `status=completed`, 5 轮, 登记 1 条可定位来源 + 1 条命题 + 1 份稿件 |
+| 离线实跑（数学题走 M2 内核） | `reasoning completed KERNEL`: 策略 direct (rules), 3 步推导, **反方审查 8 项**, 并交出结构化候选 |
+
+新增用例: M0 契约 23 + 运行时 27 + 主控 31 + 团队闭环 29 + 路径导入 19 + 团队/资料库接口 9 + 推理内核 27 + 任务画像 14 = **179**（Python）；
+前端 store 22 + 事件 19 + 团队视图 17 = **58**（TS）。
+
+> 说明: 无 LLM 时七类角色走**确定性实现** —— 检索走 `kb/bridge.gather_sources`, 综合按已登记证据关系生成候选, 写作渲染已登记结果并保留完整追溯。**判定层仍为零 LLM**（`verification/**`、`acceptance.py` 未新增任何 LLM 调用）。
+
+### 四、前端本轮落地范围（诚实边界）
+
+**已做**: 状态只有一份且四片归属明确; 连接状态与运行状态分开（离线不表示后台已停止）;
+会话级事件游标 + `seq` 去重 + 缺口重同步; 未知事件不静默跳过; 有上限退避并支持取消重连;
+团队状态条/任务表/角色真实能力/审阅面板; 团队视图接在后端投影接口上（只读, 不启动任务）;
+迟到响应按加载代号丢弃; 窄屏纵向堆叠。
+
+**未做（不要当成已完成）**: `app.ts` 尚未拆成 `session-controller.ts` / `features/intake/` /
+`views/*`（仍是 2000+ 行）; 旧 `currentResearch` 仍在写路径上（只做了单向同步）;
+`contracts.ts` 与 `current-research.ts` 的类型去重未做; `@ts-nocheck` 未移除;
+论文/公式/图表追溯视图与产物级联调（F3–F5）未做; `src/web/dist` 与 `assets` 的原子发布未做。
+
+### 五、下一步
+
+1. **M2 剩余（判定层边界, 需谨慎）**: `_act_check_step` 的核心是"工具结果 → 义务状态"
+   的状态机, 它与 `_run_tool`/`_save_verification`/`_reconcile_claim` 同属**判定层**,
+   按 §14.3 要求保持零 LLM 且是唯一状态写入点。若要继续抽, 应抽"结果 → 义务处置"的
+   **纯映射**（与 `counterexample_verdict_for` 同一形状）, 而不是把状态写入搬进角色。
+2. **M5 收尾**: 把 `app.ts` 按 §9.5 的表拆成 `session-controller.ts` / `features/intake/` / `views/*`; 统一 `contracts/` 类型; 移除旧 mode 分叉与 `@ts-nocheck`; 论文/公式/图表追溯视图（F3–F5）。
+3. **M3 收尾**: 退役"双正文"主路径（主文统一由 WritingAgent 形成, 确定性证书留附录）。
+4. **前端 §13**: "从本机路径添加资料"的预览清单与资料工作区分组（后端 `scan`/`import` 已就绪）。
+5. **M4 剩余**: 会话事件模块拆分与全局资源归属修复（全局 stdout、用量、共享记忆/缓存、图表目录、跨项目库删除）。
+6. **人工门槛**（自动化替代不了）: `evals/cases/*/expected_notes.md` 专家签字; D1/D2 决策。
+7. **限额真实测试**: 按 runbook 先填 token/费用预估与硬上限, 授权后运行并对照 `manifest.usage` 汇报。
+
+---
+
+## 10.3 上一轮推进情况（S1 命题化 + R6/R7 收尾 + 去领域硬编码）
 
 ### 一、本轮完成的工作包
 
@@ -512,3 +711,4 @@ FastAPI 路由（按名搜索查不到，但由框架调用），以及 `head_wi
   运行时数据与产物；`.gitignore` 增补 `.ruff_cache/`、`.mypy_cache/`、`.pt_*/`、`data/uploads/`。
 - **数据清理**（见下）：按用户要求彻底清空会话数据与研究成果，
   工作区回到"只有代码与文档"的状态。
+

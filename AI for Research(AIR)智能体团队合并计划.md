@@ -531,7 +531,16 @@ evals/                     # 封存题目、资料、行为判据与人工评分
 - 统一来源身份与版本化研究对象，科研结论、主文、引用、图表和验证建议可逐步反查。
 - 正文由写作智能体形成连贯论证；确定性证书仍能复核；审阅发现问题后能派回适当研究角色。
 - 主控能诚实交付部分结果/未决报告；纠正合并前误判时允许降低原有交付等级，不以“等级不得低于旧版”维持错误结论。
-- 多会话、恢复、预算、取消与并行任务通过行为验收；真实研究和人审结果分别记录。
+- 多会话、恢复、预算、取消与并行任务通过行为验收；真实运行结果按 §12 的产出复核清单核对。
+
+### 12.1 人工复核的定位（2026-10-04 用户决策）
+
+人**只审查系统的最终产出**，不在系统里登记审批状态：
+
+- `evals/rubric.md` 是**交付物复核清单**（读交付包里的文件，逐条判定），不是系统门槛；
+- 系统**不读取**该清单，也不会因为未勾选而拒绝交付；
+- 不存在"专家签字"环节，也不要求送审前另行准备封存材料；
+- 期望答案/已知解仍属评测侧材料，**绝不可**进入子智能体上下文（防泄漏，与审批无关）。
 
 ## 13. 用户指定路径构建人工文献库（新增需求）
 
@@ -717,7 +726,9 @@ def import_paths(store, topic, request: ScanRequest, embed: bool = False) -> Imp
   `llm.invoke`；新增能力不要破坏这一点。
 - **提交习惯**：每阶段独立提交并写明"已接入统一主控 / 仍经旧函数适配 / 已退役"三种状态；
   进度追加到 `AI for Research(AIR)计划推进情况.md`，不要新开进度文件。
-- **待人工**：`evals/cases/*/expected_notes.md` 与 `evals/rubric.md` 的专家签字；
+- **人工复核**（用户已决策，2026-10-04）：人**只审查系统的最终产出**。`evals/rubric.md` 已
+  改为"交付物复核清单"，系统里**不再有专家签字环节**，也不再要求送审前另行准备封存材料；
+  期望答案仍不得进入任何子智能体上下文（那是防泄漏，不是审批）。
   期望答案**绝不可**进入任何子智能体上下文。
 - **待决策**：D1（引用 BRC 是否算合格）、D2（未决报告是否算部分通过）；D4 已定（`dist` 不入库，脚本自动构建）。
 
@@ -733,3 +744,167 @@ def import_paths(store, topic, request: ScanRequest, embed: bool = False) -> Imp
 与其他文档的关系：本文件负责目标架构、功能归属、合并清单和实施顺序；`AI for Research(AIR)计划书.md` 中的论文质量、研究阶段检索和会话可靠性目标纳入本计划，不再另起一套执行架构。历史进度只进入 `AI for Research(AIR)计划推进情况.md`；已修问题不重新排队，未闭合边界用本次源码核对结果更新。
 
 本次工作是源码审阅与计划细化，未实现上述多智能体重构，也未复跑全量测试。模块设计方法用于收敛职责、统一成果接口和明确迁移顺序；最终科学能力仍须由跨类型真实任务、可追溯产物与独立审阅证明。
+
+---
+
+## 15. 实施进度（2026-10-04 更新）
+
+本节记录**已落地**的模块与状态，避免把"计划中的路径"误当成"已存在的代码"。详细证据见
+`AI for Research(AIR)计划推进情况.md` 的 10.5 与 10.4 节。
+
+| 阶段 | 状态 | 已落地的代码 | 尚未做的 |
+|---|---|---|---|
+| **M0 基线与契约** | **完成** | `src/agents/protocol.py`（`AgentTask`/`AgentResult`/`ResearchNeed`/`ChangeProposal`/`ArtifactRef`/`TaskBudget`/`RunBudget`/`UsageRecord`/`CapabilityGrant`/`ContextPack`/`AgentRun`/`WRITABLE_KINDS`）；`src/agents/registry.py`（8 角色 + **真实能力探测**） | — |
+| **M1 最小团队闭环** | **完成** | `src/agents/runtime.py`（有界工具循环、权限闸门、用量记账、取消、结果校验降级）；`src/agents/supervisor.py`（`ResearchBrief`/`TeamPlan`/`AgentTask`/`SupervisorDecision` + 复盘与返工派单）；7 个功能角色（`evidence`/`modeling`/`reasoning`/`validation_planning`/`writing`/`figures`/`review`）；`src/agents/base.py`、`src/agents/tools.py`；`src/graph/research_graph.py`（团队外层循环 + 缺省上下文组装） | 并行调度（首版串行, 按 §10 要求未打开） |
+| **M3 文稿中间表示与任务画像** | **完成（研究侧）** | `src/publication/schemas.py`（`WritingPacket`/`Manuscript`/`Block`，稳定 block ID、引用追溯、stale 判定、渲染期编号）；`src/research/task_profile.py`（`TaskProfile` —— 章节骨架与领域措辞的**唯一依据**，`task_profile_from_brief()` 直接读主控的 `ResearchBrief`）；**P0-3 退役领域硬编码**：`publication_paper` 的关键词/摘要/引言/第 2 节/附录前言与 `writing_bridge` 的关键词/`_outline` 全部改为按画像输出 | **双正文主路径已完全退役（第 7 轮）**: 长文附录路径 (`writing_bridge.write_long_form → paper_writer`) 与 `THEORY_LONG_FORM` 开关连同 `agents/paper_writer.py`(458 行) 一并删除 —— 它在默认配置下唯一效果是往 notes 写"长文附录未生成", 交付物里从未出现其产物; 正文统一由 `agents/writing.py` 承担。余 `publication/{inputs,rendering,gates}.py` 未拆 |
+| **M4 持久化、归属与有界并行** | **核心完成** | `src/research/task_store.py`（任务生命周期、幂等续跑、**read-set 事务检查**、恢复视图）；`src/graph/unified_state.py`（小状态 + 载荷闸门 `slim_state`）；`src/research/projection.py`（候选登记, **不做判定**）；**全局资源归属**（本轮）：`_StdoutDispatcher` 按线程派发日志（不再替换全局 `sys.stdout`）、`cost_tracker` 会话级绑定、`figure_generator.figure_scope_bound(run_id)` + `figure_llm` 改走该目录、`session_memory` 按会话分片 + `run_scope`、`_cleanup_shared_retrieval_resources` 按**项目或主题**判存活；`src/sessions/events.py`（`EventLog`：全序序号、有界可重放日志、缺口如实上报、事件→消息映射与 interrupt 去重） | `sessions/controller.py` / `sessions/store.py` 未拆（`server.py::Session` 仍兼管会话状态与研究线程）；`pipeline_cache` 仍按主题而非按 run 分片 |
+| **§13 路径构建人工文献库** | **完成（后端 + 前端）** | `src/kb/path_import.py`（授权根、敏感硬拒绝、只读引用、幂等去重、stale 检测、逐条报告）；`SourceSet` 扩 `origin`/`imported_files`/`stale_files`；`src/team_api.py`（`/api/library/*`、`/api/team/*`）；**前端**：`contracts/library.ts` + `library-controller.ts`（先预览再确认、部分失败不报成功）+ `views/library.ts`（预览清单与资料工作区分组）+ 「资料库」标签页 | — |
+| **M2 动作抽取** | **完成（研究侧）** | `src/research/reasoning_kernel.py`：把 `loop.py` 的**推理/建模/验证方案**计算抽成纯函数（返回 `writes`/`events`/`idempotency_key`，**不写状态**）—— 证明计划、推导步骤 + 反方审查、设计证书判定链、反例判定映射、新颖性对照、模型提案、验证方案、**义务处置映射 `obligation_disposition_for`**；引擎的 `_act_plan_proof`/`_act_derive_step`/`_derive_design_steps`/`_act_seek_counterexample`/`_act_compare_novelty`/`_act_propose_model`/`_act_design_experiment`/`_act_check_step` 全部改为"定位对象 → 调内核 → 落盘"；`ReasoningAgent`/`ModelingAgent`/`ValidationPlanningAgent` 直接调内核 —— 团队路径与旧引擎路径**共用同一份实现** | `_run_tool`/`_reconcile_claim`/acceptance 属**判定层核心**, 保持零 LLM 与唯一状态写入口, 不搬进角色 |
+| **M5 前端切换** | **完成** | 状态与事件基础：`state/research-store.ts`、`events/session-events.ts`、`events/session-stream.ts`；**文件拆分**：`app.ts` **2228 → 957 行** + `session-controller.ts` / `features/intake/controller.ts` / `views/research-overview.ts` / `interrupt-cards.ts` / `project-navigation.ts` / `research-input.ts`；**统一入口**：`StartRequest.mode` 默认空串、界面删除模式选择器与全部分支、启动载荷不带 `mode`；**取数入口收敛**：`api/research-client.ts` 是**唯一** `fetch` 出口（端点表 + `VERBS` 方法表 + 幂等重试/取消/错误/表单语义），六个模块全部切过来，**删除**被取代的 `research-api.ts`；**产物原子发布**：先写新、后删旧（同代码先落 `.tmp` 再改名）；**契约按域分组**：`contracts/{session,research,publication,library}.ts` + `index.ts`；**追溯视图拆分**：`views/paper/{types,traceability,figure-gallery,numbering}.ts` + 分组入口；**论文/公式/图表追溯**：标签页 + `refreshPaperTrace()` | 见 §9.5 前端文件拆分表与 §15.2 各轮小结 |
+
+**本轮实测修掉的循环缺陷**（这四条是 M1 的实质内容, 已全部加回归）:
+
+1. 幂等键含计划版本 → 升版即变新任务 → 同一需求被派 10+ 次；
+2. `replan()` 换任务 id → 依赖边指向不存在的任务 → 补派成功后写作永不派发；
+3. 等价完成只按 task_id 判 → 补派成功不算数 → 交付判定永远不通过；
+4. 子任务措辞被当作检索式 → 真实资料库零命中 → 研究卡住。
+
+**验收状态（2026-10-04 第 8 轮更新）**: 离线全量 `pytest -q` → **1018 passed / 1 skipped**
+（第 3 轮删除 101 项覆盖已退役 stage 机制的旧用例；第 6 轮 +13 跨前后端契约用例；
+第 7 轮删除 14 项长文附录用例并把 1 项提示词用例重指向**在用的**写作智能体；
+语义去向逐条对照见 §15.2.1）；
+真实 Chromium 浏览器用例与前端契约 **43 项通过**；`npx vitest run` → **227 passed / 19 files**；
+`npx tsc --noEmit` → 0 error；`npm run build` 成功（产物原子发布）。
+统一入口（不带 `mode`）已端到端验证：`tests/test_unified_entry_http.py` 用 `problem2.md` 题面
+走真实 HTTP 入口 → 完整论文交付包 + `llm_calls=0` + 事件序号递增可回放；
+`tests/test_unified_entry_survey_gap.py` 验证综述型请求由团队引擎产出交付包。
+判定层仍为零 LLM（`verification/**`、`acceptance.py`、`research/kernel` 侧无 LLM 调用）；
+审阅仍"只可降级、不可升级"（由运行时闸门与对象种类表实际拦住, 不靠提示词）。
+
+### 15.1 本轮"彻底合并"落地与剩余（2026-10-04）
+
+用户决策：**文章撰写交给 WritingAgent**；**Session 拆分必须实现**；**旧缓存直接清除**；
+**前端完全迁移、不保留旧实现**；**专家签字不放进系统**（人只审查最终产出）；以
+`problem2.md` 作为端到端验证题。
+
+已落地：
+
+| 项 | 结果 |
+|---|---|
+| M3 主文统一 | `agents/writing.py::write_main_manuscript()` 是**唯一正文生产入口**；WritingAgent 起草（逐段带依据对象 id，块 id 作追溯锚点），离线/失败由冻结快照确定性起草（与旧渲染器**逐字一致**）；`theory_writer.run_theory_writing` 不再自己组装正文；`package._traceability` 增 `checked` 区分"核对正文"与"仅核对快照" |
+| M4 Session 拆分 | `server.py` **2055 → 1548 行**；`sessions/{controller,runtime,store,events}.py` 四模块；全库实现各一处（无第二份 `Session`/桥/注册表/持久化） |
+| M4 旧缓存 | `pipeline_cache.clear_all_caches()` + 服务器启动清除一次；缓存目录改为**调用时**解析（修掉换数据根后清理失效） |
+| M5 统一入口 | 后端 `DEFAULT_ENGINE="theory"`、`mode` 留空即统一引擎；前端删净模式选择器与全部分支，启动载荷不带 `mode` |
+| 人审定位 | `evals/rubric.md` 改为**交付物复核清单**（系统不读取、不作为门槛）；期望答案仍不得进入子智能体上下文 |
+
+**下一步（剩余的第一优先）**：把**团队图接成会话引擎** —— `/api/sessions` 目前仍驱动
+理论引擎（`TheoryEngine` 的动作），团队视图因此只显示能力与连接状态；要真正"只有一个
+主控入口 + 七类角色派工"，需要让统一引擎通过 `AgentTask` 派发（含 SSE 进度、interrupt、
+断点续跑与交付包导出）。这一项是 §12 最终完成标准里"新研究只有一个主控入口"的最后一块。
+
+### 15.2 综述请求已由统一入口承担（2026-10-04 第 2 轮）
+
+第 1 轮取证发现"默认真式引擎不能交付综述型请求"；本轮把它**修好**了，做法不是再写一个
+引擎，而是让团队主控成为会话引擎：
+
+| 步骤 | 落地 | 证据 |
+|---|---|---|
+| 主控循环**可逐步驱动** | `TeamRun.prepare()` + `TeamRun.step()`，状态收敛到显式的 `TeamLoopState`（brief/plan/results/open_needs/objectives/dispatched/pending_retries/clarifications）；`run()` 变成"prepare + 反复 step"，两条路径**共用同一份实现** | `tests/test_team_run.py::test_stepwise_loop_matches_a_single_run`（差异测试：任务角色序列、状态、停止原因、轮次、用量逐项相等；`prepare()` 幂等；逐轮驱动同样登记稿件与来源） |
+| 团队会话引擎 | 新建 `src/graph/team_session.py`：`TeamSession`（逐轮事件、澄清 interrupt、`submit_response()` 续跑、交付包导出）+ `TeamApp`（适配会话驱动的 `stream/get_state` 接口，事件形态与旧图逐字对齐） | `tests/test_team_session.py`（7 项：逐轮产出主控决策与 `task_result`、事件进会话出口、澄清停在 interrupt、答复后续跑、导出交付包且命题只能是 `proposed`、无来源时给未决报告而非空包、摘要不含判定字段） |
+| 入口按请求类型分流 | 新建 `src/research/intake.py::is_survey_request()`（**保守**判据：出现形式化意图词就不按综述处理）；`server._resolve_engine()` 把综述型请求交给团队引擎，形式化请求仍走理论引擎 | `tests/test_unified_entry_survey_gap.py`（3 项：综述请求产出交付包；形式化请求不被误分流；引擎决策点唯一） |
+
+实测（离线、真实 HTTP 入口）："检索并总结「射频指纹识别」方向近年的研究进展" →
+`mode=team` → 团队跑完 → 交付包落盘（`manifest.json` + `unresolved.md`），没有绑定资料源时
+**如实报 0 条证据与缺什么**，不伪造来源。
+
+### 15.2.1 旧综述图已删除（2026-10-04 第 3 轮，执行完毕）
+
+已确认旧路径在用户面前不可达后，按下表完成了删除。**删除的不是断言，而是机制** ——
+每条删除项的语义去向都记录在 `tests/test_engine_retirement.py` 的表里，并有防回流用例。
+
+| 删除项 | 处置 |
+|---|---|
+| `src/graph/pipeline.py`（2166 行：stage 图、节点、旧 planner/supervisor 派发） | **已删除** |
+| `src/gui.py`（428 行） | **已删除**（主入口是 Web 与 CLI；Tkinter 包装的是已删模块） |
+| `src/main_chat.py`（190 行） | **已删除**（交互澄清由 Web 会话 + `interrupt` 承担） |
+| `tests/test_pipeline_logic.py`（37 项）、`tests/test_interactive.py`（21 项）、`tests/test_planner.py`（43 项） | **已删除**：这些用例覆盖的是 stage 机制、旧 planner 的候选确认与反馈解析；语义去向见下表 |
+| `tests/test_survey_mode.py`（6 项） | **迁移**为 `tests/test_session_entry_contract.py`（5 项，走团队引擎）：身份 / 事件流可回放 / 停止与历史 / respond 409 / 只读接口 |
+| `server.build_pipeline` 包装与 `mode="survey"` 分支、`_resolve_engine` 的 survey 取值 | **已删除**：引擎只有 `theory` / `team` 两种 |
+
+语义去向（"断言的语义没有减少"逐条对照）：
+
+| 被删用例的语义 | 现在守在哪 |
+|---|---|
+| 意图/形态识别（是不是综述、要不要澄清） | `research/intake.py::is_survey_request` + `tests/test_unified_entry_survey_gap.py`（含"形式化优先"反例保护） |
+| 计划与派工（谁做什么、依赖、重试许可） | `agents/supervisor.py` + `tests/test_agent_supervisor.py`（31 项）、`tests/test_team_run.py`（30 项） |
+| 研究契约（任务类型、允许方法、成功判据） | `research/schemas.py` + `tests/test_research_contract.py`、`test_theory_mode.py` |
+| 对象级反馈与澄清交互 | `research/intent.py` + `tests/test_workbench_api.py` 的反馈/暂停点用例、`test_team_session.py` 的澄清续跑用例 |
+| 节点进度显示 | `graph/node_progress.py`（抽出）+ `tests/test_engine_retirement.py::test_node_progress_helper_is_the_shared_one` |
+| 交付包导出 | `research/package.py` + `tests/test_team_session.py` 的导出用例（含"无来源给未决报告"） |
+
+防回流：`tests/test_engine_retirement.py`（8 项）断言这些模块/取值不得回来、全库不得
+再 import 它们、两个引擎都必须真的能建起来。
+
+**顺带修掉一个真实缺陷**：续跑时原来只看落盘 `request.mode`，而旧记录的 `request`
+里没有 `mode` 字段 —— 那会让一个**形式化研究会话在续跑时被换成团队引擎**（实测：
+续跑后收不到原来的 interrupt，等的是团队事件）。现在续跑用与启动同一条判据
+（`_resolve_engine(mode, request=...)`），并有用例覆盖。
+
+### 15.2.2 设计定稿：为什么保留两种研究形态（2026-10-04 第 9 轮）
+
+合并完成后的仓库里有**两支研究引擎**：形式化研究（`graph/theory_pipeline.py` +
+`research/loop.py`）与团队会话（`graph/team_session.py` + `graph/research_graph.py`）。
+这看起来像"合并没做完"，因此在此**定稿为有意选择**，并给出可核查的依据。
+
+**为什么不该合并成一支**：
+
+1. **判定层必须零 LLM 且是唯一状态写入点**。形式化研究的一步是"选义务 → 跑工具
+   （SAT / 符号计算 / Lean）→ 按结果落盘判定"，这条链路里**没有**可供智能体"提议"的位置。
+2. **`AgentTask` 的契约是"只提交候选、不做判断"**。把理论引擎的动作改造成任务，等于让
+   候选结果绕回判定层再判一次 —— 要么多一层无意义转发，要么把判定权交给智能体，
+   而后者正是这套设计要防的事。
+3. **两者已经共用真正该共用的部分**（这才是"合并"的实质）：研究对象存储与冻结快照、
+   `research/` 判定层与推理内核、会话与事件层（`sessions/`）、写作入口
+   （`agents/writing.write_main_manuscript`，含离线降级）、交付包导出
+   （`research/package.py`）与验收门槛、预算与用量计量。
+   剩下的差别是**研究形态**，不是"新旧两套实现"。
+
+**已清除的历史包袱**（这些才是"旧代码"，都已删除）：旧 stage 综述图
+（`graph/pipeline.py` 2166 行）、旧撰写路径（`agents/paper_writer.py` +
+`research/writing_bridge.py` 共 905 行）、`gui.py`、`main_chat.py` 与对应的旧契约用例。
+
+**这一决定如何被把守**（不是只写在文档里）：
+
+| 判据 | 用例 |
+|---|---|
+| 两条路径调的是**同一个**推理内核 | `test_reasoning_kernel.py::test_engine_path_and_team_path_share_the_kernel` |
+| 内核**不写状态** | `test_reasoning_kernel.py::test_model_proposal_does_not_write_state` |
+| 判定层的**写入口清单**不过期 | `test_engine_boundary_contract.py::test_research_state_writes_happen_only_in_the_judgment_layer` + `..._allowlist_is_not_stale` |
+| 旧撰写路径**不得回来** | `test_engine_boundary_contract.py::test_retired_writing_paths_stay_deleted` |
+| 设计说明**就在决策点旁边** | `test_engine_boundary_contract.py::test_the_design_rationale_sits_at_the_decision_point` |
+| 分流对形式化请求**保持保守** | `test_engine_boundary_contract.py::test_dispatch_stays_conservative_about_formal_requests` |
+
+**这条守卫的边界（不要高估）**：写入口清单只能在代码**写出**写入口时抓到它
+（`ResearchStore.put(` / `.put_object(` / `save_snapshot(`）；若某模块拿到的是**注入的
+store 句柄**、只调 `.put(...)`，这条看不出来（`.put(` 也是 `dict.put`/`queue.put` 的名字，
+笼统匹配会产生大量假阳性）。因此真正的保证来自"内核用例 + 本清单"的组合。团队会话引擎的实施设计（第 1、2 步已完成，见 §15.2）
+
+现状（已解决）：`TeamRun.run()` 原本是**一次性**内部循环，跑完才返回，且不产出交付包；
+`server._run_session` 需要"可逐步驱动 + 可中断 + 可续跑 + 最终 get_state"的引擎接口。
+本轮已按下面第 1–3 步落地，第 4–5 步（入口收敛与删除旧图）见 §15.2.1。
+
+| 步 | 内容 | 状态 |
+|---|---|---|
+| 1 | `TeamRun.prepare()`/`step()` + `TeamLoopState` 显式状态 | **完成**（差异测试锁住 `run()` 与逐轮等价） |
+| 2 | `src/graph/team_session.py::TeamSession`（逐轮事件 / 澄清 interrupt / 续跑） | **完成**（7 项用例） |
+| 3 | 交付包：候选 → `ResearchSnapshot` → 既有 `export_package` + 门槛 + 出版层 | **完成**（无来源时给未决报告，不产空包） |
+| 4 | 入口按 `is_survey_request()` 分流（形式化 → 理论引擎；综述 → 团队引擎） | **完成** |
+| 5 | 删除旧图与其契约测试 | **完成**（`graph/pipeline.py`、`gui.py`、`main_chat.py` 与 101 项旧用例；详见 §15.2.1） |
+
+**前端本轮完成 §9.5 的文件拆分主体**: `app.ts` **2228 → 994 行**，会话操作、输入/附件、
+SSE 连接层、工作台与历史视图分别落到 `session-controller.ts` / `features/intake/` /
+`events/session-stream.ts` / `views/research-overview.ts` / `views/project-navigation.ts` /
+`views/interrupt-cards.ts` / `views/research-input.ts`；`RunMode`/`RunStatus` 统一到
+`contracts.ts`；论文/公式/图表追溯视图（F3–F5）已接入「论文与追溯」标签页。
+仍未做: `api/research-client.ts` / `legacy-adapter.ts`（页面仍直连 `fetch`）、`contracts/` 按域
+分组、`views/paper.ts` 再拆图表/审阅面板、`dist`/`assets` 原子发布。
