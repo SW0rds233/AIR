@@ -39,9 +39,3 @@ where = ["."]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-# 测试临时目录固定在仓库内: 部分受限环境无法在系统 TEMP 建目录
-addopts = "--basetemp=.pytest_tmp"

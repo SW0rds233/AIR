@@ -10,7 +10,7 @@ from __future__ import annotations
 2. LLM 打分过滤 (可选): 对候选做相关性打分 0-10, 过滤低分
 
 领域知识**不在代码里**: 领域信号词、"同词异域"术语与非技术性来源都来自数据文件
-`evals/cases/<用例>/retrieval_terms.md` (见 `load_terms`)。代码只保留与领域无关的
+`src/rag/domain_terms/<领域>.md` (见 `load_terms`)。代码只保留与领域无关的
 `mentions(terms, text)` 与"同词异域"判定, 因此换领域不需要改代码 —— 原先把某一个
 领域的词写死在模块常量里, 使"同词异域"保护只对那一个领域有效。
 """
@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 RULE_THRESHOLD = 0.3       # 规则命中率低于该值剔除
 LLM_SCORE_THRESHOLD = 4.5  # LLM 打分低于该值剔除 (0-10, 保留明确相关及以上)
 
-TERMS_FILENAME = "retrieval_terms.md"
 _SECTION_RE = re.compile(r"^\s*#{1,6}\s*(.*)$")
 # 同词异域的就近判定窗口: 强领域词与混淆词在这段距离内共现才算"该领域内的边缘工作"
 NEARBY_CHARS = 40
@@ -86,15 +85,15 @@ def parse_terms(text: str, domain: str = "") -> DomainTerms:
 
 
 def cases_root() -> Path:
-    """用例目录 (词表数据文件的存放位置)。"""
-    return Path(__file__).resolve().parents[2] / "evals" / "cases"
+    """运行时领域词表目录（保留历史函数名以兼容调用方）。"""
+    return Path(__file__).resolve().parent / "domain_terms"
 
 
 def discovered_domains() -> list[Path]:
     root = cases_root()
     if not root.is_dir():
         return []
-    return sorted(path for path in root.glob(f"*/{TERMS_FILENAME}") if path.is_file())
+    return sorted(path for path in root.glob("*.md") if path.is_file())
 
 
 def _load_terms_file(path: Path) -> DomainTerms:
@@ -103,12 +102,12 @@ def _load_terms_file(path: Path) -> DomainTerms:
     except OSError as e:  # 词表不可读时不得静默当成"无领域词"以外的行为
         logger.warning(f"领域词表不可读 {path}: {e}")
         return DomainTerms()
-    return parse_terms(text, domain=path.parent.name)
+    return parse_terms(text, domain=path.stem)
 
 
 @lru_cache(maxsize=32)
 def load_terms(domain: str = "") -> DomainTerms:
-    """按领域标识 (用例目录名或词表里的 `domain`/`aliases`) 载入词表。
+    """按领域标识 (词表文件名或词表里的 `domain`/`aliases`) 载入词表。
 
     找不到时返回**空词表**: 调用方据此明确判定"该领域没有词表", 不做领域假设。
     """
@@ -117,7 +116,7 @@ def load_terms(domain: str = "") -> DomainTerms:
         return DomainTerms()
     for path in discovered_domains():
         terms = _load_terms_file(path)
-        keys = {path.parent.name.lower(), terms.domain.lower()}
+        keys = {path.stem.lower(), terms.domain.lower()}
         keys |= {alias.lower() for alias in terms.aliases}
         if wanted in keys:
             return terms
@@ -135,7 +134,7 @@ def resolve_domain(topic: str) -> DomainTerms:
         return DomainTerms()
     for path in discovered_domains():
         terms = _load_terms_file(path)
-        keys = [terms.domain, *terms.aliases, path.parent.name]
+        keys = [terms.domain, *terms.aliases, path.stem]
         if any(key and key.lower() in body for key in keys):
             return terms
     return DomainTerms()
@@ -376,7 +375,6 @@ def extract_keywords(topic: str, user_keywords: str = "") -> list[str]:
 __all__ = [
     "LLM_SCORE_THRESHOLD",
     "RULE_THRESHOLD",
-    "TERMS_FILENAME",
     "DomainTerms",
     "cases_root",
     "discovered_domains",

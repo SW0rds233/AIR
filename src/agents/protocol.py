@@ -1213,7 +1213,7 @@ class ContextPack(BaseModel):
     """按任务组装的**只读**上下文 (合并计划 §6.1: 角色视图由 context 层组装)。
 
     图状态只保存身份与引用; 这里携带的是已裁到任务范围的快照与令牌。
-    绝不放评测答案: `evals/cases/*/expected_notes.md` 不得进入任何子智能体上下文。
+    绝不将评测答案、人工标注的预期结论放入任何子智能体上下文。
     """
 
     pack_id: str = Field(default_factory=lambda: new_id("ctx"))
