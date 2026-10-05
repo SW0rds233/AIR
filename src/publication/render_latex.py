@@ -30,6 +30,35 @@ __all__ = [
     "render_latex",
 ]
 
+#: Unicode → LaTeX 映射 (只列**实际会被正文带进来**的字符)。
+#:
+#: 原则: 数学符号进数学模式 (`$...$`), 这样既能排版也不再缺字形; 不放进数学模式的
+#: 字符 (如中文标点) 一律不动。刻意**不**映射 `\\`、`{`、`}`、`$` —— 它们是命令结构,
+#: 正文里的既有命令 (如 `\\textbf{}`) 必须原样保留。
+_UNICODE_TO_LATEX: dict[str, str] = {
+    # 运算与关系
+    "×": r"$\times$", "÷": r"$\div$", "±": r"$\pm$", "∓": r"$\mp$",
+    "≤": r"$\leq$", "≥": r"$\geq$", "≠": r"$\neq$", "≡": r"$\equiv$",
+    "≈": r"$\approx$", "≃": r"$\simeq$", "∼": r"$\sim$", "∝": r"$\propto$",
+    "·": r"$\cdot$", "−": r"$-$", "∞": r"$\infty$", "√": r"$\surd$",
+    "∑": r"$\sum$", "∏": r"$\prod$", "∫": r"$\int$", "∂": r"$\partial$",
+    # 集合与逻辑
+    "∈": r"$\in$", "∉": r"$\notin$", "⊂": r"$\subset$", "⊆": r"$\subseteq$",
+    "⊃": r"$\supset$", "∪": r"$\cup$", "∩": r"$\cap$", "∅": r"$\emptyset$",
+    "∀": r"$\forall$", "∃": r"$\exists$", "¬": r"$\neg$", "∧": r"$\wedge$",
+    "∨": r"$\vee$", "⇒": r"$\Rightarrow$", "⇔": r"$\Leftrightarrow$",
+    "→": r"$\to$", "←": r"$\leftarrow$", "↔": r"$\leftrightarrow$",
+    # 常见希腊字母 (论文里最常出现的那些)
+    "α": r"$\alpha$", "β": r"$\beta$", "γ": r"$\gamma$", "δ": r"$\delta$",
+    "ε": r"$\epsilon$", "ζ": r"$\zeta$", "η": r"$\eta$", "θ": r"$\theta$",
+    "κ": r"$\kappa$", "λ": r"$\lambda$", "μ": r"$\mu$", "ν": r"$\nu$",
+    "ξ": r"$\xi$", "π": r"$\pi$", "ρ": r"$\rho$", "σ": r"$\sigma$",
+    "τ": r"$\tau$", "φ": r"$\phi$", "χ": r"$\chi$", "ψ": r"$\psi$",
+    "ω": r"$\omega$", "Γ": r"$\Gamma$", "Δ": r"$\Delta$", "Θ": r"$\Theta$",
+    "Λ": r"$\Lambda$", "Ξ": r"$\Xi$", "Π": r"$\Pi$", "Σ": r"$\Sigma$",
+    "Φ": r"$\Phi$", "Ψ": r"$\Psi$", "Ω": r"$\Omega$",
+}
+
 #: 通用中文论文前言 (ctexart + xelatex)。这里是**唯一**定义, 综述侧的 Markdown
 #: 渲染器从本模块取用, 避免两处 preamble 漂移。
 LATEX_PREAMBLE = r"""\documentclass[UTF8,a4paper,12pt]{ctexart}
@@ -62,6 +91,18 @@ def escape_latex(text: str) -> str:
 
     只转义 `_ & % #`: `\\` 与 `{}` 是命令结构, 转义它们会破坏 `\\textbf{}`;
     `$...$` 内部是数学, 不转义 (否则 `x_i` 会被写成 `x\\_i`)。
+
+    **另加两类必须处理的字符** (离线 `problem2.md` 交付实测: 生成的正文里带
+    `2^1 × 7`、`λ`、`≡`, 于是 xelatex 报 `Missing $ inserted` → **编译失败、没有 PDF**,
+    出版门槛随之不通过、等级掉到"论文草稿"):
+
+    - `^` 与 `~`: 在文本模式下是活动字符 (`^` 会被当成上标起始), 必须转成文本命令;
+    - 常见 Unicode 数学/希腊字符: ctexart 的拉丁字体里没有这些字形 (日志里的
+      `Missing character: There is no λ in font [lmroman12-regular]`), 只给警告、
+      正文出现空洞。映射到数学模式后既不再缺字, 语义也不变。
+
+    这里是**唯一**的转义入口 —— Markdown 渲染器与 LaTeX 渲染器共用它; 把规则写在
+    两个地方必然漂移 (G17 的教训)。
     """
     math_blocks: list[str] = []
 
@@ -70,8 +111,14 @@ def escape_latex(text: str) -> str:
         return f"\x00MATH{len(math_blocks) - 1}\x00"
 
     text = re.sub(r"\$[^$]*\$", _protect, text or "")
+    # Unicode → LaTeX: 数学符号与希腊字母进数学模式 (字体里没有这些字形)
+    for char, latex in _UNICODE_TO_LATEX.items():
+        if char in text:
+            text = text.replace(char, latex)
     for ch in ("_", "&", "%", "#"):
         text = text.replace(ch, "\\" + ch)
+    # 文本模式下的活动字符: 不转义会让整篇编译失败 (不是缺字警告)
+    text = text.replace("^", r"\textasciicircum{}").replace("~", r"\textasciitilde{}")
     for index, block in enumerate(math_blocks):
         text = text.replace(f"\x00MATH{index}\x00", block)
     return text
