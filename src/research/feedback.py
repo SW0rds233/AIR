@@ -68,6 +68,15 @@ _NEED_KIND_BY_ROLE: dict[str, NeedKind] = {
     "review": NeedKind.review,
 }
 
+# 无具体对象的人工干预必须由用户显式选作用范围，不能从任意自然语言猜。
+INTERVENTION_ROLE_BY_SCOPE = {
+    "sources": "evidence",
+    "method": "modeling",
+    "writing": "writing",
+    "review": "review",
+    "validation": "validation",
+}
+
 
 def find_latest_team_run(store: Any, problem_id: str) -> dict[str, Any]:
     """该问题**最近一次**团队运行状态 (`{}` 表示没有 —— 不猜、不新建)。"""
@@ -115,7 +124,8 @@ def target_candidates(store: Any, problem_id: str, *, limit: int = 12) -> list[d
 
 def feedback_need_for(*, project_id: str, problem_id: str, text: str,
                       target_object_id: str = "",
-                      store: Any = None) -> tuple[ResearchNeed | None, dict[str, Any]]:
+                      store: Any = None,
+                      scope: str = "object") -> tuple[ResearchNeed | None, dict[str, Any]]:
     """反馈 → 一条可派工的需求; 无法定位对象时返回澄清信息 (不猜)。
 
     返回 `(need, info)`: `need` 为 `None` 时 `info` 里给出 `needs_clarification` 与
@@ -124,6 +134,26 @@ def feedback_need_for(*, project_id: str, problem_id: str, text: str,
     body = str(text or "").strip()
     if not body:
         return None, {"ok": False, "reason": "反馈内容为空"}
+    if scope == "question":
+        return None, {"ok": False, "needs_clarification": True,
+                      "question": "改变原研究问题请从已有快照派生新问题，避免覆盖原问题的契约与结论。",
+                      "reason": "研究问题身份不可在同一次运行中改写"}
+    if scope != "object":
+        role = INTERVENTION_ROLE_BY_SCOPE.get(scope)
+        if role is None:
+            return None, {"ok": False, "reason": f"未知的人工调整范围: {scope}"}
+        if target_object_id:
+            return None, {"ok": False, "reason": "范围调整与对象修订不能同时指定"}
+        need = ResearchNeed(
+            kind=_NEED_KIND_BY_ROLE[role],
+            statement=f"按用户意见调整{scope}工作: {body[:400]}",
+            why=f"用户在研究过程中调整{scope}工作: {body[:200]}",
+            acceptance=["明确说明执行了什么调整及其依据",
+                        "如无法执行，说明限制并保留原结果"],
+            owner=role, blocking=False,
+            hints={"feedback": body[:400], "intervention_scope": scope},
+        )
+        return need, {"ok": True, "scope": scope, "owner": role}
     if not target_object_id:
         candidates = target_candidates(store, problem_id) if store is not None else []
         return None, {

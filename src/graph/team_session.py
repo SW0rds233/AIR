@@ -24,7 +24,10 @@ from __future__ import annotations
 - `resume()`: 从 `TaskStore` 读回已提交的成果与计划版本, 只补做未完成的部分。
 """
 
+import hashlib
 import json
+import re
+import shutil
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
@@ -70,8 +73,16 @@ class TeamApp:
             if not self.session.submit_response(resume):
                 return
 
-        self.session.team.prepare()
-        while True:
+        if inputs is None and self.session.team.loop.brief is None:
+            self.session.team.restore_state()
+        if self.session._clarification_pending():
+            payload = self.session._clarify_payload()
+            self.session.pending_interrupt = payload
+            yield {"__interrupt__": (_Interrupt(payload),)}
+            return
+        if not self.session.team.loop.finished:
+            self.session.team.prepare()
+        while not self.session.team.loop.finished:
             before = len(self.session.bridge.events)
             keep_going = self.session.team.step()
             for record in self.session.bridge.events[before:]:
@@ -369,6 +380,13 @@ class TeamSession:
         # 先渲染 .tex 并**真编译**: 出版门槛要的是"能不能交付 .pdf"这个事实,
         # 不能用"尚未尝试"占位 (§3.3 G17: 预览/Markdown/PDF 同源同版)。
         manuscript_obj = _manuscript_object(store)
+        figure_sources, figure_warnings = _figure_sources(store, self.team.run_id)
+        figure_paths = {figure_id: f"figures/{figure_id}.png"
+                        for figure_id in figure_sources}
+        if manuscript_obj is not None and figure_paths:
+            from src.agents.writing import render_markdown
+
+            manuscript_md = render_markdown(manuscript_obj, figures=figure_paths)
         tex_text = ""
         compile_status = "not_attempted"
         compile_log = ""
@@ -376,7 +394,8 @@ class TeamSession:
             from src.publication.render_latex import render_latex
 
             tex_text = render_latex(manuscript_obj,
-                                    references=_reference_labels(store))
+                                    references=_reference_labels(store),
+                                    figures=figure_paths)
         assessment = assess_delivery(
             store, project_id=self.team.project_id, problem_id=self.team.problem_id,
             run_id=run_id or self.team.run_id, manuscript_md=manuscript_md,
@@ -412,6 +431,7 @@ class TeamSession:
         try:
             package = export_package(
                 snapshot, spec, [], manuscript_md,
+                manuscript=manuscript_obj,
                 notes=list(self.team.outcome.unresolved_report.get("unresolved") or []),
                 gate=assessment.theory,
                 delivery=assessment.delivery,
@@ -433,6 +453,10 @@ class TeamSession:
             )
         except Exception as e:  # noqa: BLE001 - 导出失败必须**可见且可重试**
             raise ExportError(f"交付包导出失败: {type(e).__name__}: {e}") from e
+        try:
+            _copy_figure_assets(package, figure_sources, figure_warnings)
+        except Exception as e:  # noqa: BLE001 - 图文件必须真实进入交付包
+            raise ExportError(f"图表打包失败: {type(e).__name__}: {e}") from e
         if tex_text:
             compile_status, compile_log = self._compile_package(package, tex_text)
             # 编译结论要**回头改写**交付等级: 出版层产物是在第一次评估之后才落盘的,
@@ -519,6 +543,59 @@ def _manuscript_object(store):
                                           if not k.startswith("_")})
     except Exception:  # noqa: BLE001 - 结构不完整的稿件不参与排版
         return None
+
+
+def _figure_sources(store, run_id: str) -> tuple[dict[str, Path], list[str]]:
+    """只接收本运行、产物根内、哈希匹配的 PNG；外部路径不能混入论文。"""
+    from src import config
+
+    root = Path(config.OUTPUT_DIR).resolve()
+    allowed = (root / "figures").resolve()
+    found: dict[str, Path] = {}
+    warnings: list[str] = []
+    for row in store.list_latest("figure") or []:
+        scope = row.get("_scope") or {}
+        if str(scope.get("run_id") or "") != run_id:
+            continue
+        figure_id = str(row.get("id") or "")
+        render = row.get("render") or {}
+        uri = str(render.get("uri") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", figure_id):
+            warnings.append(f"图对象 ID 不可用于文件名: {figure_id}")
+            continue
+        source = (root / uri).resolve()
+        if not uri or not source.is_relative_to(allowed) or source.suffix.lower() != ".png":
+            warnings.append(f"图 {figure_id} 的路径不在受控图目录内")
+            continue
+        if not source.is_file():
+            warnings.append(f"图 {figure_id} 的文件不存在")
+            continue
+        expected = str(render.get("sha256") or "")
+        if expected and hashlib.sha256(source.read_bytes()).hexdigest() != expected:
+            warnings.append(f"图 {figure_id} 的内容哈希不匹配")
+            continue
+        found[figure_id] = source
+    return found, warnings
+
+
+def _copy_figure_assets(package: Path, sources: dict[str, Path],
+                        warnings: list[str]) -> None:
+    """把正文可引用的图纳入交付包，清单记录身份与实际复制结果。"""
+    target_root = package / "figures"
+    target_root.mkdir(exist_ok=True)
+    inventory: list[dict[str, Any]] = []
+    for figure_id, source in sources.items():
+        target = target_root / f"{figure_id}.png"
+        shutil.copyfile(source, target)
+        inventory.append({"id": figure_id, "path": f"figures/{figure_id}.png",
+                          "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+                          "bytes": target.stat().st_size})
+    manifest_path = package / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["figures"] = inventory
+    manifest["figure_warnings"] = warnings
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
 
 
 def _evidence_rows(store) -> list[dict[str, Any]]:

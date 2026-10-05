@@ -427,28 +427,35 @@ function submitWorkbenchFeedback(objectId: any, textOverride: any) {
   if (!pid) { addMsg('请先关联理论研究项目（启动一次理论研究）', 'msg-error'); return; }
   if (!text) { addMsg('请输入反馈内容', 'msg-error'); return; }
   const picker = byId<HTMLSelectElement>('wbobj');
-  const target = objectId !== undefined && objectId !== null
+  const scope = byId<HTMLSelectElement>('wbfeedbackscope')?.value || 'object';
+  const target = scope === 'object' && objectId !== undefined && objectId !== null
     ? objectId : (picker ? picker.value : '');
+  const selectedTarget = scope === 'object' ? target : '';
+  const feedbackId = globalThis.crypto?.randomUUID?.()
+    || `feedback-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   pageApi().raw(ENDPOINTS.researchFeedback(String(pid)), {
     method: 'POST',
-    body: {response: text, object_id: target || '', problem_id: currentProblemId() || ''},
+    body: {response: text, object_id: selectedTarget || '',
+      problem_id: currentProblemId() || '', scope, feedback_id: feedbackId},
   // 反馈是**变更类**请求: 用 raw 以便如实读出状态码 (4xx 也要照原样报给用户),
   // 同时由客户端统一处理请求头与错误语义。
   }).then((r: Response) => r.json().then((d: any) => ({status: r.status, body: d})))
     .then(({status, body}) => {
     if (body.needs_clarification) {
-      addMsg('需要澄清: ' + (body.clarify || '无法确定该意见作用的对象'), 'msg-error');
+      addMsg('需要澄清: ' + (body.question || body.clarify || '无法确定该意见作用的对象'), 'msg-error');
       // 列出候选对象让用户点选 (F1-5), 而不是只报错
       if ((body.candidates || []).length) d.showFeedbackClarification(body);
     } else if (body.ok) {
       const applied = (body.applied || []).map((a: any) =>
-        a.action + (a.object_id ? ' → ' + a.object_id : '') +
-        (a.affected_claims && a.affected_claims.length
-          ? '（失效: ' + a.affected_claims.join(', ') + '）' : '')
-      ).join('; ');
-      addMsg('已按对象施加: ' + (applied || '无具体变更'), 'msg-system');
+        `${a.owner || '主控'} 已接收需求 ${a.need_id || ''}`).join('; ');
+      addMsg(body.duplicate ? '这条调整已提交过，未重复派工' :
+        `调整已交主控处理（${body.rounds_used ?? 0} 轮）: ${applied || body.stop_reason || '请查看工作台状态'}`,
+      'msg-system');
+      if (body.export_error) addMsg('研究调整已保存，但新版交付包导出失败: ' + body.export_error,
+        'msg-error');
       if (box) box.value = '';
       refreshWorkbench();
+      refreshArtifacts();
     } else {
       addMsg('反馈未施加 (HTTP ' + status + '): ' + JSON.stringify(body), 'msg-error');
     }
@@ -724,6 +731,14 @@ function compensateStatus(status: string): RunStatus {
 const stream: SessionStream = createSessionStream({
   handleEvent: (ev) => handleEvent(ev),
   currentThreadId: () => currentThreadId(),
+  getCursor: (threadId) => getState().transport.cursorBySession[threadId] || 0,
+  recordCursor: (threadId, seq) => dispatch({ type: 'transport/cursor',
+    sessionId: threadId, seq }),
+  onGap: () => {
+    dispatch({ type: 'transport/needsResync', needs: true });
+    refreshWorkbench();
+    refreshArtifacts();
+  },
   onCompensate: (status) => dispatch({ type: 'selection/status', status: compensateStatus(status) }),
   onOfflineStatus: () => {
     setStatus('连接中断，等待你的输入', 'running');

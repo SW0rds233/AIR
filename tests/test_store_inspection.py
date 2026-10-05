@@ -21,9 +21,7 @@ from __future__ import annotations
 import pytest
 
 from src.research.inspection import StoreInspection
-from src.research.loop import ResearchBudget, TheoryEngine
 from src.research.schemas import (
-    Claim,
     ObligationStatus,
     ResearchSpec,
 )
@@ -62,39 +60,8 @@ def _store_with_objects() -> ResearchStore:
     return store
 
 
-def _engine(store: ResearchStore) -> TheoryEngine:
-    return TheoryEngine(SPEC, store=store, budget=ResearchBudget(),
-                        available={"sympy": True})
-
-
 def _inspector(store: ResearchStore) -> StoreInspection:
     return StoreInspection(store, SPEC)
-
-
-def test_object_reads_match_the_engine():
-    store = _store_with_objects()
-    try:
-        engine = _engine(store)
-        engine.load_runtime()
-        view = _inspector(store)
-        assert [c.id for c in view.claims()] == [c.id for c in engine._claims()]
-        assert ([c.version for c in view.claims()]
-                == [c.version for c in engine._claims()])
-        assert ([o.id for o in view.obligations()]
-                == [o.id for o in engine._obligations()])
-        assert ([e.id for e in view.evidence()] == [e.id for e in engine._evidence()])
-        assert ([m.id for m in view.models()] == [m.id for m in engine._models()])
-        assert ([a.id for a in view.assumptions()]
-                == [a.id for a in engine._assumptions()])
-        # 逐命题证据归属必须一致 (跨问题不得互相"填缺")
-        claim = view.claims()[0]
-        assert ([e.id for e in view.evidence_for_claim(claim)]
-                == [e.id for e in engine.evidence_for_claim(claim)])
-        other = [c for c in engine._claims() if c.id != claim.id]
-        assert not other or ([e.id for e in view.evidence_for_claim(other[0])]
-                             == [e.id for e in engine.evidence_for_claim(other[0])])
-    finally:
-        store.close()
 
 
 def test_other_problem_claims_are_not_mixed_in():
@@ -107,128 +74,6 @@ def test_other_problem_claims_are_not_mixed_in():
         assert "clm-other" not in ids, ids
     finally:
         store.close()
-
-
-def test_event_digest_and_metrics_match_the_engine():
-    store = _store_with_objects()
-    try:
-        engine = _engine(store)
-        engine.load_runtime()
-        engine.append_step(writes=[], events=[("obligation_closed", {
-            "claim_id": "clm-1", "obligation_id": "obl-1", "tool": "sympy"})],
-            idempotency_key="t:closed")
-        engine.append_step(writes=[], events=[("claim_refuted", {
-            "claim_id": "clm-1", "witness": {"x": "1/2"}})], idempotency_key="t:ce")
-        view = _inspector(store)
-        claims = view.claims()
-        assert view.event_digest(claims) == engine.event_digest()
-        engine_metrics = engine.metrics()
-        view_metrics = view.metrics(claims)
-        for key in ("events", "counts", "anomalies", "actions", "tool_calls"):
-            assert view_metrics.get(key) == engine_metrics.get(key), key
-        # 逐字一致: 界面文案不能因为换了读法而变
-        assert [item["detail"] for item in view.event_digest(claims)] == \
-            [item["detail"] for item in engine.event_digest()]
-    finally:
-        store.close()
-
-
-def test_gaps_match_the_engine():
-    store = _store_with_objects()
-    try:
-        engine = _engine(store)
-        engine.load_runtime()
-        view = _inspector(store)
-        claims = view.claims()
-        engine_gaps = engine._gaps(engine._claims(), engine._obligations())
-        view_gaps = view.gaps(claims, view.obligations())
-        def rows(gaps):
-            return [(g.gap_type.value, g.target_ref.id, g.statement)
-                    for g in gaps]
-        assert rows(view_gaps) == rows(engine_gaps), (rows(view_gaps), rows(engine_gaps))
-    finally:
-        store.close()
-
-
-def test_model_selection_and_comparison_match_the_engine():
-    store = _store_with_objects()
-    try:
-        engine = _engine(store)
-        engine.load_runtime()
-        view = _inspector(store)
-        claims = view.claims()
-        assert view.model_selection(claims, available={"sympy": True}) == \
-            engine.model_selection()
-        assert view.model_comparison(claims[0] if claims else None) == \
-            engine.model_comparison(claims[0].id if claims else "")
-    finally:
-        store.close()
-
-
-def test_identity_and_budget_match_the_engine_after_a_runtime_record():
-    store = _store_with_objects()
-    try:
-        # 运行记录必须**先**落盘: 引擎的 `run_id` 来自构造/加载时的快照,
-        # 之后再写盘它并不会回头重读 (这与检视层"每次读盘"是两种语义, 因此这里
-        # 把记录放在两边都能看到的位置再比对)。
-        store.put("runtime", "p1", {"problem_id": "p1", "run_id": "run-77",
-                                    "branch_id": "br-1", "actions": 3,
-                                    "tool_calls": 2, "tokens": 100,
-                                    "cost_usd": 0.01, "elapsed_seconds": 4.0,
-                                    "decisions": [{"decision": "dispatch"}],
-                                    "usage_events": [{"stage": "reasoning"}],
-                                    "stopped_reason": "", "done": False,
-                                    "budget": {"max_actions": 40,
-                                               "max_tool_calls": 60}})
-        engine = _engine(store)
-        engine.load_runtime()
-        view = _inspector(store)
-        assert view.identity() == engine.identity()
-        assert view.budget_payload() == engine_payload(engine)
-        assert view.decisions() == engine.decisions
-        assert view.stopped_reason() == engine._stopped_reason
-    finally:
-        store.close()
-
-
-def test_claim_category_has_one_implementation():
-    """`loop._claim_category` 必须与内核那份**完全一致**。
-
-    内核的文档曾声称这条断言存在 —— 实际不存在, 于是两份实现悄悄分叉: 内核只回
-    `formal`, 引擎还会回 `inequality`/`identity`/`monotonicity`, 而团队建模角色用的是
-    内核那份 (能力声明因此说"未知问题类型 formal")。这条用例把它固定住。
-    """
-    from src.research.loop import _claim_category as engine_category
-    from src.research.reasoning_kernel import _claim_category as kernel_category
-    from src.research.schemas import ClaimType, Relation
-
-    samples = [
-        Claim(id="a", statement="s", claim_type=ClaimType.definitional,
-              relation=Relation.ge, lhs="x", rhs="0"),
-        Claim(id="b", statement="s", claim_type=ClaimType.definitional,
-              relation=Relation.eq, lhs="x", rhs="x"),
-        Claim(id="c", statement="s", claim_type=ClaimType.definitional,
-              expr="f(x)", wrt="x", relation=Relation.custom),
-        Claim(id="d", statement="s", claim_type=ClaimType.definitional,
-              relation=Relation.custom),
-        Claim(id="e", statement="s", claim_type=ClaimType.causal),
-        Claim(id="f", statement="s", claim_type=ClaimType.descriptive),
-        Claim(id="g", statement="s", claim_type=ClaimType.predictive),
-        Claim(id="h", statement="s", claim_type=ClaimType.scenario),
-        Claim(id="i", statement="s", claim_type=ClaimType.normative),
-    ]
-    for claim in samples:
-        assert engine_category(claim) == kernel_category(claim), claim.id
-    # 定义性命题必须区分出可符号核验的三种形态 (不是笼统的 "formal")
-    assert kernel_category(samples[0]) == "inequality"
-    assert kernel_category(samples[1]) == "identity"
-    assert kernel_category(samples[2]) == "monotonicity"
-
-
-def engine_payload(engine) -> dict:
-    from src.research.reporting import budget_payload
-
-    return budget_payload(engine)
 
 
 def test_inspection_never_writes_anything():
@@ -379,14 +224,6 @@ def test_workbench_endpoint_never_constructs_a_research_engine(tmp_path, monkeyp
             "status": ObligationStatus.open.value})
     finally:
         store.close()
-
-    import src.research.loop as loop_module
-
-    class _ExplodingEngine:
-        def __init__(self, *args, **kwargs):
-            raise AssertionError("只读路径构造了 TheoryEngine —— 它不该需要执行能力")
-
-    monkeypatch.setattr(loop_module, "TheoryEngine", _ExplodingEngine)
 
     with TestClient(server.app) as client:
         response = client.get("/api/research/proj-readonly/state",

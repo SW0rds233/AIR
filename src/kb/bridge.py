@@ -216,6 +216,13 @@ def _default_search_fn() -> Callable[[str, int], list[dict]] | None:
 def _harvest_external(queries: list[str], policy: SourcePolicy, coverage: RetrievalCoverage,
                       *, topic: str, search_fn, per_query: int, ingest: bool) -> None:
     """按规划的多条检索式自主检索, 命中入库, 并把覆盖情况写进 coverage。"""
+    import os
+
+    # 显式离线运行不触网；测试仍可注入 search_fn 验证自主检索逻辑。
+    if search_fn is None and os.getenv("THEORY_LLM", "").strip().lower() in {"0", "false", "off"}:
+        coverage.failures.append("显式离线运行: 未执行外部文献检索")
+        coverage.uncovered.append("外部文献未核查")
+        return
     fn = search_fn if search_fn is not None else _default_search_fn()
     if fn is None:
         coverage.failures.append("外部检索能力不可用 (工具未安装或配置缺失)")
@@ -336,6 +343,7 @@ def gather_sources(
     max_queries: int = 4,
     per_query: int = 4,
     terminology: dict[str, list[str]] | None = None,
+    extra_queries: list[str] | None = None,
     search_fn: Callable[[str, int], list[dict]] | None = None,
     ingest: bool = True,
 ) -> tuple[list[SourceEvidence], RetrievalCoverage]:
@@ -352,7 +360,10 @@ def gather_sources(
     # 检索式只规划一次: 外部检索与资料库检索用同一组式子, 覆盖记录才能对上
     planned = plan_queries(contract, goal=_claim_goal(claim), terminology=terminology,
                            limit=query_limit)
-    queries = [q.text for q in planned]
+    # 检索智能体通过工具循环提出的查询优先进入同一条入库/覆盖路径；
+    # 不另起一套"模型搜到了但结果没登记"的隐形检索。
+    selected = [str(q).strip()[:300] for q in (extra_queries or []) if str(q).strip()]
+    queries = list(dict.fromkeys([*selected, *(q.text for q in planned)]))[:query_limit]
     coverage.queries = list(queries)
     if policy in (SourcePolicy.autonomous, SourcePolicy.both):
         _harvest_external(queries, policy, coverage, topic=topic, search_fn=search_fn,

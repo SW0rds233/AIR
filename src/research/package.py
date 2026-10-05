@@ -13,7 +13,8 @@ import json
 from pathlib import Path
 
 from src.research.acceptance import GateResult
-from src.research.schemas import ResearchSnapshot, ResearchSpec
+from src.research.schemas import ClaimStatus, ResearchSnapshot, ResearchSpec
+from src.publication.schemas import BlockRole, Manuscript, RefKind
 
 
 def export_package(
@@ -30,6 +31,7 @@ def export_package(
     usage: dict | None = None,
     run_id: str = "",
     input_snapshot: dict | None = None,
+    manuscript: Manuscript | None = None,
 ) -> Path:
     root = Path(base_dir) if base_dir else _default_root(snapshot)
     root.mkdir(parents=True, exist_ok=True)
@@ -88,7 +90,7 @@ def export_package(
         "delivery_level": delivery_level or ("论文草稿" if gate and gate.passed else "研究备忘录"),
         "writing_map": snapshot.writing_map,
         # P1-3: 正文每条核心论断能否回到冻结快照 (只查可反查性, 不判断论证正确性)
-        "manuscript_traceability": _traceability(snapshot, manuscript_md),
+        "manuscript_traceability": _traceability(snapshot, manuscript_md, manuscript),
         "limitation": _limitation(snapshot),
         "tool_versions": _tool_versions(snapshot),
         # P1-3: 审阅者要能凭交付包复核"用了哪版资料、哪组假设、哪次验证"
@@ -105,27 +107,43 @@ def export_package(
     return root
 
 
-def _traceability(snapshot: ResearchSnapshot, manuscript_md: str) -> dict:
-    """核对交付包里的正文与冻结快照是否一致 (可反查性); 失败不影响导出。
+def _traceability(snapshot: ResearchSnapshot, manuscript_md: str,
+                  manuscript: Manuscript | None = None) -> dict:
+    """以**真实稿件**的块引用与渲染锚点核对冻结快照。
 
-    两种检查口径, 必须能区分 (否则"自我一致"会被读成"正文与快照一致"):
-    - **落了正文** (交付包里有 manuscript.md): 用**快照**重建的映射去核对**真实正文**,
-      于是"写作阶段自行补足了快照里没有的结论"会如实报出来;
-    - **没落正文** (只给了快照): 只能核对快照渲染与快照本身是否一致, 在结果里
-      标注 `checked="snapshot_only"`, 不冒充"已核对正文"。
+    不重建一份快照稿件：重建会得到另一套锚点，既可能误报，也可能自证通过。
+    没传结构化稿件时仍检查快照登记的正文映射，但不能声称检查过每个块的引用。
     """
-    try:
-        from src.agents.theory_writer import build_manuscript, trace_manuscript
-
-        manuscript = build_manuscript(snapshot, topic=snapshot.project_id)
-        report = trace_manuscript(snapshot, manuscript, manuscript_md)
-        report["checked"] = "markdown" if (manuscript_md or "").strip() else "snapshot_only"
-        if report["checked"] == "snapshot_only":
-            report["note"] = ("交付包未提供正文本体, 仅核对快照渲染与快照的一致性; "
-                              "正文级可反查需在导出后按 manuscript.md 复核")
-        return report
-    except Exception as e:  # noqa: BLE001 - 追踪失败时如实记录, 不假装通过
-        return {"ok": False, "error": type(e).__name__, "note": "可反查性检查未能执行"}
+    text = manuscript_md or ""
+    core = [claim for claim in snapshot.claims
+            if claim.status in (ClaimStatus.supported, ClaimStatus.refuted)]
+    mapping = snapshot.writing_map or {}
+    mapped = [{"claim_id": claim.id, "anchor": mapping[claim.id]}
+              for claim in core if mapping.get(claim.id)]
+    unmapped = [claim.id for claim in core if not mapping.get(claim.id)]
+    missing = [item["claim_id"] for item in mapped
+               if text.strip() and item["anchor"] not in text]
+    unlabeled: list[str] = []
+    orphan_refs: list[str] = []
+    if manuscript is not None:
+        known = {claim.id for claim in snapshot.claims}
+        for block in manuscript.all_blocks():
+            refs = [ref.id for kind, ref in zip(block.ref_kinds, block.refs)
+                    if kind == RefKind.claim.value]
+            if block.role == BlockRole.claim and not refs:
+                unlabeled.append(block.block_id)
+            orphan_refs.extend(ref for ref in refs if ref not in known)
+    checked = "markdown" if text.strip() else "snapshot_only"
+    ok = (checked == "markdown" and not unmapped and not missing
+          and not unlabeled and not orphan_refs)
+    return {
+        "ok": ok, "checked": checked, "mapped": mapped,
+        "unmapped_claims": unmapped, "missing_anchors": missing,
+        "unlabeled_blocks": unlabeled, "orphan_claim_refs": sorted(set(orphan_refs)),
+        "core_claims": len(core),
+        "note": ("真实正文的核心结论已反查到冻结快照对象" if ok else
+                 "正文与快照的映射不完整，或缺少可核对的正文"),
+    }
 
 
 def _source_set(spec: ResearchSpec | None, snapshot: ResearchSnapshot) -> dict:
@@ -160,8 +178,10 @@ def _prompt_digest() -> str:
     """提示词版本 = 承载提示词的模块内容摘要 (可复核, 不再写"未登记")。"""
     import hashlib
 
-    files = ("src/research/proposal.py", "src/research/coordinator.py",
-             "src/research/question_planner.py", "src/agents/theory_writer.py")
+    files = ("src/agents/supervisor.py", "src/agents/evidence.py",
+             "src/agents/modeling.py", "src/agents/reasoning.py",
+             "src/agents/validation_planning.py", "src/agents/writing.py",
+             "src/agents/figures.py", "src/agents/review.py")
     digest = hashlib.sha256()
     for name in files:
         digest.update(name.encode("utf-8"))

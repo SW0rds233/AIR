@@ -75,23 +75,6 @@ def test_explicit_problem_uses_formal_proof_path():
     assert not contract.needs_clarification
 
 
-def test_contract_freezes_on_confirmation(tmp_path):
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.store import ResearchStore
-
-    spec = build_spec_from_input("研究在噪声强度影响下误码率的变化", project_id="freeze")
-    assert spec.contract is not None and not spec.contract.frozen
-    store = ResearchStore("freeze", db_path=tmp_path / "freeze.sqlite")
-    engine = TheoryEngine(spec, store, budget=ResearchBudget(max_actions=5))
-    try:
-        assert engine.plan_candidates()
-        assert engine.confirm_candidate(0) is True
-        assert engine.spec.contract.frozen
-        assert engine.spec.contract.frozen_version == engine.spec.version
-    finally:
-        store.close()
-
-
 def test_same_request_with_new_task_kind_conflicts(tmp_path):
     """同一 problem_id 下研究类型变了必须冲突, 不静默沿用旧契约。"""
     from src.research.store import KIND_SPEC, ResearchStore

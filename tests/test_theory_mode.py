@@ -7,8 +7,6 @@ from __future__ import annotations
 论文遗漏前提、修改上游假设、恢复/重试。
 """
 
-import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -20,26 +18,6 @@ ACCEPTANCE_TEXT = (
 _CACHE: dict = {}
 
 
-def _acceptance_result():
-    """运行一次最小闭环示例并缓存 (子进程验证开销较大)。"""
-    if "result" not in _CACHE:
-        from src.research.loop import ResearchBudget, TheoryEngine
-        from src.research.schemas import ResearchSpec
-        from src.research.store import ResearchStore
-
-        tmp = Path(tempfile.mkdtemp()) / "acc.sqlite"
-        spec = ResearchSpec(project_id="acc", problem_statement=ACCEPTANCE_TEXT)
-        store = ResearchStore("acc", db_path=tmp)
-        engine = TheoryEngine(spec, store, budget=ResearchBudget(max_actions=20))
-        _CACHE["result"] = engine.run()
-        _CACHE["engine"] = engine
-        _CACHE["store"] = store
-    return _CACHE["result"]
-
-
-# --------------------------------------------------------------------------
-# 依赖图 / 存储 / schema
-# --------------------------------------------------------------------------
 def test_dependency_graph_rejects_cycle_and_propagates_stale():
     from src.research.dependency_graph import CyclicDependencyError, DependencyGraph
 
@@ -51,59 +29,6 @@ def test_dependency_graph_rejects_cycle_and_propagates_stale():
         graph.add_edge("T", "asm")
     with pytest.raises(CyclicDependencyError):
         graph.add_edge("L2", "L2")
-
-
-def test_resume_reuses_persisted_spec(tmp_path, monkeypatch):
-    """resume 必须复用已落盘规格, 不重新生成候选 (计划书 §9.1)。"""
-    from src import config
-    from src.graph import theory_pipeline
-    from src.research.store import KIND_SPEC, ResearchStore
-
-    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
-    monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path / "out")
-
-    request = "研究在噪声强度影响下误码率的变化"
-    first = theory_pipeline.run_theory_pipeline(request=request, topic="方向",
-                                                project_id="res1", problem_id="p1")
-    candidates_first = first.get("candidates") or []
-    assert candidates_first, "首次运行应生成候选"
-    assert first.get("checkpoint_persistent") is True, "检查点应默认持久化"
-
-    # 显式指定 db_path: 默认路径会落到仓库 data/, 污染工作区并遮蔽隔离问题
-    store = ResearchStore("res1", db_path=config.DATA_DIR / "research" / "res1.sqlite")
-    spec_v1 = store.get(KIND_SPEC, "p1")
-    assert spec_v1, "规格应已落盘"
-
-    # 模拟"用户已确认路线"后再 resume
-    spec_v1["confirmed"] = True
-    spec_v1["selected_candidate_id"] = "cand-fixed"
-    spec_v1["candidates"] = [dict(candidates_first[0], candidate_id="cand-fixed")]
-    store.put(KIND_SPEC, "p1", spec_v1)
-
-    theory_pipeline.run_theory_pipeline(
-        request="完全不相关的另一个方向", topic="另一个主题",
-        project_id="res1", problem_id="p1", resume=True)
-    spec_after = store.get(KIND_SPEC, "p1")
-    assert spec_after["confirmed"] is True, "resume 不得重置已确认状态"
-    assert spec_after["selected_candidate_id"] == "cand-fixed"
-    assert spec_after["problem_statement"] == spec_v1["problem_statement"], \
-        "resume 不得用新输入覆盖已落盘规格"
-    store.close()
-
-
-def test_checkpoint_degradation_is_explicit(monkeypatch):
-    """检查点降级必须显式告知, 不能静默冒充可跨进程恢复 (§9.1)。"""
-    from langgraph.checkpoint.memory import MemorySaver
-
-    from src.graph import theory_pipeline
-
-    def boom(*_a, **_kw):
-        raise RuntimeError("模拟 sqlite 不可用")
-
-    monkeypatch.setattr("langgraph.checkpoint.sqlite.SqliteSaver", boom)
-    checkpointer, note = theory_pipeline._get_persistent_checkpointer()
-    assert isinstance(checkpointer, MemorySaver)
-    assert note and "降级" in note and "无法跨进程恢复" in note
 
 
 def test_store_versioning_idempotency_and_revision(tmp_path):
@@ -323,20 +248,6 @@ def test_theorem_extractor_cards():
     assert cards[0].location.startswith("line")
 
 
-def test_theory_render_structured_output():
-    from src.rag.theory_render import Block, Manuscript, render_latex, render_markdown
-
-    ms = Manuscript(title="Demo", blocks=[
-        Block("heading", "主要结果"),
-        Block("theorem", "x^2 \\ge 0", label="thm1", title="非负性"),
-        Block("proof", "因为平方非负。"),
-    ])
-    md = render_markdown(ms)
-    assert "定理 1" in md and "证明" in md
-    tex = render_latex(ms)
-    assert "\\begin{theorem}" in tex and "\\begin{proof}" in tex
-
-
 # --------------------------------------------------------------------------
 # 交付门槛
 # --------------------------------------------------------------------------
@@ -417,215 +328,6 @@ def test_delivery_gate_requires_claim_mapping():
 # --------------------------------------------------------------------------
 # 研究循环端到端
 # --------------------------------------------------------------------------
-def test_engine_minimal_closed_loop():
-    result = _acceptance_result()
-    statuses = {(c.relation.value, c.status.value) for c in result.snapshot.claims}
-    assert (">=", "supported") in statuses
-    assert (">", "refuted") in statuses
-    assert result.gate.passed
-    # 反例必须满足前提 (x,y 实数) 且违反结论
-    ce = [v for v in result.snapshot.verifications if v.counterexample]
-    assert ce and ce[0].counterexample == {"x": 0, "y": 0}
-    # 真命题的验证等级
-    supported = [c for c in result.snapshot.claims if c.status.value == "supported"]
-    assert all(c.assurance.value == "symbolic_checked" for c in supported)
-    # 决策记录可审查
-    assert any(d["action"] == "check_step" for d in result.decisions)
-
-
-def test_clarify_decision_stops_the_loop_instead_of_repeating(tmp_path):
-    """控制器判定"需要澄清"时必须收尾, 不得反复提议澄清直到预算耗尽。
-
-    现场缺陷 (一次人工运行的事件流): 控制器连续 16 轮提议 `clarify_problem`
-    (分别指向命题与不同义务), 每轮都被判"有进展", 于是 40 个动作的预算全部烧在
-    同一个未完成的澄清步骤上, 界面看起来"卡住"。澄清是**终态判断**, 不是可重复的
-    普通动作 —— 一旦决定需要澄清, 就必须把问题交给用户。
-    """
-    from src.research.loop import ActionType, ResearchBudget, TheoryEngine
-    from src.research.schemas import ResearchSpec
-    from src.research.store import ResearchStore
-
-    spec = ResearchSpec(project_id="clr", problem_id="p1",
-                        problem_statement="对所有实数 x: x**2 >= 0")
-    store = ResearchStore("clr", db_path=tmp_path / "clr.sqlite")
-
-    def always_clarify(_state):
-        return {"action_type": ActionType.clarify_problem.value,
-                "object_id": "", "why_now": "研究对象未被指定",
-                "uncertainty_reduced": "明确研究问题与范围"}
-
-    engine = TheoryEngine(spec, store=store, llm=object(),
-                          budget=ResearchBudget(max_actions=40, max_tool_calls=40))
-    engine.proposer = always_clarify
-    result = engine.run()
-
-    assert result.needs_clarification is True, "澄清必须是终态"
-    assert engine.done is True
-    assert result.usage["actions"] <= 2, (
-        f"澄清后仍继续循环: 消耗 {result.usage['actions']} 个动作")
-    assert result.usage["actions"] < 40, "预算是被澄清烧光的"
-    assert any(d["action"] == "clarify_problem" for d in result.decisions)
-    assert any("澄清" in n for n in result.notes)
-    # 澄清请求不是研究结论: 门槛不得通过
-    assert result.gate.passed is False
-    store.close()
-
-
-def test_clarify_by_controller_ends_the_graph_with_a_memo(tmp_path, monkeypatch):
-    """端到端: 控制器澄清 → 图收尾 → 交付等级为研究备忘录 (不得报成论文草稿)。"""
-    from src import config
-    from src.graph import theory_pipeline
-
-    monkeypatch.setenv("THEORY_LLM", "0")
-    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
-    monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path / "out")
-
-    original = theory_pipeline._attach_proposer
-
-    def clarify_proposer(engine, store):
-        engine.proposer = lambda _state: {
-            "action_type": "clarify_problem", "object_id": "",
-            "why_now": "缺少可检验对象", "uncertainty_reduced": "明确研究问题"}
-
-    monkeypatch.setattr(theory_pipeline, "_attach_proposer", clarify_proposer)
-    try:
-        final = theory_pipeline.run_theory_pipeline(
-            request="对所有实数 x: x**2 >= 0", topic="clarify", project_id="clrgraph",
-            problem_id="p1", max_actions=20, max_tool_calls=20)
-    finally:
-        monkeypatch.setattr(theory_pipeline, "_attach_proposer", original)
-
-    assert final.get("needs_clarification") is True
-    assert final.get("delivery_level") == "研究备忘录"
-    assert final.get("gate_passed") is False
-    assert (final.get("usage") or {}).get("actions", 0) <= 3, final.get("usage")
-
-
-def test_engine_unknown_tool_stays_undecided(tmp_path):
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import ResearchSpec
-    from src.research.store import ResearchStore
-    from src.verification.schemas import VerificationResult, VerificationStatus
-
-    class UnknownRunner:
-        def run(self, tool, operation, arguments, timeout=None):
-            return VerificationResult(tool=tool, status=VerificationStatus.unknown, detail="求解器超时")
-
-    spec = ResearchSpec(project_id="u1", problem_statement="对所有实数 x: x**2 >= 0")
-    store = ResearchStore("u1", db_path=tmp_path / "u1.sqlite")
-    engine = TheoryEngine(spec, store, runner=UnknownRunner(),
-                          budget=ResearchBudget(max_actions=10))
-    result = engine.run()
-    assert all(c.status.value != "supported" for c in result.snapshot.claims)
-    assert not result.gate.passed
-    assert any("未决" in n for n in result.notes)
-
-
-def test_engine_missing_premise_stays_blocked(tmp_path):
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import ResearchSpec
-    from src.research.store import ResearchStore
-    from src.verification.runner import VerificationRunner
-
-    # 1/x >= 0 在 x 不排除 0 时无法判定 → 定位到缺口, 不冒充通过
-    spec = ResearchSpec(project_id="m1", problem_statement="对所有实数 x: 1/x >= 0")
-    store = ResearchStore("m1", db_path=tmp_path / "m1.sqlite")
-    engine = TheoryEngine(spec, store, runner=VerificationRunner(inproc=True),
-                          budget=ResearchBudget(max_actions=10))
-    result = engine.run()
-    assert not any(c.status.value == "supported" for c in result.snapshot.claims)
-    assert any(o.status.value in ("blocked", "refuted") for o in result.snapshot.obligations)
-
-
-def test_engine_complex_variant_blocked(tmp_path):
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import ResearchSpec
-    from src.research.store import ResearchStore
-    from src.verification.runner import VerificationRunner
-
-    spec = ResearchSpec(project_id="cx1", problem_statement="对所有复数 x、y: x**2 + y**2 >= 2*x*y")
-    store = ResearchStore("cx1", db_path=tmp_path / "cx.sqlite")
-    engine = TheoryEngine(spec, store, runner=VerificationRunner(inproc=True),
-                          budget=ResearchBudget(max_actions=10))
-    result = engine.run()
-    assert not result.gate.passed
-    blocked = [c for c in result.snapshot.claims if c.status.value == "blocked"]
-    assert blocked
-
-
-def test_revise_assumption_propagates_staleness(tmp_path):
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import ResearchSpec
-    from src.research.store import KIND_ASSUMPTION, KIND_VERIFICATION, ResearchStore
-    from src.verification.runner import VerificationRunner
-
-    spec = ResearchSpec(project_id="r1", problem_statement="对所有实数 x: x**2 >= 0")
-    store = ResearchStore("r1", db_path=tmp_path / "r1.sqlite")
-    engine = TheoryEngine(spec, store, runner=VerificationRunner(inproc=True),
-                          budget=ResearchBudget(max_actions=10))
-    engine.run()
-    asm = store.list_latest(KIND_ASSUMPTION)[0]
-    affected = engine.revise_assumption(asm["id"], reason="用户质疑变量域")
-    assert affected
-    stale = [v for v in store.list_latest(KIND_VERIFICATION) if v.get("stale")]
-    assert stale
-    assert store.get(KIND_ASSUMPTION, asm["id"])["accepted"] is False
-
-
-def test_engine_resume_preserves_budget_and_claims(tmp_path):
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import ResearchSpec
-    from src.research.store import KIND_CLAIM, KIND_RUNTIME, ResearchStore
-    from src.verification.runner import VerificationRunner
-
-    spec = ResearchSpec(project_id="res1", problem_statement="对所有实数 x: x**2 >= 0")
-    store = ResearchStore("res1", db_path=tmp_path / "res1.sqlite")
-    runner = VerificationRunner(inproc=True)
-    first = TheoryEngine(spec, store, runner=runner, budget=ResearchBudget(max_actions=10)).run()
-    claims_after_first = len(store.list_latest(KIND_CLAIM))
-    runtime = store.get(KIND_RUNTIME, spec.problem_id)
-    assert runtime and runtime["actions"] > 0
-
-    # 重建引擎 (模拟断点恢复): 不应重置预算, 也不重复接纳命题
-    resumed = TheoryEngine(spec, store, runner=runner, budget=ResearchBudget(max_actions=10))
-    resumed.load_runtime()
-    assert resumed._actions == runtime["actions"]
-    assert resumed.done is True
-    resumed.run()
-    assert len(store.list_latest(KIND_CLAIM)) == claims_after_first
-    assert first.gate.passed
-
-
-def test_theory_pipeline_graph_export(tmp_path, monkeypatch):
-    from src import config
-    from src.graph import theory_pipeline
-    from src.research import package as package_mod
-
-    # 隔离到临时目录, 避免污染仓库 data/ 与 outputs/
-    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
-    monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path / "outputs")
-
-    exported = {}
-    real_export = package_mod.export_package
-
-    def fake_export(snapshot, spec, decisions, md, tex=None, **kwargs):
-        kwargs.pop("base_dir", None)
-        path = real_export(snapshot, spec, decisions, md, tex,
-                           base_dir=tmp_path / snapshot.snapshot_id, **kwargs)
-        exported["path"] = path
-        return path
-
-    monkeypatch.setattr(theory_pipeline, "export_package", fake_export)
-    final = theory_pipeline.run_theory_pipeline(
-        request=ACCEPTANCE_TEXT, topic="acceptance", project_id="graph1", problem_id="p9",
-    )
-    assert final.get("gate_passed") is True
-    assert "path" in exported
-    assert (exported["path"] / "manuscript.md").exists()
-    assert (exported["path"] / "paper.tex").exists()
-    assert (exported["path"] / "manifest.json").exists()
-
-
 # --------------------------------------------------------------------------
 # 方向输入 → 候选问题 → 确认 → 单调性研究
 # --------------------------------------------------------------------------
@@ -654,82 +356,6 @@ def test_build_spec_distinguishes_direction_and_problem():
     problem_spec = build_spec_from_input("对所有实数 x、y: x^2 + y^2 >= 2xy", project_id="d2")
     assert problem_spec.problem_statement
     assert not problem_spec.direction
-
-
-def test_direction_candidates_require_confirmation(tmp_path):
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.question_planner import build_spec_from_input
-    from src.research.store import ResearchStore
-    from src.verification.runner import VerificationRunner
-
-    spec = build_spec_from_input("研究在噪声强度影响下误码率的变化", project_id="dc1")
-    store = ResearchStore("dc1", db_path=tmp_path / "dc1.sqlite")
-    engine = TheoryEngine(spec, store, runner=VerificationRunner(inproc=True),
-                          budget=ResearchBudget(max_actions=10))
-    first = engine.run()
-    assert first.needs_confirmation
-    assert first.candidates and first.candidates[0]["category"] == "monotonicity"
-    assert not first.snapshot.claims  # 未确认前不进入研究
-
-    assert engine.confirm_candidate(0) is True
-    second = engine.run()
-    # 规则候选缺少显式表达式 → 请求澄清而不是臆造结论
-    assert second.needs_clarification
-    assert any("显式表达式" in n or "无法可靠形式化" in n for n in second.notes)
-
-
-def test_llm_direction_candidate_runs_monotonicity(tmp_path):
-    from types import SimpleNamespace
-
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.question_planner import build_spec_from_input
-    from src.research.store import ResearchStore
-    from src.verification.runner import VerificationRunner
-
-    payload = (
-        '[{"statement":"电阻关于温度单调非减","category":"monotonicity",'
-        '"expr":"x**2","wrt":"x","direction":"nondecreasing","dependent":"电阻",'
-        '"independent":"温度","variables":["x"],"variable_domains":{"x":"positive"},'
-        '"known_results":"未知","difference":"待比较","verifiability":"可符号核验",'
-        '"difficulty":"低","recommended":true,"rationale":"示例"}]'
-    )
-    fake_llm = SimpleNamespace(invoke=lambda msgs: SimpleNamespace(content=payload))
-    spec = build_spec_from_input("研究在温度影响下电阻的变化", project_id="dc2")
-    store = ResearchStore("dc2", db_path=tmp_path / "dc2.sqlite")
-    engine = TheoryEngine(spec, store, llm=fake_llm, runner=VerificationRunner(inproc=True),
-                          budget=ResearchBudget(max_actions=10))
-    assert engine.run().needs_confirmation
-    assert engine.confirm_candidate(0)
-    result = engine.run()
-    supported = [c for c in result.snapshot.claims if c.status.value == "supported"]
-    assert supported and supported[0].direction == "nondecreasing"
-    assert result.gate.passed
-
-
-def test_monotonicity_supported_and_refuted(tmp_path):
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import ClaimQuestion, ResearchSpec
-    from src.research.store import ResearchStore
-    from src.verification.runner import VerificationRunner
-
-    def run(pid, question):
-        spec = ResearchSpec(project_id=pid, questions=[question], confirmed=True)
-        store = ResearchStore(pid, db_path=tmp_path / f"{pid}.sqlite")
-        return TheoryEngine(spec, store, runner=VerificationRunner(inproc=True),
-                            budget=ResearchBudget(max_actions=10)).run()
-
-    good = ClaimQuestion(statement="x² 关于 x 单调非减 (x>0)", category="monotonicity",
-                         expr="x**2", wrt="x", direction="nondecreasing",
-                         variables=["x"], variable_domains={"x": "positive"})
-    result = run("mono-ok", good)
-    assert any(c.status.value == "supported" for c in result.snapshot.claims)
-    assert result.gate.passed
-
-    bad = ClaimQuestion(statement="-x 关于 x 单调非减", category="monotonicity",
-                        expr="-x", wrt="x", direction="nondecreasing",
-                        variables=["x"], variable_domains={"x": "real"})
-    result2 = run("mono-bad", bad)
-    assert any(c.status.value == "refuted" for c in result2.snapshot.claims)
 
 
 # --------------------------------------------------------------------------
@@ -789,98 +415,6 @@ def test_stats_did_and_mean_difference(runner):
     assert no_data.status.value == "unsupported"
 
 
-def _causal_engine(tmp_path, pid, study):
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import ClaimQuestion, ClaimType, ResearchSpec
-    from src.research.store import ResearchStore
-    from src.verification.runner import VerificationRunner
-
-    question = ClaimQuestion(statement="技术A对行业产出的影响", category="applied",
-                             claim_type=ClaimType.causal, study=study, recommended=True)
-    spec = ResearchSpec(project_id=pid, questions=[question], confirmed=True)
-    store = ResearchStore(pid, db_path=tmp_path / f"{pid}.sqlite")
-    return TheoryEngine(spec, store, runner=VerificationRunner(inproc=True),
-                        budget=ResearchBudget(max_actions=20)).run()
-
-
-def test_causal_claim_with_data_passes_gate(tmp_path):
-    result = _causal_engine(tmp_path, "causal-ok", _did_study(_did_rows(2.0)))
-    supported = [c for c in result.snapshot.claims if c.status.value == "supported"]
-    assert supported and supported[0].claim_type.value == "causal"
-    assert supported[0].assurance.value == "empirical_estimated"
-    assert result.gate.passed, result.gate.render()
-    # 结论携带不确定性区间
-    assert supported[0].effect_estimate.get("ci_low") is not None
-    # 写稿应包含效应量与 CI
-    from src.agents.theory_writer import run_theory_writing
-
-    md, writing_map = run_theory_writing(result.snapshot, "技术A影响")
-    assert "95% CI" in md and supported[0].id in writing_map
-
-
-def test_causal_claim_without_data_stays_undecided(tmp_path):
-    result = _causal_engine(tmp_path, "causal-nodata", _did_study([]))
-    assert not any(c.status.value == "supported" for c in result.snapshot.claims)
-    assert not result.gate.passed
-
-
-def test_causal_claim_null_effect_not_supported(tmp_path):
-    # 真实效应为 0 → CI 包含 0 → 不得声称因果成立
-    result = _causal_engine(tmp_path, "causal-null", _did_study(_did_rows(0.0)))
-    assert not any(c.status.value == "supported" for c in result.snapshot.claims)
-
-
-def test_causal_gate_blocks_missing_scope_and_confounders(tmp_path):
-    study = _did_study(_did_rows(2.0), confounders=[], confounder_handling="",
-                       population="", region="", period="")
-    # 缺少范围/混淆声明时, 规则义务无法关闭 → 门槛不通过
-    result = _causal_engine(tmp_path, "causal-scope", study)
-    assert not result.gate.passed
-    kinds = {o.kind: o.status.value for o in result.snapshot.obligations}
-    assert kinds.get("scope_check") == "blocked"
-    assert kinds.get("control_confound") == "blocked"
-
-
-def test_causal_requires_identification_declarations(tmp_path):
-    """计划书 §7.4: 声明设计 + 填了混淆说明 + 区间不跨零 不足以建立因果结论。
-
-    识别假设 / 设计可行性 / 测量与缺失 / 误差结构必须各自成为独立义务,
-    缺任一项都不得把结论升级为 supported。
-    """
-    # measurement_and_missing 义务要求"测量方案"与"缺失机制"同时声明, 二者缺一即 blocked
-    cases = [
-        ("identification_assumptions", {"identification_assumptions": []}),
-        ("design_feasibility", {"design_feasibility": ""}),
-        ("measurement_and_missing", {"measurement_notes": ""}),
-        ("measurement_and_missing", {"missing_data_handling": ""}),
-        ("error_structure", {"error_structure": ""}),
-    ]
-    for index, (kind, overrides) in enumerate(cases):
-        study = _did_study(_did_rows(2.0), **overrides)
-        result = _causal_engine(tmp_path, f"causal-miss{index}", study)
-        assert not any(c.status.value == "supported" for c in result.snapshot.claims), overrides
-        kinds = {o.kind: o.status.value for o in result.snapshot.obligations}
-        assert kinds.get(kind) == "blocked", (overrides, kinds)
-        assert not result.gate.passed, overrides
-
-
-def test_causal_gate_rejects_placeholder_data(tmp_path):
-    """§7.4: 不得用占位/合成数据产出'现实因果结论'。"""
-    study = _did_study(_did_rows(2.0), data_source_kind="placeholder",
-                       data_source_note="演示用随机数据")
-    result = _causal_engine(tmp_path, "causal-placeholder", study)
-    assert not result.gate.passed
-    assert any("placeholder" in r or "占位" in r or "演示" in r for r in result.gate.reasons), \
-        result.gate.render()
-
-
-def test_causal_declarations_are_independent_obligations(tmp_path):
-    """四项声明义务必须真实出现在义务表里 (而不是只写在门槛里)。"""
-    result = _causal_engine(tmp_path, "causal-kinds", _did_study(_did_rows(2.0)))
-    kinds = {o.kind for o in result.snapshot.obligations}
-    for expected in ("identification_assumptions", "design_feasibility",
-                     "measurement_and_missing", "error_structure"):
-        assert expected in kinds, (expected, kinds)
 
 
 def test_effect_direction_and_contract_decide_candidates():
@@ -962,42 +496,6 @@ def test_evidence_tiering_contradiction_and_grade():
     dup.support = SupportKindOfEvidence.supports
     assert len(independent_supporters([pos, dup])) == 1
     assert grade_evidence([pos, dup]) == EvidenceGrade.single_source
-
-
-def test_gather_evidence_and_attach(tmp_path):
-    from src.research.evidence import assess_support, gather_evidence
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import Claim, ClaimType, ResearchSpec, StudyPlan
-    from src.research.store import ResearchStore
-    from src.verification.runner import VerificationRunner
-
-    def fake_search(query, limit):
-        return [{"title": "技术A 对行业产出的影响", "doi": "10.9/z",
-                 "venue": "Journal X", "abstract": "increase in 行业产出"}]
-
-    claim = Claim(statement="技术A影响行业产出", claim_type=ClaimType.causal,
-                  study=StudyPlan(treatment="技术A", outcome="行业产出"))
-    evidence = gather_evidence(claim, search_fn=fake_search)
-    # 规则判定可以给出部分/支持关系, 但必须带判定理由与可定位来源
-    assert evidence
-    assert evidence[0].excerpt
-    assert evidence[0].support_reason
-    assert evidence[0].original_record_hash
-
-    from src.research.store import KIND_CLAIM
-
-    spec = ResearchSpec(project_id="ev1")
-    store = ResearchStore("ev1", db_path=tmp_path / "ev1.sqlite")
-    store.put(KIND_CLAIM, claim.id, claim.model_dump(mode="json"))
-    engine = TheoryEngine(spec, store, runner=VerificationRunner(inproc=True),
-                          budget=ResearchBudget(max_actions=5))
-    # 不判定支持关系时不得升级证据分级 (召回 ≠ 支持)
-    ids = engine.attach_evidence(claim.id, evidence, judge=False)
-    assert ids
-    assert engine._get_claim(claim.id).evidence_grade.value == "unsupported"
-    # 显式判定后才允许升级
-    engine.attach_evidence(claim.id, [assess_support(claim, evidence[0])], judge=True)
-    assert engine._get_claim(claim.id).evidence_grade.value in ("single_source", "converging")
 
 
 def test_server_startrequest_has_no_engine_fields():

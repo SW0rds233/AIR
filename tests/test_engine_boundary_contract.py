@@ -38,7 +38,6 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 #: 注意区分「**装配**时造一个 store 实例并交给引擎」与「**判定后落盘**」——
 #: 前者 (server / main / team_api 的入口装配) 不产生研究状态, 所以不在本清单里。
 STATE_WRITERS: dict[str, str] = {
-    "research/loop.py": "判定层: 执行工具 → 调内核 → 落盘 (唯一权威)",
     "research/store.py": "对象存储自身的实现",
     "research/task_store.py": "任务台账 (团队侧的任务状态, 不是研究结论)",
     # 冻结快照: 给**已提交**的对象拍一张不可变照片, 不改任何结论状态。收在一处是为了
@@ -66,7 +65,6 @@ ASSEMBLY_POINTS: dict[str, str] = {
     "server.py": "会话装配: 构造 store 实例交给引擎",
     "main.py": "CLI 装配",
     "team_api.py": "团队/资料库路由的装配",
-    "graph/theory_pipeline.py": "理论引擎装配 (把 store 注入引擎)",
     "research/projection.py": "只读投影 (读对象渲染视图)",
 }
 

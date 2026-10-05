@@ -19,7 +19,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # 静态发出事件的位置 (事件名以字面量出现)
 _EMIT_SOURCES = (
-    "src/research/loop.py",
+    "src/research/commit.py",
     "src/research/proposal.py",
     "src/kb/ingest.py",
 )

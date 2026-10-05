@@ -433,13 +433,24 @@ export function renderResearchOverview(d: any, source: ResearchOverviewSource): 
 
   // 对象级操作
   parts.push(
-    '<div class="wb-section"><h3>对象级操作</h3>' +
+    '<div class="wb-section"><h3>人工介入与调整</h3>' +
+    '<div class="adv-row"><label>调整范围 <select id="wbfeedbackscope" aria-label="人工调整范围">' +
+    '<option value="object">修订指定研究对象</option>' +
+    '<option value="sources">补充或调整文献检索</option>' +
+    '<option value="method">调整建模方法与假设</option>' +
+    '<option value="validation">调整仿真或实验建议</option>' +
+    '<option value="writing">调整论文写作</option>' +
+    '<option value="review">要求重新审阅</option>' +
+    '</select></label></div>' +
     '<div class="adv-row">' +
     '<label>作用对象 <select id="wbobj">' +
     feedbackObjectOptions({
       assumptions: Object.fromEntries((d.assumptions || []).map((a: any) => [a.id, a.statement || ''])),
       claims: Object.fromEntries(claims.map((c: any) => [c.id, c.statement])),
-      steps: Object.fromEntries((d.steps || []).map((s: any) => [s.id, s.text || ''])),
+      obligations: Object.fromEntries((d.obligations || []).map((o: any) => [o.id, o.statement || ''])),
+      evidence: Object.fromEntries((d.evidence || []).map((e: any) => [e.id, e.title || e.excerpt || ''])),
+      models: Object.fromEntries(((d.model_selection || {}).models || []).map((m: any) => [m.id, m.name || ''])),
+      verifications: Object.fromEntries((d.verifications || []).map((v: any) => [v.id, v.status || ''])),
     }).map((o: any) => '<option value="' + wbEsc(o.value) + '">' + wbEsc(o.label) + '</option>').join('') +
     '</select></label>' +
     '</div>' +
@@ -452,7 +463,8 @@ export function renderResearchOverview(d: any, source: ResearchOverviewSource): 
     '<button class="ghost" data-action="forkFromWorkbench">从快照派生新问题</button>' +
     '<button class="ghost" data-action="refreshWorkbench">刷新工作台</button>' +
     '</div>' +
-    '<div class="wb-note">反馈会落到具体假设/结论上；无法唯一确定对象时系统会请求澄清，不会猜。</div>' +
+    '<div class="wb-note">修订具体对象时请选择对象；其他调整范围可不选对象。' +
+    '改变研究问题本身请从快照派生新问题，系统不会覆盖原问题。</div>' +
     '</div>'
   );
 

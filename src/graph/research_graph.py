@@ -764,7 +764,9 @@ class TeamRun:
     def submit_feedback(self, *, statement: str, owner: str,
                         target_ref: Any | None = None,
                         why: str = "", acceptance: list[str] | None = None,
-                        kind: Any = None, max_rounds: int | None = None) -> dict[str, Any]:
+                        kind: Any = None, max_rounds: int | None = None,
+                        feedback_id: str = "",
+                        hints: dict[str, Any] | None = None) -> dict[str, Any]:
         """把一条用户意见变成**需求**交回主控, 然后继续推进 (合并计划 §5.1)。
 
         为什么走需求而不是直接改对象: 子智能体之间不互相派工, 人类意见同样必须由
@@ -778,7 +780,20 @@ class TeamRun:
         """
         from src.agents.protocol import NeedKind, ResearchNeed
 
+        if self.loop.brief is None:
+            self.restore_state()
         self.prepare()
+        if feedback_id:
+            prior = any(
+                str((task.get("hints") or {}).get("feedback_id", "")) == feedback_id
+                for task in (self.loop.plan.tasks if self.loop.plan else [])
+            ) or any(str(need.hints.get("feedback_id", "")) == feedback_id
+                     for need in self.loop.open_needs)
+            if prior:
+                return {"ok": True, "duplicate": True, "feedback_id": feedback_id,
+                        "rounds_used": 0, "rounds": self.loop.rounds,
+                        "status": self.outcome.status,
+                        "stop_reason": self.loop.stop_reason}
         need = ResearchNeed(
             kind=kind or NeedKind.clause,
             statement=statement,
@@ -787,8 +802,11 @@ class TeamRun:
             owner=owner,
             blocking=False,
             blocked_refs=[target_ref] if target_ref is not None else [],
-            hints={"feedback": statement[:400]},
+            hints={**dict(hints or {}), "feedback": statement[:400],
+                   "feedback_id": feedback_id or ""},
         )
+        if not feedback_id:
+            need.hints["feedback_id"] = need.need_id
         self.loop.open_needs.append(need)
         self.loop.finished = False
         self.loop.stop_reason = ""
@@ -809,7 +827,7 @@ class TeamRun:
         if not self.loop.finished:
             self._finish(self.loop, f"用户意见处理后达到轮次上限 {self.max_rounds}",
                          status=TaskStatus.partial.value)
-        return {"ok": True, "need_id": need.need_id, "owner": owner,
+        result = {"ok": True, "need_id": need.need_id, "owner": owner,
                 "status": self.outcome.status,
                 # `rounds` 是绝对轮次 (与恢复出来的循环一致); `rounds_used` 是本次意见
                 # 实际用掉的额度 —— 两者含义不同, 混成一个会让"这次处理了几轮"说不清。
@@ -818,6 +836,26 @@ class TeamRun:
                 "stop_reason": self.outcome.stop_reason,
                 "delivery": dict(self.outcome.delivery),
                 "applied": [{"need_id": need.need_id, "owner": owner}]}
+        # 对结论/资料/方法的人工修订会使旧正文的对象版本失效。必须在主控完成
+        # 本次修订**之后**再派写作，而不是直接把旧稿重新导出成“新版交付”。
+        # 这仍走同一 TeamRun/唯一提交口，不引入第二条写作流水线。
+        if owner != "writing" and self.task_store.store.list_latest("manuscript"):
+            redraft = self.submit_feedback(
+                statement=f"根据人工调整 {need.need_id} 的最新研究对象修订正文与引用版本",
+                owner="writing", kind=NeedKind.manuscript_revision,
+                why="研究对象经人工调整后，旧正文的对象引用可能失效",
+                acceptance=["正文引用最新对象版本，且原论证链与局限仍可反查"],
+                feedback_id=(feedback_id or need.need_id) + ":redraft",
+                max_rounds=limit,
+            )
+            result["rounds_used"] += int(redraft.get("rounds_used", 0))
+            result["rounds"] = self.loop.rounds
+            result["status"] = self.outcome.status
+            result["stop_reason"] = self.outcome.stop_reason
+            result["delivery"] = dict(self.outcome.delivery)
+            result["applied"].extend(redraft.get("applied", []))
+            result["redraft"] = redraft.get("ok", False)
+        return result
 
     def resume(self) -> TeamRunOutcome:
         """从落盘状态继续这次运行 (已提交的动作**不重跑**)。
@@ -829,17 +867,11 @@ class TeamRun:
         - 已经收尾的运行不再重跑, 直接按**落盘时记下的状态**返回结论
           (不能拿默认状态覆盖它, 否则一次"已完成"会显示成"未跑过")。
         """
-        payload = self._load_run_payload()
-        restored = rebuild_loop_state(payload) if payload else None
-        if restored is None:
+        if not self.restore_state():
             self.runtime.emit("run_state_missing", {"run_id": self.run_id})
             return self.run()
-        self.loop = restored
-        self.outcome.brief = restored.brief
-        self.outcome.plan = restored.plan
-        self.outcome.results = restored.results
-        self.outcome.open_needs = restored.open_needs
-        self.outcome.rounds = restored.rounds
+        restored = self.loop
+        payload = self._load_run_payload()
         self.runtime.emit("run_resumed", {
             "run_id": self.run_id, "rounds": restored.rounds,
             "tasks_done": len(restored.results),
@@ -855,6 +887,27 @@ class TeamRun:
             self._finish(self.loop, f"达到轮次上限 {self.max_rounds}",
                          status=TaskStatus.partial.value)
         return self.outcome
+
+    def restore_state(self) -> bool:
+        """只恢复已落盘团队状态，不在此方法里执行任何任务。
+
+        HTTP 会话续跑和人工反馈共用此入口；调用者再决定是展示终态、
+        等待澄清，还是继续逐轮派工。不能用 `resume()` 来做这一步，因为它会
+        立即把所有剩余轮次跑完，丢失 SSE 的逐轮事件。
+        """
+        payload = self._load_run_payload()
+        restored = rebuild_loop_state(payload) if payload else None
+        if restored is None:
+            return False
+        self.loop = restored
+        self.outcome.brief = restored.brief
+        self.outcome.plan = restored.plan
+        self.outcome.results = restored.results
+        self.outcome.open_needs = restored.open_needs
+        self.outcome.rounds = restored.rounds
+        self.outcome.status = str(payload.get("status", "") or "")
+        self.outcome.stop_reason = restored.stop_reason
+        return True
 
     def _current_versions(self) -> dict[str, int]:
         """当前研究对象版本索引 (用于判断"依据是否变了")。

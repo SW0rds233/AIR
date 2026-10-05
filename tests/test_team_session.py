@@ -20,6 +20,30 @@ from src.graph.research_graph import TeamRun
 from src.graph.team_session import TeamSession, run_team_session
 
 
+def test_restarted_team_app_does_not_replay_finished_tasks(tmp_path, monkeypatch):
+    """HTTP 会话重建后，stream(None) 应恢复 TeamRun，而非重新画像和派工。"""
+    from src import config
+    from src.graph.team_session import TeamApp
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path / "out")
+    monkeypatch.setenv("THEORY_LLM", "0")
+    with TeamRun(project_id="proj-app-resume", problem_id="p1", run_id="run-app-resume",
+                 request="证明对所有实数 x 有 x**2 >= 0", max_rounds=2) as first:
+        first.run()
+        original_ids = set(first.loop.results)
+        original_rounds = first.loop.rounds
+        assert original_ids
+    with TeamRun(project_id="proj-app-resume", problem_id="p1", run_id="run-app-resume",
+                 request="证明对所有实数 x 有 x**2 >= 0", max_rounds=2) as restored:
+        session = TeamSession(restored)
+        monkeypatch.setattr(session, "export", lambda: None)
+        events = list(TeamApp(session).stream(None))
+        assert set(restored.loop.results) == original_ids
+        assert restored.loop.rounds == original_rounds
+        assert events[-1]["research_team_done"]["summary"]["rounds"] == original_rounds
+
+
 def _kb(tmp_path, monkeypatch, topic: str = "kb-session") -> str:
     """小资料库 (与团队用例同构): 让检索角色能真的登记可定位来源。"""
     from src import config

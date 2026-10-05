@@ -14,18 +14,8 @@ from __future__ import annotations
 import pytest
 
 from src.research import reporting
-from src.research.inspection import StoreInspection
 
 
-def _empty_inputs(tmp_path, pid: str = "rep1"):
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import ResearchSpec
-    from src.research.store import ResearchStore
-
-    spec = ResearchSpec(project_id=pid, problem_id="p1", problem_statement="x >= 0")
-    store = ResearchStore(pid, db_path=tmp_path / f"{pid}.sqlite")
-    engine = TheoryEngine(spec, store, budget=ResearchBudget(max_actions=4))
-    return spec, engine, store
 
 
 def test_count_contract_is_complete_and_uses_one_source():
@@ -72,43 +62,6 @@ def test_counts_reflect_object_statuses():
     assert counts["models"] == 1 and counts["routes"] == 1
 
 
-def test_projection_exposes_frontend_contract_and_notes(tmp_path):
-    spec, engine, store = _empty_inputs(tmp_path, "rep2")
-    try:
-        # 投影只接受**已算好的值**: 传送留给只读检视层 (`research/inspection.py`),
-        # 因此这里不再传引擎 —— 一个只读投影不该依赖能执行研究动作的组件。
-        view = StoreInspection(store, spec)
-        payload = reporting.workbench_projection(
-            project_id="rep2", problem_id="p1", claims=[], obligations=[],
-            verifications=[], evidence=[], routes=[], models=[],
-            store=store, problems=[{"problem_id": "p1"}], spec=spec,
-            run_id=view.identity()["run_id"], branch_id=view.identity()["branch_id"],
-            metrics=view.metrics([], problem_id="p1"),
-            model_selection=view.model_selection([], available=None),
-            modeling={}, assumptions=view.assumptions(), decisions=view.decisions(),
-            events=view.event_digest([], problem_id="p1"), gaps=[],
-            budget=view.budget_payload(),
-            experiment_specs=[], novelty_records=[], attempts=[],
-        )
-        for key in ("project_id", "problem_id", "run_id", "branch_id", "snapshots",
-                    "problems", "spec", "claims", "obligations", "verifications",
-                    "model_selection", "modeling", "assumptions", "steps", "evidence",
-                    "experiments", "routes", "novelty", "decisions", "events",
-                    "metrics", "log_anomalies", "gaps", "budget", "objects",
-                    "coverage_notes"):
-            assert key in payload, key
-        assert set(payload["budget"]) == set(reporting.BUDGET_KEYS)
-        assert payload["metrics"]["identity"]["problem_id"] == "p1"
-        assert payload["log_anomalies"] == []
-        # 空研究必须把"还缺什么"说出来, 而不是给一堆空数组
-        notes = " ".join(payload["coverage_notes"])
-        assert "尚无结论" in notes
-        assert "尚无验证记录" in notes
-        assert "不得据此宣称原创" in notes
-    finally:
-        store.close()
-
-
 def test_coverage_notes_report_open_and_blocked_work():
     counts = dict.fromkeys(reporting.COUNT_KEYS, 0)
     counts.update({"claims": 2, "obligations_open": 3, "obligations_blocked": 1,
@@ -131,33 +84,6 @@ def test_experiments_from_other_problem_are_excluded():
              {"id": "exp-foreign", "claim_id": "clm-2", "title": "别人的"}]
     kept = reporting.experiments_payload(specs, foreign_claim_ids={"clm-2"})
     assert [item["id"] for item in kept] == ["exp-mine"]
-
-
-def test_projection_is_read_only(tmp_path):
-    """投影不得改动研究对象或结论状态 (它是只读接口)。"""
-    spec, engine, store = _empty_inputs(tmp_path, "rep3")
-    try:
-        assert engine.bootstrap()
-        before = [(c.id, c.status.value) for c in engine._claims()]
-        assert before
-        view = StoreInspection(store, spec)
-        reporting.workbench_projection(
-            project_id="rep3", problem_id="p1", claims=engine._claims(),
-            obligations=engine._obligations(), verifications=[], evidence=[],
-            routes=[], models=[], store=store,
-            problems=[{"problem_id": "p1"}], spec=spec,
-            run_id=view.identity()["run_id"], branch_id=view.identity()["branch_id"],
-            metrics=view.metrics(engine._claims(), problem_id="p1"),
-            model_selection=view.model_selection(engine._claims(), available=None),
-            modeling={}, assumptions=view.assumptions(), decisions=view.decisions(),
-            events=view.event_digest(engine._claims(), problem_id="p1"), gaps=[],
-            budget=view.budget_payload(),
-            experiment_specs=[], novelty_records=[], attempts=[],
-        )
-        after = [(c.id, c.status.value) for c in engine._claims()]
-        assert after == before
-    finally:
-        store.close()
 
 
 def test_claims_payload_carries_uncovered_factors():

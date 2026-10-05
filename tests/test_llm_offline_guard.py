@@ -1,21 +1,17 @@
 from __future__ import annotations
 
-"""测试隔离: 自动化测试不得连接真实 LLM。
-
-计划书 P2 的发布判据要求"同一条验收题重复运行得到同一结果"。曾出现的缺陷是:
-`THEORY_PROPOSER=0` 只关掉了提议器, 理论流水线**仍然**给引擎注入真实 LLM 并用于
-推导步骤 —— 于是同一条代数题会因为模型每次给的步骤不同而时通时不通 (实测约 1/5
-失败), 同时真的产生 API 费用。此文件把这条边界固定下来。
-"""
+"""统一团队的离线开关不得创建任何角色模型。"""
 
 import os
 
-from src.graph import theory_pipeline
+from src.bootstrap import role_llm_factory
 
 
 def test_offline_flag_disables_role_llm(monkeypatch):
     monkeypatch.setenv("THEORY_LLM", "0")
-    assert theory_pipeline._role_llm() is None
+    for role in ("supervisor", "evidence", "modeling", "reasoning", "validation",
+                 "writing", "figures", "review"):
+        assert role_llm_factory(role) is None
 
 
 def test_conftest_forces_offline_theory_llm():
@@ -24,18 +20,20 @@ def test_conftest_forces_offline_theory_llm():
     assert os.environ.get("THEORY_PROPOSER") == "0"
 
 
-def test_offline_engine_has_no_llm(tmp_path, monkeypatch):
-    """离线启动的引擎不带 LLM: 推导只能来自规则层与受限工具。"""
-    monkeypatch.setenv("THEORY_LLM", "0")
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import ResearchSpec
-    from src.research.store import ResearchStore
+def test_offline_team_run_accounts_zero_llm_calls(tmp_path, monkeypatch):
+    """离线研究由团队规则与受限工具推进, 用量不得伪报模型调用。"""
+    import json
+    from pathlib import Path
 
-    spec = ResearchSpec(project_id="offline", problem_statement="对所有实数 x: x**2 >= 0")
-    store = ResearchStore("offline", db_path=tmp_path / "offline.sqlite")
-    engine = TheoryEngine(spec, store, llm=theory_pipeline._role_llm(),
-                          budget=ResearchBudget(max_actions=6))
-    assert engine.llm is None, "离线模式不得构造模型客户端"
-    result = engine.run()
-    assert result is not None
-    store.close()
+    monkeypatch.setenv("THEORY_LLM", "0")
+    from src import config
+    from src.graph.team_session import run_team_session
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path / "out")
+    result = run_team_session("对所有实数 x: x**2 >= 0", project_id="offline",
+                              problem_id="p1", source_policy="user_kb")
+    assert result["status"] in {"completed", "partial", "blocked"}
+    manifest = json.loads((Path(result["package_dir"]) / "manifest.json").read_text(
+        encoding="utf-8"))
+    assert manifest["usage"]["llm_calls"] == 0

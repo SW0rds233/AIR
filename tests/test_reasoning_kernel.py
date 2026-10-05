@@ -543,32 +543,6 @@ def test_reasoning_agent_falls_back_when_no_claim_is_available():
     assert result.outcome.value in ("completed", "partial", "blocked")
 
 
-def test_engine_path_and_team_path_share_the_kernel(monkeypatch):
-    """引擎的 `_act_derive_step` 也必须走内核 (替换内核即两条路径都变)。
-
-    这是"抽取"的判据: 不是看代码被搬到了哪个文件, 而是看**两条路径是否只有一份实现**。
-    """
-    import src.research.loop as loop_mod
-    import src.research.reasoning_kernel as kernel
-
-    called: list[str] = []
-    original = kernel.derive_steps_for
-
-    def _spy(claim, **kwargs):
-        called.append(claim.id)
-        return original(claim, **kwargs)
-
-    monkeypatch.setattr(kernel, "derive_steps_for", _spy)
-    # 引擎通过 `from ... import` 在方法内部取内核函数, 因此打补丁后必然命中
-    source = loop_mod.__file__
-    with open(source, encoding="utf-8") as handle:
-        body = handle.read()
-    assert "from src.research.reasoning_kernel import derive_steps_for" in body
-    assert "from src.research.reasoning_kernel import plan_proof_for" in body
-    # 引擎里不应再有第二份推导实现 (旧的逐字代码已被内核取代)
-    assert "issues_to_obligations(attempt, claim, existing_statements=existing)" not in body
-
-
 # --------------------------------------------------------------------------
 # 工具结果 → 义务处置的纯映射 (M2 剩余: 判定层边界)
 # --------------------------------------------------------------------------
@@ -650,22 +624,4 @@ def test_obligation_disposition_treats_inconclusive_as_pending():
         assert disposition.scientific is False, name
         assert disposition.record_route_failure is True, name
         assert disposition.reason == "后端不可用", name
-
-
-def test_obligation_disposition_shares_the_engine_status_mapping():
-    """差异测试: 内核的映射表与引擎 `_to_validation_status` 必须给出同一结果。
-
-    抽取的判据不是"看代码搬到哪里", 而是"两处不会各自漂移"。
-    """
-    from src.research.loop import TheoryEngine
-    from src.research.reasoning_kernel import obligation_disposition_for
-
-    claim = _claim()
-    obligation = _obligation(claim)
-    for name in ("passed", "failed", "unknown", "unsupported", "timeout",
-                 "unavailable", "error"):
-        result = _verification_result(name)
-        ours = obligation_disposition_for(result, obligation).validation_status
-        theirs = TheoryEngine._to_validation_status(result)
-        assert ours == theirs, name
 

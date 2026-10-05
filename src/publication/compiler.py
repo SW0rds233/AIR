@@ -8,8 +8,7 @@ from __future__ import annotations
 
 **为什么它在 publication 里而不是 rag 里**: 排版与编译是"把唯一文稿 IR 变成交付物"
 的最后一步, 与文献检索无关。放在 `rag` 会让交付层依赖检索层的目录约定, 而 `rag/`
-本身按计划要逐步拆掉 (§5.5)。`rag/latex_compiler.py` 现在只是转发, 等旧路径退役时
-一并删除。
+本身按计划逐步收敛到资料接入能力。旧转发模块已删除，编译只有这一处实现。
 """
 
 import logging
@@ -72,6 +71,9 @@ def compile_latex(tex_path: str, workdir: str | None = None, engine: str = "xela
             ok, log = _run_once()
             if ok and "Unable to open" not in log:
                 return True, log
+            if "Unable to open" not in log:
+                # 编译器缺失、语法错误、超时等并非临时文件锁；重试只会空等。
+                return False, log
             if attempt < PASS_RETRY_ATTEMPTS - 1:
                 wait = 2.0 * (attempt + 1)
                 logger.warning(f"LaTeX pass 失败, {wait:.0f}s 后重试: {log[-160:].strip()}")
@@ -94,6 +96,10 @@ def compile_latex(tex_path: str, workdir: str | None = None, engine: str = "xela
     last_log = ""
     for _ in range(MAX_COMPILE_ROUNDS):
         ok, last_log = _run_with_retry()
+        if "未安装" in last_log:
+            return False, last_log
+        if not ok and "Unable to open" not in last_log:
+            break
         if ok and not re.search(r"Citation\s+`[^']+'\s+.*undefined", last_log):
             break
 

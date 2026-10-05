@@ -163,30 +163,6 @@ def test_counterexample_must_respect_declared_domain():
     assert sympy.simplify((x ** 2).subs(x, x2) - (x ** 2).subs(x, x1)) < 0
 
 
-def test_unknown_never_upgraded_to_pass_or_refute(tmp_path):
-    """工具 unknown → 保持未决, 不映射为通过或反驳 (计划案 §7.3)。"""
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import ClaimStatus, ObligationStatus, ResearchSpec
-    from src.research.store import ResearchStore
-    from src.verification.schemas import VerificationResult, VerificationStatus
-
-    class UnknownRunner:
-        def run(self, tool, operation, arguments, timeout=None):
-            return VerificationResult(tool=tool, status=VerificationStatus.unknown,
-                                      detail="求解器无法判定")
-
-    spec = ResearchSpec(project_id="unk", problem_statement="对所有实数 x: 1/x >= 0")
-    store = ResearchStore("unk", db_path=tmp_path / "unk.sqlite")
-    engine = TheoryEngine(spec, store, runner=UnknownRunner(),
-                          budget=ResearchBudget(max_actions=6))
-    result = engine.run()
-    assert all(c.status.value != ClaimStatus.supported for c in result.snapshot.claims)
-    assert all(c.status.value != ClaimStatus.refuted for c in result.snapshot.claims)
-    assert all(o.status != ObligationStatus.refuted for o in result.snapshot.obligations)
-    assert not result.gate.passed
-    store.close()
-
-
 # --------------------------------------------------------------------------
 # 版本不可覆盖
 # --------------------------------------------------------------------------
@@ -201,29 +177,6 @@ def test_object_versions_never_overwritten(tmp_path):
     assert versions[0]["data"]["status"] == "proposed"
     with pytest.raises(VersionConflict):
         store.put(KIND_CLAIM, "c1", {"statement": "a", "status": "refuted"}, version=1)
-    store.close()
-
-
-def test_engine_state_write_is_monotonic(tmp_path):
-    """引擎连续写状态时版本只增不减 (早期实现会把所有写入压到 v1)。"""
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import ResearchSpec
-    from src.research.store import KIND_CLAIM, ResearchStore
-    from src.verification.runner import VerificationRunner
-
-    spec = ResearchSpec(project_id="mono", problem_statement="对所有实数 x: x**2 >= 0")
-    store = ResearchStore("mono", db_path=tmp_path / "mono.sqlite")
-    engine = TheoryEngine(spec, store, runner=VerificationRunner(inproc=True),
-                          budget=ResearchBudget(max_actions=10))
-    result = engine.run()
-    claim = result.snapshot.claims[0]
-    versions = store.list_versions(KIND_CLAIM, claim.id)
-    assert len(versions) >= 2
-    assert [v["version"] for v in versions] == list(range(1, len(versions) + 1))
-    # 最终版本必须保留统计/推导结果, 而不是被较弱的中间状态覆盖
-    assert versions[-1]["data"]["status"] == "supported"
-    allowed = [v["data"]["status"] for v in versions]
-    assert "supported" in allowed
     store.close()
 
 
@@ -268,113 +221,12 @@ def kb_topic(tmp_path, monkeypatch):
     return topic
 
 
-def test_knowledge_loop_end_to_end(kb_topic):
-    """一次真实资料检索必须改变后续推导, 而不只是把文本附在报告里。"""
-    from src.kb.service import KnowledgeService
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import (
-        ClaimQuestion,
-        ClaimType,
-        ResearchSpec,
-        SupportKindOfEvidence,
-    )
-    from src.research.store import KIND_EVIDENCE, KIND_EVIDENCE_LINK, ResearchStore
-    from src.verification.runner import VerificationRunner
-
-    service = KnowledgeService(kb_topic)
-    assert service.has_content
-    question = ClaimQuestion(
-        statement="信噪比足够高且信道一致时, 不同发射机的指纹特征线性可分",
-        category="applied", claim_type=ClaimType.descriptive,
-        study=__import__("src.research.schemas", fromlist=["StudyPlan"]).StudyPlan(
-            population="发射机", region="实验室", period="2020",
-            confounders=["信道"], confounder_handling="信道条件一致",
-            treatment="信噪比", outcome="特征可分"),
-    )
-    spec = ResearchSpec(project_id="kbloop", domain=kb_topic, questions=[question],
-                        confirmed=True)
-    store = ResearchStore("kbloop", db_path=tmp_path_sqlite(kb_topic))
-    engine = TheoryEngine(spec, store, runner=VerificationRunner(inproc=True),
-                          budget=ResearchBudget(max_actions=25), knowledge=service)
-    result = engine.run()
-
-    # 1) 检索产生了带定位的候选证据
-    evidence = store.list_latest(KIND_EVIDENCE)
-    assert evidence, "未能从知识底座取到任何证据"
-    locatable = [e for e in evidence if e.get("source_id") and e.get("location")]
-    assert locatable, "证据缺少可回到原文的定位信息"
-    # 2) 证据关系被显式判定 (默认 insufficient 必须被改写)
-    judged = [e for e in evidence
-              if e.get("support") != SupportKindOfEvidence.insufficient.value]
-    assert judged, "候选证据没有被判定支持关系"
-    # 3) 产生了 EvidenceLink 记录
-    assert store.list_latest(KIND_EVIDENCE_LINK), "未生成 EvidenceLink"
-    # 4) 决策记录里能看到检索/读取/判定这几类动作
-    actions = {d["action"] for d in result.decisions}
-    assert actions & {"retrieve_targeted", "read_source", "interpret_evidence", "extract_result"}
-    store.close()
-
-
 def tmp_path_sqlite(topic: str):
     from src.config import DATA_DIR
 
     path = DATA_DIR / "research-test"
     path.mkdir(parents=True, exist_ok=True)
     return path / "kbloop.sqlite"
-
-
-def test_engine_budget_stops_and_reports_usage(tmp_path):
-    """资源预算触顶必须停止并留下部分报告, 且用量可追溯 (计划书 §9.3)。"""
-    import time
-
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import ResearchSpec
-    from src.research.store import KIND_CLAIM, ResearchStore
-    from src.verification.schemas import VerificationResult, VerificationStatus
-
-    class Unknown:
-        def run(self, tool, operation, arguments, timeout=None):
-            time.sleep(0.01)
-            return VerificationResult(tool=tool, status=VerificationStatus.unknown,
-                                      detail="无法判定")
-
-    spec = ResearchSpec(project_id="bud", problem_statement="对所有实数 x: 1/x >= 0")
-    store = ResearchStore("bud", db_path=tmp_path / "bud.sqlite")
-
-    # 1) 墙钟预算: 极小上限 → 运行中即停止, 并给出部分结果
-    engine = TheoryEngine(spec, store, runner=Unknown(),
-                          budget=ResearchBudget(max_actions=50, max_wall_seconds=0.001))
-    result = engine.run()
-    assert result.stopped_reason, "墙钟触顶必须给出停止原因"
-    assert "墙钟" in result.stopped_reason
-    assert "wall_seconds" in result.usage
-    assert any("预算停止" in n for n in result.notes), result.notes
-    assert result.snapshot is not None, "部分结果仍须导出"
-    assert store.list_latest(KIND_CLAIM)
-
-    # 2) token 预算: 记账后即触顶 (独立项目, 避免与上面的 runtime 版本冲突)
-    spec2 = ResearchSpec(project_id="bud2", problem_statement="对所有实数 x: 1/x >= 0")
-    store2 = ResearchStore("bud2", db_path=tmp_path / "bud2.sqlite")
-    engine2 = TheoryEngine(spec2, store2, runner=Unknown(),
-                           budget=ResearchBudget(max_actions=50, max_tokens=100))
-    engine2.record_llm_usage(model="deepseek-chat",
-                             usage={"input_tokens": 80, "output_tokens": 40,
-                                    "total_tokens": 120})
-    usage = engine2.usage_summary()
-    assert usage["tokens"] == 120
-    assert usage["cost_usd"] > 0
-    assert "token" in engine2._budget_exhausted()
-
-    # 3) 用量随运行状态持久化: 续跑不得重置已花费预算
-    engine2.save_runtime()
-    resumed = TheoryEngine(spec2, ResearchStore("bud2", db_path=tmp_path / "bud2.sqlite"),
-                           runner=Unknown(),
-                           budget=ResearchBudget(max_actions=50, max_tokens=100))
-    resumed.load_runtime()
-    assert resumed.usage_summary()["tokens"] == 120, "续跑不得重置 token 预算"
-    assert resumed.usage_summary()["cost_usd"] > 0
-    store2.close()
-    store.close()
 
 
 def test_action_registry_only_exposes_implemented_actions():
@@ -394,29 +246,3 @@ def test_action_registry_only_exposes_implemented_actions():
         assert action not in available
         ok, reason = check_preconditions(action, state)
         assert not ok and reason
-
-
-def test_engine_rejects_action_without_handler(tmp_path):
-    """协调者派发的动作必须有执行器, 不允许"记录未实现然后空转"。"""
-    from src.research.loop import TheoryEngine
-    from src.research.schemas import ResearchAction, ResearchSpec
-    from src.research.store import ResearchStore
-
-    spec = ResearchSpec(project_id="nohandler", problem_statement="x >= 0")
-    store = ResearchStore("nohandler", db_path=tmp_path / "nh.sqlite")
-    engine = TheoryEngine(spec, store)
-    handled = len(engine._dispatch.__self__._compute_state() or {}) >= 0
-    assert handled
-    # 注册表中标记 implemented 的动作都必须有 handler
-    from src.research.action_registry import ACTION_REGISTRY
-
-    engine.bootstrap()
-    for action_type, action_spec in ACTION_REGISTRY.items():
-        if not action_spec.implemented:
-            continue
-        action = ResearchAction(action_type=action_type)
-        # 用一个不存在的对象调用: 应返回 False 而不是抛异常, 也不应记录"未实现"
-        engine._notes.clear()
-        engine._dispatch(action)
-        assert not any("无执行器" in n for n in engine._notes), action_type
-    store.close()

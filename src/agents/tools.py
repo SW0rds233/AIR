@@ -426,7 +426,7 @@ def latex_tool() -> ToolSpec:
 
 
 def _compile_latex(tex_path: str, workdir: str = "") -> str:
-    from src.rag.latex_compiler import compile_latex
+    from src.publication.compiler import compile_latex
 
     ok, log = compile_latex(tex_path, workdir or None)
     return f"{'编译成功' if ok else '编译失败'}: {log[:800]}"

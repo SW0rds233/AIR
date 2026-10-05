@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from src.agents.theory_writer import build_manuscript, trace_manuscript
+from src.agents.writing import WritingAgent, render_markdown
 from src.experiments.planner import design_experiment
 from src.experiments.schemas import ExecutionStatus, ExperimentPurpose
 from src.experiments.validator import missing_elements, validate_spec
@@ -19,6 +19,7 @@ from src.research.schemas import (
     SupportKind,
     ValidationStatus,
 )
+from src.publication.schemas import WritingPacket
 
 
 def _claim(**over) -> Claim:
@@ -110,40 +111,18 @@ def test_manifest_carries_reviewable_inventory(tmp_path):
     from src.research.package import export_package
 
     claim = _claim()
-    snapshot = ResearchSnapshot(project_id="p13", claims=[claim],
-                                writing_map={claim.id: f"claim-{claim.id}"})
-    manuscript = build_manuscript(snapshot, topic="p13")
-    from src.rag.theory_render import render_markdown
-
+    snapshot = ResearchSnapshot(project_id="p13", claims=[claim])
+    manuscript, _ = WritingAgent().deterministic_manuscript(None, WritingPacket(
+        main_question="p13", claims=[claim.model_dump(mode="json")]))
     markdown = render_markdown(manuscript)
-    root = export_package(snapshot, None, [], markdown, base_dir=tmp_path / "pkg")
+    claim_block = next(block for block in manuscript.all_blocks()
+                       if "claim" in block.ref_kinds)
+    snapshot.writing_map[claim.id] = f"block:{claim_block.block_id}"
+    root = export_package(snapshot, None, [], markdown, base_dir=tmp_path / "pkg",
+                          manuscript=manuscript)
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     assert "source_set" in manifest and "model_config" in manifest
     assert "budget_limits" in manifest and "usage" in manifest
     assert "manuscript_traceability" in manifest
     assert manifest["source_set"]["note"]
     assert "prompt_version" in manifest["model_config"]
-
-
-def test_traceability_flags_unmapped_and_inconsistent_manuscript():
-    claim = _claim()
-    snapshot = ResearchSnapshot(project_id="p13", claims=[claim])
-    manuscript = build_manuscript(snapshot, topic="p13")
-    # 写作阶段漏掉映射 (核心论断无法归属到快照对象) → 必须报"未映射"
-    manuscript.writing_map.clear()
-    result = trace_manuscript(snapshot, manuscript, "# 空正文")
-    assert result["ok"] is False
-    assert claim.id in result["unmapped_claims"]
-    assert "不一致" in result["note"] or "回到冻结快照" in result["note"]
-
-    # 有映射但正文里没有对应锚点 → 报 missing_anchors
-    manuscript.writing_map[claim.id] = f"claim-{claim.id}"
-    result2 = trace_manuscript(snapshot, manuscript, "# 正文不含锚点")
-    assert claim.id in result2["missing_anchors"]
-
-    # 映射与正文一致 → 通过
-    from src.rag.theory_render import render_markdown
-
-    result3 = trace_manuscript(snapshot, manuscript, render_markdown(manuscript))
-    assert result3["ok"] is True
-    assert result3["mapped"] and result3["core_claims"] == 1

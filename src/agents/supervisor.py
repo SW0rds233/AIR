@@ -692,7 +692,7 @@ class SupervisorAgent:
                                    brief: ResearchBrief | None = None) -> None:
         """把"必须先有依据"的默认依赖写进计划 (§5.4 串行条件 / §3.1 G05)。
 
-        只用**已存在**的依赖边做加边, 不改任务本身: 写作依赖推理与检索,
+        只用**已存在**的依赖边做加边, 不改任务本身: 写作依赖推理、检索与图表,
         审阅依赖写作。结论前提变更时的失效传播由判定层处理, 不在这里假装完成。
 
         **为什么推理也要等证据** (G05): 审计复现的首轮顺序是
@@ -710,7 +710,7 @@ class SupervisorAgent:
             by_role.setdefault(str(record.get("agent", "")), []).append(
                 str(record.get("task_id", "")))
         prerequisites: dict[str, tuple[str, ...]] = {
-            "writing": ("reasoning", "evidence", "modeling"),
+            "writing": ("reasoning", "evidence", "modeling", "figures"),
             "figures": ("reasoning", "evidence"),
             "review": ("writing", "reasoning", "figures"),
         }

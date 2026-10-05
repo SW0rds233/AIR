@@ -13,6 +13,7 @@ from __future__ import annotations
 """
 
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -95,7 +96,8 @@ def test_mode_free_entry_runs_the_unified_engine(client):
     assert manifest_name, f"交付包必须含 manifest.json: {names[:10]}"
     manifest = json.loads(
         client.get(f"/api/artifacts/{manifest_name}").json()["content"])
-    assert manifest["delivery_level"] == "完整论文", manifest["delivery_level"]
+    expected_level = "完整论文" if shutil.which("xelatex") else "论文草稿"
+    assert manifest["delivery_level"] == expected_level, manifest["delivery_level"]
     assert manifest["usage"]["llm_calls"] == 0, manifest["usage"]
     assert manifest["usage"]["cost_usd"] == 0.0, manifest["usage"]
     trace = manifest.get("manuscript_traceability", {})
@@ -103,5 +105,9 @@ def test_mode_free_entry_runs_the_unified_engine(client):
     # 多格式同源 (G17): PDF 与 Markdown 来自**同一份**文稿 IR, 清单必须记录编译产物,
     # 且产物列表里真的存在那个文件 (编译成功但没落盘的"看起来有 PDF"要被挡住)。
     pdf_name = str(manifest.get("pdf") or "")
-    assert pdf_name.endswith(".pdf"), manifest.get("pdf")
-    assert any(n.endswith("manuscript.pdf") for n in names), names[:10]
+    if shutil.which("xelatex"):
+        assert pdf_name.endswith(".pdf"), manifest.get("pdf")
+        assert any(n.endswith("manuscript.pdf") for n in names), names[:10]
+    else:
+        assert not pdf_name and manifest["compilation_status"] in (
+            "unavailable", "failed: xelatex 未安装")

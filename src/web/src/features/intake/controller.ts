@@ -329,7 +329,6 @@ export function createIntakeController(deps: IntakeDeps): IntakeController {
       topic: topic,
       keywords: splitList(val('keywords')),
       subtopics: splitList(val('subtopics')),
-      time_range: '2019-2026',
       max_revisions: parseInt(val('maxrev')) || 3,
       skip_retrieval: checked('skipret'),
       project_id: pid,
@@ -341,7 +340,7 @@ export function createIntakeController(deps: IntakeDeps): IntakeController {
       // 附件: "补充问题说明"的附件文本由服务端并入问题陈述 (带 sha256 溯源)
       attachment_ids: pendingAttachments,
       // R5: 资料授权策略必须显式随请求发出 (后端校验, 非法策略拒绝而非静默回退)
-      source_policy: val('sourcepolicy', 'user_kb') || 'user_kb',
+      source_policy: val('sourcepolicy', 'both') || 'both',
     };
 
     startSession(api, payload).then(({status, body: data}) => {
@@ -439,7 +438,6 @@ export function createIntakeController(deps: IntakeDeps): IntakeController {
       topic: val('topic').trim() || request,
       keywords: splitList(val('keywords')),
       subtopics: splitList(val('subtopics')),
-      time_range: '2019-2026',
       project_id: pid,
       problem_id: probid,
       max_actions: parseInt(val('maxactions')) || 40,

@@ -140,7 +140,10 @@ export interface WorkbenchData {
 export type WorkbenchObjects = {
   assumptions?: Record<string, string>;
   claims?: Record<string, string>;
-  steps?: Record<string, string>;
+  obligations?: Record<string, string>;
+  evidence?: Record<string, string>;
+  models?: Record<string, string>;
+  verifications?: Record<string, string>;
 };
 
 export interface PickerOption {
@@ -198,7 +201,9 @@ const TAG_CLASSES = ['supported', 'refuted', 'in_progress', 'proposed', 'blocked
   'closed', 'open'];
 
 export const OBJECT_KIND_LABEL: Record<string, string> = {
-  assumption: '假设', claim: '结论', step: '推导步骤',
+  assumption: '假设', claim: '结论', obligation: '证明义务',
+  evidence: '文献证据', model: '模型', verification: '验证记录',
+  manuscript: '稿件', validation_plan: '验证建议', review_issue: '审阅问题',
 };
 
 function lookup(map: Record<string, string>, key: unknown, fallback: string): string {
@@ -244,7 +249,7 @@ export function routeLabel(status: unknown): string {
  */
 export function feedbackObjectOptions(objects: WorkbenchObjects = {}): PickerOption[] {
   const options: PickerOption[] = [
-    { value: '', label: '（不指定，由系统按意见内容判断）' },
+    { value: '', label: '（请选择对象；留空将请求澄清）' },
   ];
   const push = (kind: string, id: string, text: unknown): void => {
     options.push({
@@ -258,7 +263,10 @@ export function feedbackObjectOptions(objects: WorkbenchObjects = {}): PickerOpt
   };
   walk('assumption', objects.assumptions);
   walk('claim', objects.claims);
-  walk('step', objects.steps);
+  walk('obligation', objects.obligations);
+  walk('evidence', objects.evidence);
+  walk('model', objects.models);
+  walk('verification', objects.verifications);
   return options;
 }
 

@@ -121,6 +121,94 @@ def test_closed_obligation_and_aligned_record_are_required_for_supported():
         store.close()
 
 
+def _commit_evidence_link(service, store, *, relation="contradicts", locator="p.7",
+                          claim_version=1, task_id="evidence-1"):
+    store.put("evidence", "src-1", {"id": "src-1", "source_id": "src-1",
+                                   "title": "可定位来源", "locator": locator})
+    task = _task(task_id=task_id, agent="evidence", objective="核对相关研究")
+    result = AgentResult(
+        task_id=task.task_id, agent="evidence", outcome="completed", summary="发现来源",
+        proposed_changes=[ChangeProposal(
+            kind="evidence_link", object_id="lnk-1",
+            payload={"id": "lnk-1", "claim_ref": {"id": "c1", "version": claim_version},
+                     "source_ref": {"id": "src-1", "version": 1},
+                     "relation": relation, "locator": locator,
+                     "review_status": "verified"})],
+    )
+    return service.commit(task, result, current_versions={"c1": claim_version})
+
+
+def _seed_supported_for_literature(store):
+    store.put("claim", "c1", Claim(
+        id="c1", statement="候选命题", status="supported", coverage="target",
+        support_kind="symbolic_check", validation_status="verified",
+    ).model_dump(mode="json"))
+    store.put("obligation", "o1", ProofObligation(
+        id="o1", claim_id="c1", statement="证明候选命题", kind="proof",
+        status="closed", validation_status="verified",
+    ).model_dump(mode="json"))
+    store.put("verification", "v1", VerificationRecord(
+        id="v1", claim_id="c1", obligation_id="o1", tool="sympy",
+        status="passed", validation_status="verified", stale=False,
+    ).model_dump(mode="json"))
+
+
+def test_located_contradicting_source_reopens_claim_atomically():
+    store, _, service = _service()
+    try:
+        _seed_supported_for_literature(store)
+        outcome = _commit_evidence_link(service, store)
+        assert outcome.committed
+        assert store.get("claim", "c1")["status"] == "in_progress"
+        assert store.get("claim", "c1")["support_kind"] == "none"
+        assert store.get("verification", "v1")["stale"] is True
+        assert store.get("obligation", "o1")["status"] == "open"
+        assert any(row["type"] == "evidence_contradiction_reopened"
+                   for row in store.events())
+    finally:
+        store.close()
+
+
+def test_contradictory_link_cannot_reopen_another_problem_claim():
+    store, _, service = _service()
+    try:
+        _seed_supported_for_literature(store)
+        claim = dict(store.get("claim", "c1"))
+        claim["_scope"] = {"project_id": "commit-proj", "problem_id": "other"}
+        store.put("claim", "c1", claim)
+        outcome = _commit_evidence_link(service, store, claim_version=2)
+        assert outcome.accepted
+        assert store.get("claim", "c1")["status"] == "supported"
+        assert store.get("verification", "v1")["stale"] is False
+    finally:
+        store.close()
+
+
+def test_contradiction_recheck_is_idempotent_and_needs_a_locator():
+    store, _, service = _service()
+    try:
+        _seed_supported_for_literature(store)
+        _commit_evidence_link(service, store, locator="")
+        assert store.get("claim", "c1")["status"] == "supported"
+        _commit_evidence_link(service, store, task_id="evidence-2")
+        version = store.latest_version("claim", "c1")
+        _commit_evidence_link(service, store, task_id="evidence-3")
+        assert store.latest_version("claim", "c1") == version
+    finally:
+        store.close()
+
+
+def test_supporting_source_never_reopens_a_verified_claim():
+    store, _, service = _service()
+    try:
+        _seed_supported_for_literature(store)
+        _commit_evidence_link(service, store, relation="supports")
+        assert store.get("claim", "c1")["status"] == "supported"
+        assert store.get("verification", "v1")["stale"] is False
+    finally:
+        store.close()
+
+
 def test_stale_read_set_is_rejected_and_nothing_is_written():
     """依据的版本在派工之后换代了 → 不合入, 也不留半成品。"""
     store, _, service = _service("commit-proj3")

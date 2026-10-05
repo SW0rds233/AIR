@@ -171,18 +171,29 @@ def render_certificate_chain(certificate: dict) -> str:
     lines: list[str] = []
     design = certificate.get("design") or {}
     counts = certificate.get("counts") or {}
-    lines.append(f"判定对象: v={design.get('v')}, k={design.get('k')}, "
-                 f"λ={design.get('lam')}; 推出 r={counts.get('r')}, b={counts.get('b')}, "
-                 f"对称={counts.get('symmetric')}"
-                 + (f", 等价于 {counts.get('order')} 阶射影平面"
-                    if counts.get("order") is not None else ""))
-    for item in certificate.get("evidence") or []:
+    lines.append(f"假设存在参数为 2-({design.get('v')}, {design.get('k')}, "
+                 f"{design.get('lam')}) 的设计。先核对计数关系，"
+                 "再核对进一步的必要条件；必要条件成立不等于构造存在。")
+    if counts.get("r") is not None and counts.get("b") is not None:
+        lines.append(f"计数推出 r={counts['r']}、b={counts['b']}。")
+    # 证书按机器检查时的追加顺序存储。论文展示时必须先确立射影平面等价，
+    # 才能使用射影平面形式的 BRC；不能把适用前提排在定理应用之后。
+    order = {"count_relations": 0, "declared_consistency": 1,
+             "fisher_inequality": 2, "brc_even_order": 3,
+             "projective_plane_equivalence": 4, "brc_projective_plane": 5}
+    evidence = sorted(certificate.get("evidence") or [],
+                      key=lambda item: order.get(str(item.get("key", "")), 6))
+    for item in evidence:
         mark = "必要条件满足" if item.get("result") else "必要条件被违反"
         inputs = "、".join(f"{k}={v}" for k, v in (item.get("inputs") or {}).items())
         lines.append(
-            f"- [{mark}] {item.get('condition')}: 依据定理「{item.get('theorem')}」"
+            f"- **{mark}：{item.get('condition')}。** 依据「{item.get('theorem')}」"
             f"({item.get('citation') or '-'}); 定理陈述: {item.get('statement')}; "
             f"输入: {inputs}; 结论: {item.get('conclusion')}")
+    if certificate.get("verdict") == "nonexistent" and any(
+            item.get("result") is False for item in evidence):
+        lines.append("上述必要条件与存在性假设矛盾，因此该参数的设计不存在；"
+                     "此结论不依赖关联矩阵的穷举。")
     for item in certificate.get("unchecked") or []:
         lines.append(f"- [未判定] {item.get('condition')}: {item.get('reason')}")
     if certificate.get("sha256"):
@@ -231,6 +242,11 @@ def is_sum_of_two_squares(n: int) -> bool:
     """n = a²+b² (允许 0): 素数 p≡3 (mod 4) 的指数必须全为偶。"""
     if n < 0:
         return False
+    return _two_square_obstruction(n) is None
+
+
+def _two_square_obstruction(n: int) -> tuple[int, int] | None:
+    """返回第一个违反两平方和判据的素因子及其奇指数。"""
     rest = n
     p = 2
     while p * p <= rest:
@@ -240,9 +256,9 @@ def is_sum_of_two_squares(n: int) -> bool:
                 rest //= p
                 exponent += 1
             if p % 4 == 3 and exponent % 2:
-                return False
+                return p, exponent
         p += 1 if p == 2 else 2
-    return rest % 4 != 3
+    return (rest, 1) if rest % 4 == 3 else None
 
 
 def _is_square(n: int) -> bool:
@@ -362,6 +378,7 @@ def check(params: DesignParams) -> FeasibilityReport:
                 n = report.order
                 if n % 4 in (1, 2):
                     two_squares_ok = is_sum_of_two_squares(n)
+                    obstruction = _two_square_obstruction(n)
                     if not two_squares_ok:
                         report.violations.append(
                             f"Bruck–Ryser–Chowla: 阶 n={n} ≡ {n % 4} (mod 4) 必须是两个平方数"
@@ -380,7 +397,10 @@ def check(params: DesignParams) -> FeasibilityReport:
                         result=two_squares_ok,
                         conclusion=(f"n={n} 可写成两个平方数之和 (p≡3 (mod 4) 的素因子指数全为偶)"
                                     if two_squares_ok else
-                                    f"n={n} 不是两个平方数之和, 因此 {n} 阶射影平面不存在"),
+                                    f"n={n} 不是两个平方数之和: 素因子 "
+                                    f"{obstruction[0]}≡3 (mod 4) 的指数为奇数 "
+                                    f"({obstruction[1]}), 违反 Fermat 两平方和判据; "
+                                    f"因此 {n} 阶射影平面不存在"),
                         citation="Bruck–Ryser–Chowla (1949/1950); 两平方和判定用 Fermat 两平方定理",
                         detail=f"n={n}"))
                     # 把"该参数就是射影平面问题"这一步也写成可核验的判定,
@@ -390,7 +410,8 @@ def check(params: DesignParams) -> FeasibilityReport:
                                     "r=λ(v-1)/(k-1)": report.r, "b=vr/k": report.b}
                     if v == v_expect:
                         plane_conclusion = (
-                            f"λ=1 且 v={v}=k(k-1)+1={v_expect}, 且 r=k={k}=b (对称): "
+                            f"λ=1 且 v=k(k-1)+1={v_expect}, r=k={k}, "
+                            f"b=v={v} (对称): "
                             f"该 2-设计正是 {n} 阶射影平面 (射影平面即 2-(n²+n+1, n+1, 1) 设计)")
                         plane_ok = report.r == k and report.b == v
                     else:

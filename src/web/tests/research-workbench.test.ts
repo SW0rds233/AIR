@@ -63,17 +63,17 @@ describe('标签映射', () => {
 });
 
 describe('反馈对象选择器', () => {
-  it('默认项表示"不指定", 其余按假设/结论/步骤分组', () => {
+  it('默认项请求澄清，其余只列出可被后端定位的研究对象', () => {
     const options = feedbackObjectOptions({
       assumptions: { 'asm-1': 'x 为实数' },
       claims: { 'clm-1': 'x^2 >= 0' },
-      steps: { 'clm-1:0': '0:配方' },
+      obligations: { 'obl-1': '证明非负性' },
     });
     expect(options[0].value).toBe('');
-    expect(options.map(o => o.value)).toEqual(['', 'asm-1', 'clm-1', 'clm-1:0']);
+    expect(options.map(o => o.value)).toEqual(['', 'asm-1', 'clm-1', 'obl-1']);
     expect(options[1].label).toContain('假设');
     expect(options[2].label).toContain('结论');
-    expect(options[3].label).toContain('推导步骤');
+    expect(options[3].label).toContain('证明义务');
   });
 
   it('空输入也要给出默认项 (不能是空列表)', () => {

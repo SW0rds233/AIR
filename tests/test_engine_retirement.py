@@ -48,6 +48,15 @@ RETIRED_FILES: tuple[str, ...] = (
     # 旧图 `TheoryState` 的静默丢键契约 (前端/入口写状态, 节点按名读)。旧图退役后该
     # 机制不存在: 团队用 dataclass 状态, 缺字段直接报错而不是静默变默认值。
     "tests/test_theory_state_contract.py",
+    "src/research/loop.py",
+    "src/graph/theory_pipeline.py",
+    "src/graph/theory_state.py",
+    "src/agents/theory_writer.py",
+    "src/research/publication_paper.py",
+    "src/rag/theory_render.py",
+    "src/rag/publication_render.py",
+    "src/rag/latex_render.py",
+    "src/rag/latex_compiler.py",
 )
 
 
@@ -152,7 +161,12 @@ def test_no_module_imports_the_retired_pipeline():
     "又用回来了"。
     """
     offenders: list[str] = []
-    needles = ("src.graph.pipeline", "src.gui", "src.main_chat")
+    needles = ("src.graph.pipeline", "src.gui", "src.main_chat",
+               "src.graph.theory_pipeline", "src.graph.theory_state",
+               "src.research.loop", "src.agents.theory_writer",
+               "src.research.publication_paper", "src.rag.theory_render",
+               "src.rag.publication_render", "src.rag.latex_render",
+               "src.rag.latex_compiler")
     for root in (REPO / "src", REPO / "tests", REPO / "scripts"):
         if not root.exists():
             continue

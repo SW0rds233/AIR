@@ -45,10 +45,13 @@ function harness(overrides: Partial<SessionStreamDeps> = {}): Harness {
   const statuses: string[] = [];
   const offline: string[] = [];
   const out = { finished: 0 };
+  const cursors: Record<string, number> = {};
   const deps: SessionStreamDeps = {
     handleEvent: (ev) => { events.push(ev); },
     onTransport: (state) => { statuses.push(state); },
     currentThreadId: () => 't-1',
+    getCursor: (threadId) => cursors[threadId] || 0,
+    recordCursor: (threadId, seq) => { cursors[threadId] = seq; },
     onCompensate: (status) => { states.push(status); },
     onOfflineStatus: (status) => { offline.push(status); },
     onFinished: () => { out.finished += 1; },
@@ -104,6 +107,21 @@ describe('连接与游标', () => {
     source.emit({type: 'node'}, '2');
     expect(h.events).toHaveLength(1);
     expect(h.stream.lastEventId('t-1')).toBe(2);
+  });
+
+  it('切换线程后排队到达的旧事件不得污染新页面或游标', () => {
+    vi.stubGlobal('EventSource', FakeEventSource as any);
+    let current = 't-1';
+    const h = harness({ currentThreadId: () => current });
+    h.stream.connect('t-1');
+    const oldSource = FakeEventSource.instances[0];
+    current = 't-2';
+    h.stream.connect('t-2');
+    oldSource.emit({type: 'node', text: '旧研究'}, '12');
+    expect(h.events).toHaveLength(0);
+    expect(h.stream.lastEventId('t-1')).toBe(0);
+    FakeEventSource.instances[1].emit({type: 'node', text: '新研究'}, '1');
+    expect(h.events).toEqual([{type: 'node', text: '新研究'}]);
   });
 });
 

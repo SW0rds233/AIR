@@ -76,23 +76,6 @@ def test_coordinator_rejects_out_of_scope_proposal():
     assert state2.get("rejected_proposals")
 
 
-def test_action_dedup_is_object_specific(tmp_path):
-    """同一动作作用于**不同对象**不得被判为重复 (否则第二个对象永远不被核验)。"""
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import ResearchSpec
-    from src.research.store import ResearchStore
-
-    spec = ResearchSpec(project_id="dd", problem_statement=(
-        "判断对所有实数 x: x**2 >= 0。再判断对所有实数 y: y**2 + 1 >= 1。"))
-    store = ResearchStore("dd", db_path=tmp_path / "dd.sqlite")
-    engine = TheoryEngine(spec, store, budget=ResearchBudget(max_actions=20))
-    result = engine.run()
-    statuses = {c.lhs: c.status.value for c in result.snapshot.claims}
-    # 两个命题都应被真正核验过 (而不是只有一个通过、另一个从未执行)
-    assert all(s == "supported" for s in statuses.values()), statuses
-    store.close()
-
-
 # --------------------------------------------------------------------------
 # 换路: 保留失败原因, 不篡改真假状态
 # --------------------------------------------------------------------------
@@ -119,30 +102,6 @@ def test_route_switch_preserves_failure_and_claim_status():
     assert not manager.retryable("clm-2")
 
 
-def test_engine_switch_strategy_creates_new_route(tmp_path):
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import ResearchSpec
-    from src.research.store import ResearchStore
-    from src.verification.schemas import VerificationResult, VerificationStatus
-
-    class UnsupportedRunner:
-        def run(self, tool, operation, arguments, timeout=None):
-            return VerificationResult(tool=tool, status=VerificationStatus.unsupported,
-                                      detail="该表达式不支持")
-
-    spec = ResearchSpec(project_id="sw", problem_statement="对所有实数 x: 1/x >= 0")
-    store = ResearchStore("sw", db_path=tmp_path / "sw.sqlite")
-    engine = TheoryEngine(spec, store, runner=UnsupportedRunner(),
-                          budget=ResearchBudget(max_actions=12, no_progress_limit=2))
-    result = engine.run()
-    strategies = {r.strategy for r in result.snapshot.routes}
-    assert len(result.snapshot.routes) >= 2, "连续无进展应触发真实换路"
-    assert len(strategies) >= 2
-    failed = [r for r in result.snapshot.routes if r.status.value == "failed"]
-    assert failed and failed[0].failure_reason
-    store.close()
-
-
 # --------------------------------------------------------------------------
 # 实验规格: 只到 spec_validated
 # --------------------------------------------------------------------------
@@ -167,58 +126,6 @@ def test_experiment_spec_never_claims_execution():
     report = validate_spec(spec)
     assert not report.ok
     assert any("没有真实产物" in e for e in report.errors)
-
-
-def test_manuscript_separates_plan_from_proof():
-    """没有验证记录时只能写"推导计划", 不得写成已完成证明 (§7.1)。"""
-    from src.agents.theory_writer import build_manuscript
-    from src.research.schemas import (
-        Assurance,
-        Claim,
-        ClaimStatus,
-        Coverage,
-        ProofAttempt,
-        ProofStep,
-        ResearchSnapshot,
-        SupportKind,
-        ValidationStatus,
-    )
-
-    claim = Claim(id="c1", statement="x**2 >= 0", status=ClaimStatus.supported,
-                  support_kind=SupportKind.symbolic_check, coverage=Coverage.target,
-                  validation_status=ValidationStatus.verified,
-                  assurance=Assurance.symbolic_checked)
-    snapshot = ResearchSnapshot(project_id="p", claims=[claim], verifications=[],
-                                attempts=[ProofAttempt(target_claim_id="c1", steps=[
-                                    ProofStep(index=1, statement="考察差值")])])
-    text = "\n".join(b.text for b in build_manuscript(snapshot, "t").blocks)
-    assert "推导计划" in text and "不构成证明" in text
-
-
-def test_manuscript_cites_verification_when_present():
-    from src.agents.theory_writer import build_manuscript
-    from src.research.schemas import (
-        Assurance,
-        Claim,
-        ClaimStatus,
-        Coverage,
-        ResearchSnapshot,
-        SupportKind,
-        ValidationStatus,
-        VerificationRecord,
-    )
-
-    claim = Claim(id="c1", statement="x**2 >= 0", status=ClaimStatus.supported,
-                  support_kind=SupportKind.symbolic_check, coverage=Coverage.target,
-                  validation_status=ValidationStatus.verified,
-                  assurance=Assurance.symbolic_checked)
-    record = VerificationRecord(id="v1", claim_id="c1", tool="sympy", status="passed",
-                                validation_status=ValidationStatus.verified,
-                                certificate="x**2 >= 0 (sympy 假设)")
-    snapshot = ResearchSnapshot(project_id="p", claims=[claim], verifications=[record])
-    text = "\n".join(b.text for b in build_manuscript(snapshot, "t").blocks)
-    assert "证明与验证" in text
-    assert "sympy" in text and "x**2 >= 0 (sympy 假设)" in text
 
 
 def test_delivery_level_classification():
@@ -299,24 +206,6 @@ def test_external_novelty_lookup_is_available_without_kb():
     assert record.status.value == "unchecked"
 
 
-def test_engine_falls_back_to_external_novelty(tmp_path):
-    """引擎在没有知识底座时也应能给出有界的新颖性记录。"""
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import ResearchSpec
-    from src.research.store import ResearchStore
-    from src.verification.runner import VerificationRunner
-
-    spec = ResearchSpec(project_id="nov", problem_statement="对所有实数 x: x**2 >= 0")
-    store = ResearchStore("nov", db_path=tmp_path / "nov.sqlite")
-    engine = TheoryEngine(spec, store, runner=VerificationRunner(inproc=True),
-                          budget=ResearchBudget(max_actions=10))
-    engine.novelty_lookup = None
-    lookup = engine._resolve_novelty_lookup()
-    assert lookup is not None, "缺少底座时应退回外部检索而不是 None"
-    assert getattr(lookup, "kind", "") == "external"
-    store.close()
-
-
 def test_adversarial_review_becomes_obligations():
     """反方审查每条意见必须产生**新的义务**, 而不是只输出总分 (计划书 §5.5)。"""
     from src.research.critic import issues_to_obligations, review_attempt
@@ -342,159 +231,9 @@ def test_adversarial_review_becomes_obligations():
     assert again == []
 
 
-def test_informal_review_obligation_stays_blocked(tmp_path):
-    """独立审查类义务没有工具可核验: 必须保持 blocked, 不得自动关闭。"""
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import (
-        ObligationStatus,
-        ProofObligation,
-        ResearchSpec,
-    )
-    from src.research.store import KIND_CLAIM, KIND_OBLIGATION, ResearchStore
-    from src.verification.runner import VerificationRunner
-
-    spec = ResearchSpec(project_id="review", problem_statement="对所有实数 x: x**2 >= 0")
-    store = ResearchStore("review", db_path=tmp_path / "review.sqlite")
-    engine = TheoryEngine(spec, store, runner=VerificationRunner(inproc=True),
-                          budget=ResearchBudget(max_actions=10))
-    engine.bootstrap()
-    claim = store.list_latest(KIND_CLAIM)[0]
-    obligation = ProofObligation(statement="独立审查提出: 使用除法需声明除数非零",
-                                 kind="informal_review", acceptance_method="informal_review",
-                                 claim_id=claim["id"], claim_version=claim["version"])
-    store.put(KIND_OBLIGATION, obligation.id, obligation.model_dump(mode="json"))
-    assert engine._act_check_step(
-        __import__("src.research.schemas", fromlist=["ResearchAction"]).ResearchAction(
-            action_type=__import__("src.research.schemas",
-                                   fromlist=["ActionType"]).ActionType.check_step,
-            object_id=obligation.id)) is False
-    saved = store.get(KIND_OBLIGATION, obligation.id)
-    assert saved["status"] == ObligationStatus.blocked.value
-    assert "待人工" in saved["detail"]
-    store.close()
-
-
 # --------------------------------------------------------------------------
 # fork: 明确重算范围
 # --------------------------------------------------------------------------
-def test_fork_marks_claims_for_recomputation(tmp_path):
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import (
-        Assurance,
-        Claim,
-        ClaimStatus,
-        Coverage,
-        ResearchSnapshot,
-        SupportKind,
-        ValidationStatus,
-    )
-    from src.research.store import KIND_CLAIM, ResearchStore
-    from src.verification.runner import VerificationRunner
-
-    store = ResearchStore("fk", db_path=tmp_path / "fk.sqlite")
-    spec = __import__("src.research.schemas", fromlist=["ResearchSpec"]).ResearchSpec(
-        project_id="fk", problem_statement="x**2 >= 0")
-    claim = Claim(id="c1", statement="x**2 >= 0", status=ClaimStatus.supported,
-                  support_kind=SupportKind.symbolic_check, coverage=Coverage.target,
-                  validation_status=ValidationStatus.verified,
-                  assurance=Assurance.symbolic_checked)
-    store.put(KIND_CLAIM, claim.id, claim.model_dump(mode="json"))
-    snapshot = ResearchSnapshot(project_id="fk", claims=[claim],
-                                writing_map={"c1": "theorem-c1"})
-    store.save_snapshot(snapshot)
-
-    engine = TheoryEngine(spec, store, runner=VerificationRunner(inproc=True),
-                          budget=ResearchBudget())
-    outcome = engine.fork_from_snapshot(source_snapshot_id=snapshot.snapshot_id)
-    assert outcome["ok"]
-    lineage = outcome["lineage"]
-    assert lineage["source_snapshot_id"] == snapshot.snapshot_id
-    assert lineage["reused_verifications"] == []          # 不复用旧验证
-    assert lineage["must_recompute"] == lineage["imported_claims"]
-    forked = store.get(KIND_CLAIM, lineage["imported_claims"][0])
-    assert forked["status"] == "proposed"                 # 派生结论回到待验证
-    assert forked["verification_closure"] == {}
-    store.close()
-
-
 # --------------------------------------------------------------------------
 # 用户反馈闭环: 自然语言 → 对象级动作 (计划书 §5.1 / §6.1)
 # --------------------------------------------------------------------------
-def test_feedback_revises_named_assumption(tmp_path):
-    """反馈必须落到用户指名的假设上, 并使依赖它的结论失效。"""
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import ResearchSpec
-    from src.research.store import KIND_ASSUMPTION, KIND_CLAIM, KIND_VERIFICATION, ResearchStore
-    from src.verification.runner import VerificationRunner
-
-    spec = ResearchSpec(project_id="fb1", problem_statement="对所有实数 x: x**2 >= 0")
-    store = ResearchStore("fb1", db_path=tmp_path / "fb1.sqlite")
-    engine = TheoryEngine(spec, store, runner=VerificationRunner(inproc=True),
-                          budget=ResearchBudget(max_actions=10))
-    first = engine.run()
-    assert first.gate.passed, first.gate.render()
-
-    assumptions = store.list_latest(KIND_ASSUMPTION)
-    assert assumptions, "应存在变量域假设"
-    target = assumptions[0]
-    outcome = engine.submit_feedback(f"不要假设 {target['statement']}")
-    assert outcome["ok"], outcome
-    applied = outcome["applied"]
-    assert applied and applied[0]["object_id"] == target["id"], applied
-    assert applied[0]["affected_claims"], "下游结论必须被标记失效"
-
-    # 旧验证保留但标记 stale (审计线索不丢失)
-    assert any(v.get("stale") for v in store.list_latest(KIND_VERIFICATION))
-    claim = store.list_latest(KIND_CLAIM)[0]
-    assert claim["status"] != "supported"
-    store.close()
-
-
-def test_feedback_asks_for_clarification_instead_of_guessing(tmp_path):
-    """无法确定作用对象时不得猜: 返回澄清问题且研究状态不变。"""
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import ResearchSpec
-    from src.research.store import KIND_CLAIM, ResearchStore
-    from src.verification.runner import VerificationRunner
-
-    spec = ResearchSpec(project_id="fb2", problem_statement="对所有实数 x: x**2 >= 0")
-    store = ResearchStore("fb2", db_path=tmp_path / "fb2.sqlite")
-    engine = TheoryEngine(spec, store, runner=VerificationRunner(inproc=True),
-                          budget=ResearchBudget(max_actions=8))
-    engine.run()
-    before = [c["version"] for c in store.list_latest(KIND_CLAIM)]
-
-    outcome = engine.submit_feedback("再多看看别的东西吧")
-    if outcome.get("ok"):
-        # 若解析出了动作, 也必须带明确对象; 否则必须请求澄清
-        assert all(a.get("object_id") for a in outcome["applied"])
-    else:
-        assert outcome.get("needs_clarification") is True
-        assert outcome["clarify"]
-        assert [c["version"] for c in store.list_latest(KIND_CLAIM)] == before, \
-            "请求澄清时不得改动研究状态"
-    store.close()
-
-
-def test_feedback_recheck_marks_old_verification_stale(tmp_path):
-    """用户质疑结论时可重开义务; 旧验证保留但失效, 不允许直接复用。"""
-    from src.research.loop import ResearchBudget, TheoryEngine
-    from src.research.schemas import ResearchSpec
-    from src.research.store import KIND_CLAIM, KIND_OBLIGATION, KIND_VERIFICATION, ResearchStore
-    from src.verification.runner import VerificationRunner
-
-    spec = ResearchSpec(project_id="fb3", problem_statement="对所有实数 x: x**2 >= 0")
-    store = ResearchStore("fb3", db_path=tmp_path / "fb3.sqlite")
-    engine = TheoryEngine(spec, store, runner=VerificationRunner(inproc=True),
-                          budget=ResearchBudget(max_actions=10))
-    engine.run()
-    claim_id = store.list_latest(KIND_CLAIM)[0]["id"]
-
-    outcome = engine.submit_feedback(f"这个命题不成立, 请给反例: {claim_id}")
-    assert outcome["ok"], outcome
-    kinds = {a["action"] for a in outcome["applied"]}
-    assert kinds & {"seek_counterexample", "check_step", "revise_hypothesis"}, kinds
-    if "seek_counterexample" in kinds:
-        assert any(v.get("stale") for v in store.list_latest(KIND_VERIFICATION))
-        assert any(o["status"] == "open" for o in store.list_latest(KIND_OBLIGATION))
-    store.close()

@@ -61,6 +61,7 @@ BLOCK_ROLES: frozenset[str] = frozenset(r.value for r in BlockRole)
 class RefKind(str, Enum):
     source = "source"
     claim = "claim"
+    obligation = "obligation"
     model = "model"
     figure = "figure"
     verification = "verification"

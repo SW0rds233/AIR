@@ -110,7 +110,9 @@ def test_problem_attachment_text_enters_problem_statement_and_is_deduplicated():
     assert state["attachment_candidates"] == snapshot["attachment_text"]
     assert state["attachment_ids"] == [attachment_id]
     # R6: 不可变启动输入快照 (续跑与交付清单基于它)
-    assert snapshot["source_policy"] == "user_kb"
+    assert snapshot["source_policy"] == "both"
+    assert server._normalized_input(req.model_copy(update={"source_policy": "user_kb"}))[
+        "source_policy"] == "user_kb"
     assert snapshot["attachments"][0]["sha256"] == first["attachment"]["sha256"]
 
 

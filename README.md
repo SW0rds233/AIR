@@ -182,8 +182,8 @@ npm run build      # 产出 dist/ 并把 JS/CSS 发布到 src/web/assets/
 **命令行：**
 
 ```bash
-# 直接指定主题/关键词/子主题
-python -m src.main "研究主题" --keywords K1 K2 --subtopics S1 S2
+# 直接指定主题
+python -m src.main "研究主题"
 
 # 自然语言入口（建议带上英文术语/缩写，便于英文库检索）
 python -m src.main --request "我想研究射频指纹识别(RF fingerprinting, RFFI)的特征提取与对抗攻击"
@@ -211,11 +211,11 @@ python -m src.main --request "研究信道变化如何影响射频指纹可分�
 
 产物写入 `outputs/research/{project_id}/{snapshot_id}/`：`research_spec.json`、`claims.json`、
 `obligations.json`、`models.json`、`evidence.json`、`verification/`、`experiments/`、`proofs/`、
-`decisions.jsonl`、`novelty_review.md`、`unresolved.md`、`manuscript.md`、`paper.tex`、
-`delivery_gate.md`、`manifest.json`。
+`decisions.jsonl`、`novelty_review.md`、`unresolved.md`、`manuscript.md`、`manuscript.tex`、
+`delivery_gate.md`、`manifest.json`。仅当本机安装 `xelatex` 且编译成功时才有 `manuscript.pdf`。
 
-要让研究能查到资料，先把文献放进主题知识底座（`data/kb/{主题}/manual/` + `meta.json`），
-或在 `ResearchSpec.domain` 中给出主题名；底座为空时检索类动作不会被暴露。
+若使用 `user_kb`，需先绑定并导入资料库；默认 `both` 会同时允许自主检索与已绑定的资料库。
+离线模式或外部检索不可用时，系统应如实标出缺乏可定位来源，而不是虚构参考文献。
 
 **研究状态的只读接口**（供前端/脚本读取，不会改动任何结论）：
 
@@ -262,10 +262,9 @@ curl -X POST http://127.0.0.1:8000/api/library/import \
 |------|------|--------|
 | `topic` | 研究主题（用 `--request` 时可不填） | — |
 | `--request, -r` | 自然语言研究描述，Planner 自动提取主题/关键词/子主题 | — |
-| `--keywords, -k` | 核心关键词列表 | — |
-| `--subtopics, -s` | 子主题列表 | — |
-| `--time-range` | 时间范围 | `2019-2026` |
-| `--resume` | 断点续跑 | 否 |
+| `--project-id` / `--problem-id` | 研究对象标识 | `proj-team` / `problem` |
+| `--source-set-id` | 已授权资料源 ID | 不绑定 |
+| `--source-policy` | `user_kb`、`autonomous` 或 `both` | `both` |
 
 
 ## 常见问题（FAQ）
@@ -293,7 +292,7 @@ DeepSeek 等不提供 embedding API 时 RAG 自动降级（主流程不受影响
 推理模型审稿/写作耗时长，调大 `LLM_TIMEOUT`（默认 900s）；网络波动会自动重试 `LLM_MAX_RETRIES` 次。
 
 **8. 中断后如何继续**
-Web 界面顶部「历史会话」→ 未完成会话点「继续」；CLI 加 `--resume`。停在暂停点的会话会重新提示输入。
+Web 界面顶部「历史会话」→ 未完成会话点「继续」。CLI 是一次性启动入口，目前不提供续跑参数；请勿把再次调用 CLI 当作恢复旧会话。
 
 **9. 没有生成 PDF，只有 .tex**
 需本机安装 LaTeX（MiKTeX / TeX Live）并提供 `xelatex`；首次编译拉取 ctexart 等包可能超时，重试或更换网络。
@@ -351,7 +350,7 @@ AIR/
 │       └── dist/            #   构建出的页面 (不入库, 新克隆需 npm run build, 见「快速开始」)
 ├── tests/                   # 离线测试 (含可信状态/知识闭环/自主性反向安全用例)
 ├── data/                    # 运行时数据 (chroma/pdfs/conversations/checkpoints/kb/research)
-├── outputs/                 # 产物 (综述按 run_id 隔离; 理论按 project/snapshot 隔离)
+├── outputs/                 # 统一团队产物 (研究包按 project/snapshot 隔离)
 ├── setup_env.bat            # 一键搭建环境
 ├── start.bat                # 一键启动 Web 界面
 ├── pyproject.toml
@@ -364,7 +363,7 @@ AIR/
 - 工具通过不等于科学真理：形式化工具只检查提交给它的编码，**陈述是否忠实于原问题仍需人工确认**；
 - 多智能体一致同意不能替代数学证明；「没检索到等价结果」只表示在所检索范围内未发现；
 - 未执行的实验/仿真规格不是证据；报告与论文稿在门槛未通过时只作为研究备忘录/条件性报告导出。
-- **团队合并仍在进行中**：M0（契约）、M1（团队闭环）、M4（任务持久化与 read-set 一致性）、§13（按路径建库）、**M2 动作抽取（研究侧）**、**M3 任务画像与领域硬编码退役（研究侧）**已落地 —— 文稿的章节骨架与领域措辞现在由 `research/task_profile.py` 决定，通用入口不再输出组合设计专用内容；**M5 前端**只做了状态/事件基础与团队工作台视图。详见 `AI for Research(AIR)智能体团队合并计划.md` 第 15 节与 `AI for Research(AIR)计划推进情况.md` 的 10.4 节。
+- **重构已收敛为一套团队**：主控与七类功能子智能体共用研究对象、提交边界、会话和唯一文稿 IR；旧理论引擎与旧排版链已删除。真实模型、可定位文献、浏览器及 PDF 的实物验收仍需按《AI for Research(AIR)未完成工作清单》执行。
 - 团队闭环第一版**串行执行**（按合并计划 §10 要求，资源隔离完成前不打开全队并行）；没有 LLM 时角色走确定性实现，"任务完成"不等于"研究完成"。
 
 

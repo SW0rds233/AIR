@@ -82,6 +82,7 @@ class EvidenceAgent(AgentBase):
 
         # 1. 有 LLM 时: 先让工具循环补外部检索与阅读 (它在授权范围内自行决定查询)
         llm_note = ""
+        observations: list[Any] = []
         if runtime.llm_available() and not task.budget.exceeded_by(usage):
             from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -108,8 +109,10 @@ class EvidenceAgent(AgentBase):
         # 本身就是要写进交付物的结论 —— 放在检索之后会让"检索受阻"的运行连一条
         # `unchecked` 记录都没有, 交付物于是看起来没有新颖性问题 (§5.4 / package.py)。
         novelty_changes = self._novelty_records(task, context, [])
+        selected_queries, search_cache = _observed_searches(observations, policy)
         collected = self.retrieve(task, context, runtime, topic=topic, query=query,
-                                  policy=policy)
+                                  policy=policy, selected_queries=selected_queries,
+                                  search_cache=search_cache)
         if collected is None:
             return self.blocked(
                 task,
@@ -143,13 +146,32 @@ class EvidenceAgent(AgentBase):
         # 证据归属 (§6.1): 证据必须绑定到**具体命题版本**, 否则同一批证据会被所有命题
         # 共享 —— "这条来源支持哪个结论、适用条件是什么"就无从回答。这里由检索角色
         # 提交 `evidence_link` 候选 (relation 来自它自己的判定, 不是猜)。
-        changes.extend(self._evidence_links(task, evidence_items, context))
+        links = self._evidence_links(task, evidence_items, context)
+        changes.extend(links)
         # 新颖性对照 (§5.4): 交付包与出版层按它决定"能不能宣称原创"。**必须留下记录**
         # —— 没有检索能力时也落一条 `unchecked` 并写明原因, 否则交付物看起来像
         # "没有新颖性问题"。判定由 `research/novelty.py` 做 (零 LLM), 这里只提供
         # 对照来源 (本地库优先, 否则外部检索)。
         changes.extend(novelty_changes)
         needs = self._needs_from(evidence_items, locatable, coverage)
+        for link in links:
+            payload = link.payload
+            if payload.get("relation") != "contradicts" or not payload.get("locator"):
+                continue
+            claim_ref = payload.get("claim_ref") or {}
+            claim_id = str(claim_ref.get("id") or "")
+            if not claim_id:
+                continue
+            source_id = str((payload.get("source_ref") or {}).get("id") or "")
+            needs.append(ResearchNeed(
+                kind=NeedKind.counterexample,
+                statement=f"复核文献与命题 {claim_id} 的冲突并修订推导",
+                why="可定位的反证材料使既有结论不能继续视为已支持",
+                blocked_refs=[claim_ref],
+                acceptance=["解释冲突的适用条件，重新核验或明确保留未决状态"],
+                hints={"trigger_id": f"contradiction:{claim_id}:{claim_ref.get('version')}:{source_id}"},
+                blocking=True,
+            ))
         summary = (
             f"检索{kinds_note(policy)}: 命中 {coverage.hits} 条 / 入库 {coverage.ingested}, "
             f"可引用 {len(locatable)} 条 (仅摘要 {coverage.abstract_only}); "
@@ -178,14 +200,16 @@ class EvidenceAgent(AgentBase):
 
     # ---- 确定性检索 ----
     def retrieve(self, task: AgentTask, context: ContextPack, runtime: AgentRuntime,
-                 *, topic: str, query: str, policy: str
+                 *, topic: str, query: str, policy: str,
+                 selected_queries: list[str] | None = None,
+                 search_cache: dict[str, list[dict]] | None = None,
                  ) -> tuple[list[dict[str, Any]], Any, list[str]] | None:
         """走 `kb/bridge.gather_sources`: 统一查询规划、入库、去重与覆盖记录。
 
         返回 `None` 表示"没有可检索的范围, 且未授权外搜" —— 调用方必须如实呈现,
         不能假装检索过。
         """
-        from src.kb.bridge import gather_sources
+        from src.kb import bridge
         from src.kb.service import KnowledgeService
         from src.research.schemas import Claim, SourcePolicy
 
@@ -200,10 +224,19 @@ class EvidenceAgent(AgentBase):
 
         claim = Claim(statement=query or task.objective, study=_study_from(context))
         try:
-            items, coverage = gather_sources(
+            def observed_or_search(query_text: str, limit: int) -> list[dict]:
+                if search_cache and query_text in search_cache:
+                    return search_cache[query_text][:limit]
+                default = bridge._default_search_fn()
+                if default is None:
+                    raise RuntimeError("外部检索能力不可用")
+                return default(query_text, limit)
+
+            items, coverage = bridge.gather_sources(
                 service if usable else None, None, topic=topic, policy=parsed_policy,
                 claim=claim, k=self.per_query, max_queries=self.max_queries,
-                per_query=self.per_query)
+                per_query=self.per_query, extra_queries=selected_queries,
+                search_fn=(observed_or_search if search_cache else None))
         except Exception as e:  # noqa: BLE001 - 检索失败如实上报, 不静默成功
             runtime.emit("evidence_retrieval_failed",
                          {"task_id": task.task_id, "reason": str(e)})
@@ -247,6 +280,9 @@ class EvidenceAgent(AgentBase):
                            topic: str) -> ChangeProposal:
         return build_proposal(
             "evidence",
+            # 归属关系以 source_id 引用这份材料，权威对象必须使用同一个 ID；
+            # 否则 link.source_ref 指向外部 ID，而库里只有自动生成的 eviobj-*。
+            object_id=str(item.get("source_id") or ""),
             payload={
                 "title": item.get("title", ""),
                 "source_id": item.get("source_id", ""),
@@ -345,8 +381,16 @@ class EvidenceAgent(AgentBase):
             claim_version = int(claim_row.get("version", 1) or 1)
             for item in items[:12]:
                 source_id = str(item.get("source_id") or "")
+                if not source_id:
+                    continue
+                target_id = str(item.get("claim_id") or "")
+                if target_id and target_id != claim_id:
+                    continue
                 relation = str(item.get("relation", "insufficient") or "insufficient")
                 if relation not in valid:
+                    relation = "insufficient"
+                # 一份材料若未明确绑定命题，不能把它对检索问题的关系复制给多个结论。
+                if not target_id and len(claims) > 1:
                     relation = "insufficient"
                 link = EvidenceLink(
                     claim_ref=ObjectRef(id=claim_id, version=claim_version),
@@ -467,6 +511,38 @@ def _query_of(task: AgentTask, context: ContextPack) -> str:
     if request:
         return request
     return task_intent(task)
+
+
+def _observed_searches(observations: list[Any], policy: str
+                       ) -> tuple[list[str], dict[str, list[dict]]]:
+    """把模型实际调用过的检索式和原始命中交给统一检索桥。
+
+    只接受成功的检索工具调用；模型正文中的任意引用或失败工具的文本不能冒充来源。
+    `user_kb` 只采纳本地查询，绝不把外部观察混进未授权资料范围。
+    """
+    external = {"search_all_sources", "arxiv_search", "openalex_search",
+                "semantic_scholar_search"}
+    queries: list[str] = []
+    cached: dict[str, list[dict]] = {}
+    for observation in observations:
+        if getattr(observation, "status", "") != "ok":
+            continue
+        name = str(getattr(observation, "name", "") or "")
+        if name not in external | {"search_local_kb"}:
+            continue
+        if name in external and policy not in {"autonomous", "both"}:
+            continue
+        query = str((getattr(observation, "arguments", {}) or {}).get("query") or "").strip()
+        if not query or query in queries:
+            continue
+        queries.append(query[:300])
+        if name in external:
+            rows = getattr(observation, "result", None)
+            if isinstance(rows, list):
+                cached[query[:300]] = [row for row in rows if isinstance(row, dict)]
+        if len(queries) >= 4:
+            break
+    return queries, cached
 
 
 def kinds_note(policy: str) -> str:

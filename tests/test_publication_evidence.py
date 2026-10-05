@@ -9,8 +9,6 @@ from __future__ import annotations
    (否则正文 `[1]` 指向哪一条不可预期)。
 """
 
-import json
-from pathlib import Path
 from types import SimpleNamespace
 
 from src.rag import reference_list as refmod
@@ -79,38 +77,6 @@ def _external_hit(title: str, abstract: str = "", url: str = "") -> dict:
 # ----------------------------------------------------------------------
 # 覆盖记录: 交付包必须反映**研究阶段**的真实检索
 # ----------------------------------------------------------------------
-
-def test_package_coverage_prefers_research_loop_record():
-    """导出交付包时, 覆盖记录必须优先取研究循环累积的那份。
-
-    实测缺陷: 检索现在发生在研究阶段, 出版层因"研究循环已产生证据"跳过检索并返回一份
-    **空覆盖**; 导出时若直接采用它, 交付包会报 `executed=false / 命中 0`, 而实际入库了
-    7 条证据 —— 事后无法复核"研究阶段检索了什么"。
-    """
-    from src.graph.theory_pipeline import engine_spec_coverage
-    from src.research.schemas import RetrievalCoverage, SourcePolicy
-
-    loop_coverage = RetrievalCoverage(policy=SourcePolicy.autonomous, executed=True,
-                                      hits=7, ingested=7,
-                                      queries=["nonexistence projective plane"])
-    engine = SimpleNamespace(spec=SimpleNamespace(coverage=loop_coverage))
-    picked = engine_spec_coverage(engine)
-    assert picked is loop_coverage
-    assert picked.origin == "research_loop", "必须自证来源"
-    assert picked.hits == 7 and picked.ingested == 7
-
-
-def test_package_coverage_falls_back_when_loop_never_searched():
-    """研究循环没检索过 (未执行) -> 返回 None, 由出版层记录兜底。"""
-    from src.graph.theory_pipeline import engine_spec_coverage
-    from src.research.schemas import RetrievalCoverage, SourcePolicy
-
-    not_run = RetrievalCoverage(policy=SourcePolicy.user_kb, executed=False)
-    engine = SimpleNamespace(spec=SimpleNamespace(coverage=not_run))
-    assert engine_spec_coverage(engine) is None
-    assert engine_spec_coverage(SimpleNamespace(spec=SimpleNamespace(coverage=None))) is None
-    assert engine_spec_coverage(SimpleNamespace()) is None
-
 
 def test_offline_mode_never_searches(monkeypatch):
     monkeypatch.setenv("THEORY_LLM", "0")
@@ -397,63 +363,4 @@ def test_openalex_hit_without_abstract_stays_uncitable():
 # ----------------------------------------------------------------------
 # 端到端 (进程内, 不起服务): 真实 KB 对象 → 参考文献 → 正文引用 → PDF
 # ----------------------------------------------------------------------
-
-def test_real_kb_evidence_reaches_references_and_pdf(tmp_path, monkeypatch):
-    """借真实 `KBStore`/`KnowledgeService` 走一遍收尾: 参考文献表与正文引用必须落地。
-
-    这一条覆盖的是"读得快、接得上"的整条链: 研究循环采信的证据 → 参考文献表 →
-    正文 `[1]` → 期刊式 `.tex`/`.pdf`。用进程内临时库, 不需要网络。
-    """
-    from src import config
-    from src.graph import theory_pipeline
-    from src.kb.schema import Chunk, LitRecord
-    from src.kb.service import KnowledgeService
-    from src.kb.store import KBStore
-
-    monkeypatch.setenv("THEORY_LLM", "1")
-    monkeypatch.setenv("THEORY_PROPOSER", "0")
-    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
-    monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path / "out")
-
-    text = ("2-(211,15,1) 设计不存在: 计数关系虽自洽, 但存在一条被违反的经典必要条件。"
-            "该参数等价于 14 阶射影平面。")
-    store = KBStore("cd", db_path=tmp_path / "kb.sqlite")
-    store.upsert_document(
-        LitRecord(doc_id="doc-p2", title="On the nonexistence of a 2-(211,15,1) design",
-                  authors="A. Author", year="1990", language="zh", abstract=text,
-                  doc_type="journal", peer_reviewed=True, has_fulltext=True,
-                  existence_verified=True),
-        search_text=text)
-    store.add_chunks([Chunk(doc_id="doc-p2", index=0, page=12, text=text,
-                            char_start=0, char_end=len(text))])
-    knowledge = KnowledgeService("cd", store=store)
-
-    original = theory_pipeline._knowledge_for
-    theory_pipeline._knowledge_for = lambda spec: knowledge
-    try:
-        case = Path("evals/cases/combinatorial-design/case.md")
-        request = case.read_text(encoding="utf-8") if case.is_file() else (
-            "某实验有 211 个节点, 每轮 15 个节点, 每节点 15 轮, "
-            "任意两节点恰好共同参加一轮, 恰好 211 轮。请判断能否存在。")
-        final = theory_pipeline.run_theory_pipeline(
-            request=request, topic="Problem 2", project_id="retr", problem_id="p1",
-            max_actions=12, max_tool_calls=12)
-    finally:
-        theory_pipeline._knowledge_for = original
-
-    package = Path(final["package_dir"])
-    assert (package / "publication.tex").is_file()
-    assert (package / "publication.pdf").is_file(), final.get("notes")
-    references = json.loads((package / "references.json").read_text(encoding="utf-8"))
-    assert references["references"], final.get("notes")
-    publication = (package / "publication.md").read_text(encoding="utf-8")
-    # 第 4 节必须给出真实的引用与关系判定, 而不是占位符
-    section = publication.split("## 4 与已有工作比较")[-1].split("## 5")[0]
-    assert "[[REF:" not in section, "引用占位未被解析"
-    assert "[1]" in section, section
-    assert "关系判定" in section, section
-    # 覆盖记录必须说明引用来源, 不能含混
-    coverage = json.loads((package / "retrieval_coverage.json").read_text(encoding="utf-8"))
-    assert coverage["origin"] in ("research_loop", "publication_layer"), coverage
-    store.close()
 

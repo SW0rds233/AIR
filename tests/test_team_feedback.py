@@ -141,6 +141,37 @@ def test_a_finished_run_continues_for_feedback(isolated):
     assert result["stop_reason"], "继续之后必须有停止原因 (不能停在无状态)"
 
 
+def test_feedback_restores_existing_plan_and_accepts_a_second_revision(isolated):
+    """人工连续调整不能重跑旧任务，也不能把同类第二条意见去重掉。"""
+    from src.graph.research_graph import TeamRun
+
+    _run_once("proj-fb-twice", "run-fb-twice", max_rounds=2)
+    with TeamRun(project_id="proj-fb-twice", problem_id="p1", run_id="run-fb-twice",
+                 request=REQUEST, source_policy="user_kb", max_rounds=2) as team:
+        persisted = team._load_run_payload()
+        old_ids = set(persisted["results"])
+        first = team.submit_feedback(statement="给出等号成立的条件", owner="reasoning",
+                                     kind=NeedKind.derivation, feedback_id="adjust-1",
+                                     max_rounds=2)
+        first_ids = set(team.loop.results)
+        assert old_ids <= first_ids
+        assert len(first_ids - old_ids) >= 1
+        assert first["rounds_used"] >= 1
+
+    with TeamRun(project_id="proj-fb-twice", problem_id="p1", run_id="run-fb-twice",
+                 request=REQUEST, source_policy="user_kb", max_rounds=2) as team:
+        second = team.submit_feedback(statement="再给出严格不等号的条件", owner="reasoning",
+                                      kind=NeedKind.derivation, feedback_id="adjust-2",
+                                      max_rounds=2)
+        assert first_ids <= set(team.loop.results)
+        assert len(set(team.loop.results) - first_ids) >= 1
+        assert second["rounds_used"] >= 1
+        duplicate = team.submit_feedback(statement="再给出严格不等号的条件", owner="reasoning",
+                                         kind=NeedKind.derivation, feedback_id="adjust-2")
+        assert duplicate["duplicate"] is True
+        assert duplicate["rounds_used"] == 0
+
+
 def test_feedback_on_an_unknown_object_is_refused(isolated):
     """对象不存在时如实拒绝, 不静默挑一个对象改。"""
     _run_once("proj-fb-unknown", "run-fb-unknown")
@@ -153,6 +184,23 @@ def test_feedback_on_an_unknown_object_is_refused(isolated):
         assert info["needs_clarification"] is True
     finally:
         store.close()
+
+
+def test_explicit_workflow_adjustment_does_not_require_an_object(isolated):
+    """人工可明确要求补检索/调整方法/修稿；改变研究问题须另开问题。"""
+    for scope, owner in (("sources", "evidence"), ("method", "modeling"),
+                         ("writing", "writing"), ("review", "review"),
+                         ("validation", "validation")):
+        need, info = feedback_need_for(project_id="p", problem_id="q",
+                                       text="请按这个方向调整", scope=scope)
+        assert need is not None, info
+        assert need.owner == owner
+        assert need.blocked_refs == []
+        assert need.hints["intervention_scope"] == scope
+    need, info = feedback_need_for(project_id="p", problem_id="q",
+                                   text="换成另一道题", scope="question")
+    assert need is None
+    assert info["needs_clarification"] is True
 
 
 def test_candidates_only_list_this_problems_objects(isolated):
@@ -195,10 +243,24 @@ def test_feedback_endpoint_over_http(isolated):
         body = pointed.json()
         assert body["ok"] is True and body["owner"] == "reasoning"
         assert body["rounds_used"] >= 1
+        assert body["package_dir"], "人工修订后必须形成新版交付包"
+        from pathlib import Path
+
+        assert (Path(body["package_dir"]) / "manuscript.md").is_file()
         server.shutdown_sessions()
     store = ResearchStore("proj-fb-http")
     try:
-        assert store.version_index("claim")[target] > 1, "端点路径没有真的修订对象"
+        version = store.version_index("claim")[target]
+        assert version > 1, "端点路径没有真的修订对象"
+        from src.publication.schemas import Manuscript
+
+        latest = store.list_latest("manuscript")[-1]
+        paper = Manuscript.model_validate(latest)
+        versions_in_paper = [ref.version for block in paper.all_blocks()
+                             for kind, ref in zip(block.ref_kinds, block.refs)
+                             if kind == "claim" and ref.id == target]
+        assert versions_in_paper and max(versions_in_paper) >= version, (
+            "人工修订后不能继续交付引用旧结论版本的正文")
     finally:
         store.close()
 

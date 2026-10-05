@@ -42,8 +42,23 @@ describe('工作台总览 (§9.5 renderWorkbench 迁出)', () => {
     expect(html).toContain('data-id="clm-1"');
     expect(html).not.toContain('onclick=');
     expect(html).toContain('id="wbobj"');
+    expect(html).toContain('id="wbfeedbackscope"');
+    expect(html).toContain('value="sources"');
+    expect(html).toContain('value="method"');
+    expect(html).toContain('value="validation"');
     expect(html).toContain('data-action="submitWorkbenchFeedback"');
     expect(html).toContain('data-action="refreshWorkbench"');
+  });
+
+  it('对象选择器只列出服务端能定位的种类，不再给出不可定位的步骤 ID', () => {
+    const html = renderResearchOverview({
+      project_id: 'p1',
+      claims: [{ id: 'clm-1', statement: '结论' }],
+      obligations: [{ id: 'obl-1', statement: '必要性证明' }],
+      steps: [{ id: 'clm-1:0', text: '中间步骤' }],
+    }, noClaim);
+    expect(html).toContain('value="obl-1"');
+    expect(html).not.toContain('value="clm-1:0"');
   });
 
   it('展开的结论带入详情行, 未展开则不带', () => {

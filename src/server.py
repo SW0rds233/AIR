@@ -264,7 +264,7 @@ class StartRequest(BaseModel):
     request: str = ""
     keywords: list[str] = []
     subtopics: list[str] = []
-    time_range: str = "2019-2026"
+    time_range: str = ""
     # 遗留兼容字段 (合并计划 §3 / M5: 统一入口不要求用户选模式)。
     # 统一入口 (合并计划 §3 / M5 / G01): **没有模式选择**。旧客户端可能仍带 `mode`
     # 字段, 它会被 Pydantic 忽略 —— 所有研究请求都进同一张团队图。
@@ -282,7 +282,7 @@ class StartRequest(BaseModel):
     source_set_id: str = ""
     source_set_kind: str = "kb"
     # 资料授权策略 (P0-1): user_kb=只用授权资料库; autonomous=只给方向自主检索; both=两者合并
-    source_policy: str = "user_kb"
+    source_policy: str = "both"
     # 上传的"问题说明"附件 (id 来自 POST /api/uploads kind=problem): 文本并入问题陈述
     attachment_ids: list[str] = []
 
@@ -295,6 +295,10 @@ class RespondRequest(BaseModel):
     interrupt_id: str = ""
     # 对象选择器指定的作用对象 (F1-5): 不填时由语义解析决定
     object_id: str = ""
+    # 人工修订的幂等身份。同一 ID 的网络重试不应重复派工；不同 ID 的同类意见可再次派工。
+    feedback_id: str = ""
+    # object=修订具体对象；其他范围由用户显式指定，不对模糊文本擅自猜测。
+    scope: str = "object"
 
 
 class ForkRequest(BaseModel):
@@ -524,8 +528,8 @@ def _knowledge_available_for(spec) -> bool:
 
 
 def _obligation_sort_key(kind: str) -> int:
-    """义务排序优先级 (唯一口径在 `loop.OBLIGATION_PRIORITY`)。"""
-    from src.research.loop import OBLIGATION_PRIORITY
+    """义务排序优先级 (唯一口径在 `research.obligations`)。"""
+    from src.research.obligations import OBLIGATION_PRIORITY
 
     return OBLIGATION_PRIORITY.get(kind, 9)
 
@@ -1466,7 +1470,8 @@ def _team_feedback(store, spec, problem_id: str, team_state: dict,
 
     need, info = feedback_need_for(project_id=project_id, problem_id=problem_id,
                                    text=req.response,
-                                   target_object_id=req.object_id, store=store)
+                                   target_object_id=req.object_id, store=store,
+                                   scope=req.scope)
     if need is None:
         return info
     with TeamRun(project_id=project_id, problem_id=problem_id,
@@ -1480,7 +1485,17 @@ def _team_feedback(store, spec, problem_id: str, team_state: dict,
         result = team.submit_feedback(
             statement=need.statement, owner=need.owner,
             target_ref=(need.blocked_refs[0] if need.blocked_refs else None),
-            why=need.why, acceptance=list(need.acceptance), kind=need.kind)
+            why=need.why, acceptance=list(need.acceptance), kind=need.kind,
+            feedback_id=req.feedback_id, hints=need.hints)
+        if result.get("ok") and not result.get("duplicate"):
+            from src.graph.team_session import ExportError, TeamSession
+
+            try:
+                package = TeamSession(team).export(run_id=team.run_id)
+                result["package_dir"] = str(package) if package else ""
+            except ExportError as error:
+                # 研究意见已施加，不能把“导出失败”伪装成“反馈未处理”。
+                result["export_error"] = str(error)
     result.update({k: v for k, v in info.items() if k != "ok"})
     return result
 

@@ -78,7 +78,8 @@ def escape_latex(text: str) -> str:
 
 
 def render_latex(manuscript: Manuscript, *, author: str = "AI Research Team",
-                 date: str = "", references: dict[str, str] | None = None) -> str:
+                 date: str = "", references: dict[str, str] | None = None,
+                 figures: dict[str, str] | None = None) -> str:
     """把唯一文稿 IR 渲染为可编译的 `.tex`。
 
     只输出**能编译**的构造: `\\ref{}` 只指向本文件里真的 `\\label{}` 过的锚点,
@@ -105,11 +106,15 @@ def render_latex(manuscript: Manuscript, *, author: str = "AI Research Team",
                   r"\end{abstract}", ""]
 
     for section in manuscript.sections:
-        heading = escape_latex(section.heading or "")
+        # Manuscript 的章节名可带作者输入的编号；LaTeX 自己编号，不能出现「1 1 结果」。
+        # 参考文献由下方统一生成，否则模型/离线稿件自带的该章节会再打印一次。
+        if section.role == "references" or "参考文献" in (section.heading or ""):
+            continue
+        heading = escape_latex(_section_heading(section.heading or ""))
         lines.append(f"\\section{{{heading}}}" if heading else r"\section*{}")
         lines.append("")
         for block in section.blocks:
-            lines.extend(_render_block(block, citations))
+            lines.extend(_render_block(block, citations, figures or {}))
         lines.append("")
 
     lines.append(_bibliography(citations, labels))
@@ -117,7 +122,13 @@ def render_latex(manuscript: Manuscript, *, author: str = "AI Research Team",
     return "\n".join(line for line in lines if line is not None)
 
 
-def _render_block(block: Block, citations: dict[str, int]) -> list[str]:
+def _section_heading(value: str) -> str:
+    return re.sub(r"^\s*(?:\d+[.、]?\s+|[一二三四五六七八九十]+[、.]\s*)",
+                  "", value).strip()
+
+
+def _render_block(block: Block, citations: dict[str, int],
+                  figures: dict[str, str]) -> list[str]:
     """一个块 → LaTeX 行 (公式/表格/图引用/正文各按角色排版)。"""
     out: list[str] = []
     text = escape_latex(block.text or "")
@@ -141,8 +152,15 @@ def _render_block(block: Block, citations: dict[str, int]) -> list[str]:
         out.extend(_render_table(block.data))
     for kind, ref in zip(block.ref_kinds, block.refs):
         if kind == RefKind.figure.value and ref.id:
-            # 图文件缺失时如实写"图不可用", 不静默丢弃 (交付包必须与正文一致)
-            out.append(f"% 图引用 {ref.id} (文件见交付包 figures/)")
+            path = figures.get(ref.id, "")
+            # 路径只能由交付层验证后传入；缺文件时正文如实注明，不伪装成有图。
+            if re.fullmatch(r"figures/[A-Za-z0-9_-]+\.png", path):
+                out.extend([r"\begin{figure}[htbp]", r"\centering",
+                            f"\\includegraphics[width=0.85\\textwidth]{{{path}}}",
+                            f"\\caption{{{escape_latex(block.heading or ref.id)}}}",
+                            r"\end{figure}", ""])
+            else:
+                out.append(f"图 {escape_latex(ref.id)} 不可用。")
     return out
 
 
@@ -174,7 +192,7 @@ def _bibliography(citations: dict[str, int], labels: dict[str, str]) -> str:
         return ("\\section*{参考文献}\n"
                 "本次运行没有可引用的可定位来源。检索范围与授权情况见交付清单; "
                 "未命中不等于相关文献不存在。\n")
-    lines = [r"\begin{thebibliography}{99}"]
+    lines = [r"\section*{参考文献}", r"\begin{thebibliography}{99}"]
     for object_id, number in sorted(citations.items(), key=lambda item: item[1]):
         entry = labels.get(object_id) or object_id
         lines.append(f"\\bibitem{{ref{number}}} {escape_latex(str(entry))}")

@@ -23,7 +23,6 @@ from src.research.schemas import (
     ResearchSpec,
     SupportKind,
     ValidationStatus,
-    VerificationRecord,
 )
 from src.research.task_profile import (
     DELIVERABLE_PROFILES,
@@ -128,120 +127,9 @@ def _spec() -> ResearchSpec:
                         problem_statement="分析信道变化对射频指纹可分性的影响")
 
 
-def test_non_design_report_has_no_design_vocabulary():
-    """P0-3 主回归: 通用入口的稿件不得出现组合设计专用内容。"""
-    from src.research.publication_paper import build_publication_paper
-
-    profile = profile_for_deliverables(["full_paper"], ["mechanism", "case_comparison"])
-    manuscript, _ = build_publication_paper(
-        _non_design_snapshot(), "射频指纹", spec=_spec(), profile=profile)
-    text = "\n".join(getattr(block, "text", "") or "" for block in manuscript.blocks)
-
-    for forbidden in ("组合设计", "2-设计", "Bruck", "Fisher 不等式", "计数恒等式",
-                      "射影平面"):
-        assert forbidden not in text, f"非设计类稿件出现领域专用内容: {forbidden}"
-    # 也不得声称"纯数学判定"
-    assert "纯数学判定" not in text
-    assert "不含实验或仿真数据" not in text
-    # 经验类研究必须如实说明未执行部分不构成证据
-    assert "不构成证据" in text or "方案与依据整理" in text
-
-
-def test_design_paper_still_gets_design_vocabulary():
-    """反向保护: 真的设计类研究必须保留原有领域内容 (不能一刀切删掉)。"""
-    from src.research.publication_paper import build_publication_paper
-
-    claim = Claim.model_construct(
-        id="clm-design", statement="2-(211,15,1) 设计不存在", version=1,
-        status=ClaimStatus.supported, coverage=Coverage.target,
-        design_v=211, design_k=15, design_lambda=1, design_verdict="nonexistent",
-        claim_type=ClaimType.definitional,
-        support_kind=SupportKind.theorem_application)
-    snapshot = _snapshot([claim])
-    profile = profile_for_deliverables(["theoretical_conclusion"], ["existence_proof"],
-                                       has_design_parameters=True)
-    manuscript, _ = build_publication_paper(
-        snapshot, "组合设计", spec=_spec(), profile=profile)
-    text = "\n".join(getattr(block, "text", "") or "" for block in manuscript.blocks)
-    assert "组合设计" in text or "2-" in text
-    assert "纯数学判定" in text, "纯形式化研究仍应说明不含实验数据"
-
-
-def test_keywords_gate_blocks_internal_tool_names():
-    """关键词里不得出现内部工具名 (即使研究是设计类)。"""
-    from src.research.publication_paper import build_publication_paper
-
-    claim = Claim.model_construct(
-        id="c", statement="某设计不存在", version=1,
-        status=ClaimStatus.supported, coverage=Coverage.target, design_v=7,
-        design_k=3, design_lambda=1, design_verdict="nonexistent",
-        claim_type=ClaimType.definitional,
-        support_kind=SupportKind.theorem_application)
-    snapshot = _snapshot([claim], [VerificationRecord(
-                                    id="v1", tool="sympy", claim_id="c",
-                                    certificate="design_necessity: Bruck-Ryser-Chowla")])
-    profile = profile_for_deliverables(["theoretical_conclusion"], ["existence_proof"],
-                                       has_design_parameters=True)
-    manuscript, _ = build_publication_paper(snapshot, "t", spec=_spec(),
-                                            profile=profile)
-    keywords = "\n".join(b.text or "" for b in manuscript.blocks if b.kind == "keywords")
-    assert "design_necessity" not in keywords
-    assert "sympy" not in keywords
-
-
 # --------------------------------------------------------------------------
 # 引擎/图侧: 画像真的被用上
 # --------------------------------------------------------------------------
-def test_publication_paper_infers_a_conservative_profile_when_none_given():
-    """旧调用点不传画像时按快照降级推断, 且**不会**硬套领域模板。"""
-    from src.research.publication_paper import build_publication_paper
-
-    manuscript, _ = build_publication_paper(_non_design_snapshot(), "主题",
-                                            spec=_spec())
-    text = "\n".join(b.text or "" for b in manuscript.blocks)
-    assert "组合设计" not in text
-
-
-def test_rendered_manuscript_has_no_design_vocabulary():
-    """端到端 (渲染层): 非设计类稿件排成 Markdown 后同样不得出现设计论内容。
-
-    只断言"稿件的 block 里没有"不够 —— 渲染器可能自己补模板文字 (第 2 节的领域句
-    以前就藏在这一层)。因此这里渲染完整篇再检查。
-    """
-    from src.rag.publication_render import render_publication_markdown
-    from src.research.publication_paper import build_publication_paper
-
-    profile = profile_for_deliverables(["full_paper"], ["mechanism", "case_comparison"])
-    manuscript, _ = build_publication_paper(
-        _non_design_snapshot(), "射频指纹", spec=_spec(), profile=profile)
-    rendered = render_publication_markdown(manuscript)
-    for forbidden in ("组合设计", "2-设计", "Bruck", "Fisher 不等式", "射影平面",
-                      "必要条件核验"):
-        assert forbidden not in rendered, f"渲染后的稿件出现领域专用内容: {forbidden}"
-    assert "纯数学判定" not in rendered
-
-
-def test_engine_side_profile_is_inferred_from_declared_parameters():
-    """理论图这条旧路径按"快照里是否真的声明 (v,k,λ)"降级推断画像。"""
-    from src.research.publication_paper import build_publication_paper
-
-    design_claim = Claim.model_construct(
-        id="c-design", statement="2-(7,3,1) 设计不存在", version=1,
-        status=ClaimStatus.supported, coverage=Coverage.target, design_v=7,
-        design_k=3, design_lambda=1, design_verdict="nonexistent",
-        claim_type=ClaimType.definitional,
-        support_kind=SupportKind.theorem_application)
-    with_design, _ = build_publication_paper(_snapshot([design_claim]), "设计",
-                                             spec=_spec())
-    without_design, _ = build_publication_paper(_non_design_snapshot(), "信道",
-                                                spec=_spec())
-    design_text = "\n".join(b.text or "" for b in with_design.blocks)
-    plain_text = "\n".join(b.text or "" for b in without_design.blocks)
-    assert "组合设计" in design_text or "2-设计" in design_text
-    assert "组合设计" not in plain_text
-    assert "2-设计" not in plain_text
-
-
 def test_task_profile_describe_is_human_readable():
     profile = profile_for_deliverables(["validation_proposal"], ["validation_plan"])
     described = profile.describe()

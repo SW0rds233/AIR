@@ -124,14 +124,15 @@ export function buildClarificationCard(body: any,
   const card = document.createElement('div');
   card.className = 'interrupt-card';
   card.innerHTML = '<div class="it-title">无法唯一定位作用对象</div>' +
-    '<div class="it-hint">' + wbEsc(body.clarify || '请指明该意见针对哪个对象') + '</div>';
+    '<div class="it-hint">' + wbEsc(body.question || body.clarify || '请指明该意见针对哪个对象') + '</div>';
   const picker = buildObjectPicker({ assumptions: {}, claims: {}, steps: {} }, 'clarifyobj');
   const sel = picker.querySelector('select') as HTMLSelectElement;
   sel.innerHTML = '';
   (body.candidates || []).forEach((c: any) => {
     const opt = document.createElement('option');
-    opt.value = c.id;
-    opt.textContent = (OBJECT_KIND_LABEL[c.kind] || c.kind) + ' ' + c.id + ' — ' +
+    const id = String(c.object_id || c.id || '');
+    opt.value = id;
+    opt.textContent = (OBJECT_KIND_LABEL[c.kind] || c.kind) + ' ' + id + ' — ' +
                       String(c.text || '').slice(0, 60);
     sel.appendChild(opt);
   });

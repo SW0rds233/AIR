@@ -213,8 +213,13 @@ class ResearchCommitService:
             writes[(kind, object_id)] = payload
             staged[proposal.proposal_id] = proposal
 
+        # 证据角色只提交“相反来源”的候选关系；真正的科学状态变更在唯一提交口
+        # 与证据关系同事务完成。没有可定位来源、未复核关系或引用了旧命题版本时
+        # 只保留材料，不凭它推翻先前结论。
+        reopened = self._reopen_for_contradictions(writes, events)
+
         # 3b. 核验候选: 按义务处置重算, 并写回义务状态
-        touched_claims: set[str] = {
+        touched_claims: set[str] = set(reopened) | {
             str(payload.get("id", "")) for (kind, _), payload in list(writes.items())
             if kind == "claim" and payload.get("id")
         }
@@ -295,6 +300,76 @@ class ResearchCommitService:
 
         return {"writes": writes, "events": events, "claims": claims,
                 "reasons": reasons}
+
+    def _reopen_for_contradictions(
+        self, writes: dict[tuple[str, str], dict[str, Any]],
+        events: list[tuple[str, dict]],
+    ) -> set[str]:
+        reopened: set[str] = set()
+        for (kind, _), link in list(writes.items()):
+            if kind != "evidence_link" or link.get("relation") != "contradicts":
+                continue
+            if link.get("review_status") != "verified":
+                continue
+            claim_ref, source_ref = link.get("claim_ref") or {}, link.get("source_ref") or {}
+            claim_id, source_id = str(claim_ref.get("id") or ""), str(source_ref.get("id") or "")
+            if not claim_id or not source_id or claim_id in reopened:
+                continue
+            source = writes.get(("evidence", source_id)) or self.store.get("evidence", source_id)
+            if not source or not (link.get("locator") or source.get("locator")
+                                  or source.get("location")):
+                continue
+            claim = self.store.get("claim", claim_id)
+            if not claim or claim.get("status") != "supported":
+                continue
+            # 跨问题来源/命题不能通过一个 link 改写另一项研究的结论。
+            if not self._same_problem(claim) or not self._same_problem(source):
+                continue
+            current_version = self.store.latest_version("claim", claim_id)
+            if int(claim_ref.get("version", 0) or 0) != current_version:
+                events.append(("contradiction_for_old_claim_version", {
+                    "claim_id": claim_id, "source_id": source_id,
+                    "expected": current_version, "found": claim_ref.get("version")}))
+                continue
+            updated = dict(claim)
+            updated.update({"status": "in_progress", "assurance": "unverified",
+                            "support_kind": "none", "coverage": "step",
+                            "validation_status": "unknown", "verification_scope": None,
+                            "verification_closure": {}})
+            updated["notes"] = (str(updated.get("notes") or "") +
+                                f" 相反来源 {source_id} ({link.get('locator') or source.get('locator')})"
+                                " 待重新核验").strip()
+            writes[("claim", claim_id)] = updated
+            for record in _list_latest(self.store, "verification"):
+                if str(record.get("claim_id") or "") != claim_id or record.get("stale"):
+                    continue
+                changed = dict(record)
+                changed["stale"] = True
+                changed["raw_output"] = (str(changed.get("raw_output") or "") +
+                                         f" | 相反来源 {source_id} 触发重验").strip()
+                writes[("verification", str(record["id"]))] = changed
+            for obligation in _list_latest(self.store, "obligation"):
+                if (str(obligation.get("claim_id") or "") != claim_id or
+                        not obligation.get("required", True) or
+                        obligation.get("status") != "closed"):
+                    continue
+                changed = dict(obligation)
+                changed["status"] = "open"
+                changed["validation_status"] = "unchecked"
+                writes[("obligation", str(obligation["id"]))] = changed
+            reopened.add(claim_id)
+            events.append(("evidence_contradiction_reopened", {
+                "claim_id": claim_id, "source_id": source_id,
+                "claim_version": current_version,
+                "reason": "可定位相反来源需重新核验义务与结论"}))
+        return reopened
+
+    def _same_problem(self, payload: dict[str, Any]) -> bool:
+        scope = payload.get("_scope") or {}
+        project = str(scope.get("project_id") or payload.get("project_id") or "")
+        problem = str(scope.get("problem_id") or payload.get("problem_id") or "")
+        return ((not project or project == self.project_id) and
+                (not problem or problem == self.problem_id))
 
     # ---- 读取辅助 (只在本事务的写入集与存储之间取值) ----
     def _obligation_for(self, obligation_id: str,

@@ -29,6 +29,10 @@ export interface SessionStreamDeps {
   onTransport?(state: 'connecting' | 'online' | 'reconnecting' | 'closed', detail?: string): void;
   /** 当前线程 (断线补偿与重连只对它生效)。 */
   currentThreadId(): string;
+  /** 游标只存在于统一 research store；键为 SSE 端点的 thread_id。 */
+  getCursor(threadId: string): number;
+  recordCursor(threadId: string, seq: number): void;
+  onGap?(threadId: string, previous: number, incoming: number): void;
   /** 断线补偿: 服务端会话状态 → 页面状态。 */
   onCompensate(status: string): void;
   /** 断线且等待输入时的提示/状态切换。 */
@@ -55,8 +59,6 @@ export function createSessionStream(deps: SessionStreamDeps): SessionStream {
   let current: string | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let attempts = 0;
-  /** 会话级游标 (旧实现是全局游标: 切换会话会串号, 见 §9.4)。 */
-  const cursors: Record<string, number> = {};
 
   function clearTimer() {
     if (reconnectTimer !== null) {
@@ -95,7 +97,7 @@ export function createSessionStream(deps: SessionStreamDeps): SessionStream {
     clearTimer();
     if (es) { es.close(); es = null; }
     current = tid;
-    const cursor = cursors[tid] || 0;
+    const cursor = deps.getCursor(tid) || 0;
     // SSE 端点同样取自 api/ 层的端点表 (游标作为查询参数), 事件层不自己拼 URL。
     const endpoint = new URL(ENDPOINTS.sessionEvents(tid), 'http://local');
     if (cursor) endpoint.searchParams.set('last_event_id', String(cursor));
@@ -109,11 +111,19 @@ export function createSessionStream(deps: SessionStreamDeps): SessionStream {
       deps.onTransport?.('online');
     };
     source.onmessage = (e: any) => {
-      if (e.lastEventId) {
-        const next = parseInt(e.lastEventId) || 0;
-        if (next) cursors[tid] = next;
+      // EventSource.close() 后仍可能有一个已排队的旧会话回调；不得更新当前页。
+      if (es !== source || current !== tid || deps.currentThreadId() !== tid) return;
+      try {
+        const payload = JSON.parse(e.data);
+        const previous = deps.getCursor(tid) || 0;
+        const next = Number.parseInt(e.lastEventId || '', 10) || 0;
+        if (next && next <= previous) return; // 重连回放的重复事件
+        if (previous && next > previous + 1) deps.onGap?.(tid, previous, next);
+        deps.handleEvent(payload);
+        if (next) deps.recordCursor(tid, next);
+      } catch (err) {
+        deps.onTransport?.('reconnecting', '事件无法解析，等待重连补偿');
       }
-      try { deps.handleEvent(JSON.parse(e.data)); } catch (err) {}
     };
     // F2: 断线不能静默 —— 先查会话状态做补偿, 再重连并回放缺失事件。
     // 补偿查询也走统一客户端 (§9.5): 但**不重试**(这里本身就是重连路径, 叠加重试
@@ -140,7 +150,7 @@ export function createSessionStream(deps: SessionStreamDeps): SessionStream {
   return {
     connect,
     close,
-    lastEventId: (threadId: string) => cursors[String(threadId || '')] || 0,
+    lastEventId: (threadId: string) => deps.getCursor(String(threadId || '')) || 0,
     isOpen: () => Boolean(es),
   };
 }

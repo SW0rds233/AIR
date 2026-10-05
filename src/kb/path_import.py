@@ -404,9 +404,20 @@ def _iter_candidates(raw: str, request: ScanRequest) -> tuple[list[Path], list[s
     # 通配便利能力: 语义与"目录递归"一致, 只是写法更短
     if any(ch in text for ch in "*?["):
         base = Path(text)
-        anchor = base.anchor or "."
+        # 从第一个通配段之前的**最长字面路径**开始枚举。原实现从磁盘根
+        # (Windows 的 C:\\) glob，不仅慢，还会在受限环境被拒绝，并触碰
+        # 用户没有授权扫描的目录。
+        literal_parts: list[str] = []
+        for part in base.parts:
+            if any(char in part for char in "*?["):
+                break
+            literal_parts.append(part)
+        prefix = Path(*literal_parts) if literal_parts else Path(".")
+        resolved_prefix = prefix.resolve()
+        if _root_of(resolved_prefix, request.roots()) is None:
+            return [], [f"通配 {display_path(text)!r} 的起始目录不在授权根内，需显式放行"]
         try:
-            matches = sorted(Path(anchor).glob(str(base.relative_to(anchor))))
+            matches = sorted(prefix.glob(str(base.relative_to(prefix))))
         except Exception as e:  # noqa: BLE001
             return [], [f"通配 {display_path(text)!r} 无法展开: {e}"]
         files = [m for m in matches if m.is_file()]

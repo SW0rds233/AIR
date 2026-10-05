@@ -928,8 +928,14 @@ class ResearchNeed(BaseModel):
         "2 条…"), 拿它当键会让同一条需求每轮都变成新任务, 主控于是反复派工直到烧光
         预算 (实测过)。需求类型 + 角色才是"这件事"的身份; 措辞只作为任务描述。
         """
-        return idempotency_key_for(project_id, problem_id, 0, self.owner,
-                                   f"need:{self.kind.value}")
+        # 系统自动发现的同类缺口应合并；人工连续提出的两次不同修订却不能合并。
+        # 由客户端给出的 feedback_id 同时是网络重试的幂等键。
+        feedback_id = str(self.hints.get("feedback_id", "") or "")
+        trigger_id = str(self.hints.get("trigger_id", "") or "")
+        identity = (f"human:{feedback_id}" if feedback_id else
+                    f"trigger:{trigger_id}" if trigger_id else
+                    f"need:{self.kind.value}")
+        return idempotency_key_for(project_id, problem_id, 0, self.owner, identity)
 
     def to_dict(self) -> dict[str, Any]:
         return {

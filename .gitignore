@@ -16,6 +16,9 @@ build/
 # 虚拟环境
 venv/
 .venv/
+.venv_codex/
+.uv_cache/
+.uv_python/
 
 # ChromaDB 向量库
 data/chroma/

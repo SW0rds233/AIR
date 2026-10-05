@@ -52,10 +52,7 @@ from src.publication.schemas import (
 __all__ = [
     "WritingAgent",
     "build_packet_from_context",
-    "manuscript_from_snapshot",
     "render_markdown",
-    "to_publication_manuscript",
-    "write_main_manuscript",
 ]
 
 
@@ -170,13 +167,30 @@ class WritingAgent(AgentBase):
             f"- id={c.get('id')}@{c.get('version')} [{c.get('status', '')}] "
             f"{clip(str(c.get('statement', '')), 200)}"
             for c in packet.claims[:30])
+        from src.research.design_feasibility import render_certificate_chain
+
+        verification_lines: list[str] = []
+        for record in packet.verifications[:20]:
+            if record.get("stale") or record.get("validation_status") != "verified":
+                continue
+            certificate = (record.get("arguments") or {}).get("design_report")
+            if isinstance(certificate, dict) and certificate:
+                verification_lines.append(
+                    f"- claim={record.get('claim_id')} verification={record.get('id')}\n"
+                    + clip(render_certificate_chain(certificate), 2200))
+            else:
+                verification_lines.append(
+                    f"- claim={record.get('claim_id')} verification={record.get('id')} "
+                    f"tool={record.get('tool')} certificate={record.get('certificate') or '(无)'}")
         prompt = (
             f"# 研究任务\n{packet.main_question or packet.original_request}\n"
             f"# 子问题类型\n{', '.join(packet.subquestion_kinds) or '(未识别)'}\n"
             f"# 交付形态\n{', '.join(packet.deliverables) or '(未指定)'}\n"
             f"# 可用来源 (只能引用这些 id)\n{source_lines or '(没有可引用来源)'}\n"
             f"# 结论与版本\n{claim_lines or '(还没有结论)'}\n"
-            f"# 未决项\n" + "\n".join(f"- {u}" for u in packet.unresolved[:15])
+            f"# 已核验的推导/定理应用 (写入结论时必须交代关键条件与输入，不得只复述结论)\n"
+            + ("\n".join(verification_lines) or "(无已核验证书)") + "\n"
+            + "# 未决项\n" + "\n".join(f"- {u}" for u in packet.unresolved[:15])
             + f"\n# 上下文\n{context_summary(context)}"
         )
         llm = runtime.llm(task, usage, stage="writing")
@@ -212,10 +226,13 @@ class WritingAgent(AgentBase):
         # 没有明文摘要的稿件过不了出版门槛 ("缺少摘要"), 而用模型润色出来的摘要又会把
         # "候选"说成"结论" —— 因此这里由已登记对象直接生成 (零 LLM)。
         manuscript.abstract = _abstract_of(packet)
+        from src.utils.file_utils import derive_topic
+
         intro = Section(heading="1 引言", role="introduction")
         intro.blocks.append(Block(
             role=BlockRole.background,
-            text=f"本文研究以下问题: {clip(packet.main_question or packet.original_request, 800)}",
+            text=(f"本文研究{derive_topic(packet.main_question or packet.original_request)}。"
+                  "原始题面与完整约束保存在交付包的输入快照中。"),
             input_versions=dict(packet.input_versions),
         ))
         if packet.subquestion_kinds:
@@ -288,6 +305,30 @@ class WritingAgent(AgentBase):
                         text="依据: " + "; ".join(clip(r, 200) for r in reasoning[:6]),
                         input_versions=dict(packet.input_versions),
                     ))
+                from src.research.design_feasibility import render_certificate_chain
+
+                for record in packet.verifications:
+                    if (str(record.get("claim_id", "")) != claim_id
+                            or record.get("stale")
+                            or record.get("validation_status") != "verified"):
+                        continue
+                    certificate = (record.get("arguments") or {}).get("design_report")
+                    if not isinstance(certificate, dict) or not certificate:
+                        continue
+                    proof = Block(
+                        role=BlockRole.certificate,
+                        heading="必要条件与判定链",
+                        text=render_certificate_chain(certificate),
+                        input_versions=dict(packet.input_versions),
+                    )
+                    proof.add_ref(RefKind.claim.value,
+                                  ObjectRef(id=claim_id,
+                                            version=int(claim.get("version", 1) or 1)))
+                    if record.get("id"):
+                        proof.add_ref(RefKind.verification.value,
+                                      ObjectRef(id=str(record["id"]),
+                                                version=int(record.get("version", 1) or 1)))
+                    result_section.blocks.append(proof)
         else:
             result_section.blocks.append(Block(
                 role=BlockRole.limitation,
@@ -374,8 +415,19 @@ class WritingAgent(AgentBase):
             if block.role == BlockRole.claim and not block.refs \
                     and not block.needs_check:
                 problems.append(f"结论块 {block.block_id} 没有依据也未标为待核查")
-            if _overclaims(block.text):
+            if block.role in (BlockRole.claim, BlockRole.reasoning) and _overclaims(block.text):
                 problems.append(f"块 {block.block_id} 含越权措辞 (需改为条件性表述或补证书)")
+        full_text = _manuscript_text(manuscript)
+        for record in packet.verifications:
+            if record.get("stale") or record.get("validation_status") != "verified":
+                continue
+            certificate = (record.get("arguments") or {}).get("design_report")
+            if not isinstance(certificate, dict):
+                continue
+            for item in certificate.get("evidence") or []:
+                theorem = str(item.get("theorem") or "")
+                if item.get("result") is False and theorem and theorem not in full_text:
+                    problems.append(f"结论 {record.get('claim_id')} 缺少必要条件 {theorem} 的判定链")
         return problems
 
     # ---- 需求 ----
@@ -403,6 +455,13 @@ class WritingAgent(AgentBase):
                 why="结论强度必须与证书一致",
                 acceptance=["给出证书或把表述降为条件性"],
             ))
+        if any("缺少必要条件" in p for p in problems):
+            needs.append(ResearchNeed(
+                kind=NeedKind.manuscript_revision,
+                statement="正文遗漏了已核验证书中的关键必要条件与输入",
+                why="只写结论不足以构成可复核的论文论证",
+                acceptance=["正文写明具名定理、适用条件、输入参数与推导结论"],
+            ))
         return needs
 
 
@@ -419,7 +478,9 @@ def _abstract_of(packet: WritingPacket) -> str:
                if str(c.get("status", "")) in ("supported", "refuted")]
     pending = [c for c in packet.claims
                if str(c.get("status", "")) not in ("supported", "refuted")]
-    parts = [f"本文研究: {clip(packet.main_question or packet.original_request, 400)}。"]
+    from src.utils.file_utils import derive_topic
+
+    parts = [f"本文研究{derive_topic(packet.main_question or packet.original_request)}。"]
     if settled:
         for claim in settled[:3]:
             status = "已确证" if str(claim.get("status")) == "supported" else "已被反例否决"
@@ -520,12 +581,19 @@ def finalise_manuscript(manuscript: Manuscript, packet: WritingPacket,
             if claim_id and claim_id not in text:
                 block.text = f"[{claim_id}] " + text
                 text = block.text
+        if block.role == BlockRole.claim and not existing:
+            # 模型偶尔把“因此可化为…/下一步…”一类过渡推理标成结论块。
+            # 没有已登记结论引用时不能凭语义猜测归属，否则追溯检查会被伪造的
+            # claim→block 关联蒙混过去。保留原文，降为待核查推理段。
+            block.role = BlockRole.reasoning
+            block.needs_check = True
+            notes.append(f"未绑定结论的块 {block.block_id} 已降为待核查推理段")
 
     # 编造引用检测: 正文里的 [n] 必须在文献表里存在
     listed = _reference_numbers(manuscript)
     cited = {int(n) for n in re.findall(r"\[(\d+)\]", _manuscript_text(manuscript))}
     dangling = sorted(n for n in cited if n not in listed and n <= max_citations)
-    if dangling and packet.sources:
+    if dangling:
         notes.append(f"正文引用了文献表之外的编号 {dangling}: 按未决项处理, 不当作已核实引用")
         manuscript.gaps.append({
             "kind": "unresolved_citation",
@@ -575,9 +643,6 @@ def _title_of(packet: WritingPacket) -> str:
     first = raw.splitlines()[0] if raw else "研究报告"
     cleaned = first.lstrip("#").strip().strip("*_`").strip()
     return clip(cleaned or "研究报告", 200)
-    question = packet.main_question or packet.original_request or "研究报告"
-    first = re.split(r"[。\n]", question.strip())[0]
-    return clip(first, 80) or "研究报告"
 
 
 _OVERCLAIM_MARKERS = ("已证明", "已经证明", "严格证明", "证明了", "qed", "QED",
@@ -598,6 +663,20 @@ def _manuscript_from_payload(payload: dict[str, Any],
                             abstract=str(payload.get("abstract") or ""),
                             snapshot_id=packet.snapshot_id,
                             input_versions=dict(packet.input_versions))
+    ref_kinds = {
+        **{str(row.get("id", "")): RefKind.claim.value
+           for row in packet.claims if row.get("id")},
+        **{str(row.get("id", "")): RefKind.obligation.value
+           for row in packet.obligations if row.get("id")},
+        **{str(row.get("id", "")): RefKind.model.value
+           for row in packet.models if row.get("id")},
+        **{str(row.get("id", "")): RefKind.verification.value
+           for row in packet.verifications if row.get("id")},
+        **{str(row.get("id", "")): RefKind.figure.value
+           for row in packet.figures if row.get("id")},
+        **{str(row.get("source_id") or row.get("id") or ""): RefKind.source.value
+           for row in packet.sources if row.get("source_id") or row.get("id")},
+    }
     for index, section_payload in enumerate(sections_payload, 1):
         if not isinstance(section_payload, dict):
             continue
@@ -618,9 +697,15 @@ def _manuscript_from_payload(payload: dict[str, Any],
                           needs_check=bool(block_payload.get("needs_check", False)),
                           input_versions=dict(packet.input_versions))
             for ref_id in as_list_of_str(block_payload.get("ref_ids")):
-                kind = (RefKind.claim.value
-                        if ref_id in {str(c.get("id", "")) for c in packet.claims}
-                        else RefKind.source.value)
+                kind = ref_kinds.get(ref_id)
+                if kind is None:
+                    block.needs_check = True
+                    manuscript.gaps.append({
+                        "kind": "unknown_reference",
+                        "detail": f"正文块 {block.block_id} 提及未登记的对象 {ref_id}",
+                        "blocking": False,
+                    })
+                    continue
                 block.add_ref(kind, ObjectRef(id=ref_id))
             section.blocks.append(block)
         if section.blocks:
@@ -644,7 +729,16 @@ def build_packet_from_context(task: AgentTask, context: ContextPack) -> WritingP
     models = context.objects.get("model") or []
     validations = context.objects.get("validation_plan") or []
     verification = context.objects.get("verification") or []
-    unresolved: list[str] = list(brief.get("unknown_fields") or [])
+    unknown_descriptions = {
+        "quantifiers": "题目中的量词或适用范围尚需确认。",
+        "main_question": "核心研究问题尚需用户确认。",
+        "source_set_ids": "未绑定用户资料库；若需核对定理出处或相关研究，请授权资料范围。",
+        "subquestions_from_model": "子问题由模型拆解，尚需核对拆解是否符合研究意图。",
+    }
+    unresolved: list[str] = [
+        unknown_descriptions.get(str(field), f"待确认的输入字段：{field}")
+        for field in (brief.get("unknown_fields") or [])
+    ]
     for row in context.objects.get("gap") or []:
         unresolved.append(clip(str(row.get("statement", "")), 300))
     return WritingPacket(
@@ -655,7 +749,8 @@ def build_packet_from_context(task: AgentTask, context: ContextPack) -> WritingP
                            if isinstance(s, dict)],
         deliverables=as_list_of_str(brief.get("deliverables")),
         output_language=str(brief.get("output_language") or ""),
-        claims=claims, models=models, validations=validations, verifications=verification,
+        claims=claims, models=models, obligations=context.objects.get("obligation") or [],
+        validations=validations, verifications=verification,
         sources=evidence,
         figures=context.objects.get("figure") or [],
         review_issues=[i for r in context.upstream for i in (r.get("issues") or [])],
@@ -666,7 +761,8 @@ def build_packet_from_context(task: AgentTask, context: ContextPack) -> WritingP
     )
 
 
-def render_markdown(manuscript: Manuscript) -> str:
+def render_markdown(manuscript: Manuscript, *,
+                    figures: dict[str, str] | None = None) -> str:
     """把稿件渲染为 Markdown (保守: 不执行任何来源文本, 编号在渲染时分配)。"""
     from src.publication.schemas import assign_render_numbers
 
@@ -694,191 +790,12 @@ def render_markdown(manuscript: Manuscript) -> str:
             if marks:
                 lines.append("依据: " + " ".join(marks))
                 lines.append("")
+            for kind, ref in zip(block.ref_kinds, block.refs):
+                if kind != RefKind.figure.value or not ref.id:
+                    continue
+                path = (figures or {}).get(ref.id, "")
+                if path:
+                    lines += [f"![{block.heading or ref.id}]({path})", ""]
+                else:
+                    lines += [f"图 {ref.id} 不可用。", ""]
     return "\n".join(lines).strip() + "\n"
-
-
-# ----------------------------------------------------------------------
-# 主文统一入口 (合并计划 §7.3: 退役"双正文"主路径)
-# ----------------------------------------------------------------------
-_ROLE_BY_KIND: dict[str, BlockRole] = {
-    "heading": BlockRole.transition,
-    "prose": BlockRole.reasoning,
-    "equation": BlockRole.certificate,
-    "proof": BlockRole.certificate,
-    "theorem": BlockRole.claim,
-    "lemma": BlockRole.claim,
-    "proposition": BlockRole.claim,
-    "corollary": BlockRole.claim,
-    "citation": BlockRole.evidence,
-    "figure": BlockRole.figure_ref,
-    "table": BlockRole.table,
-}
-
-#: 这些块类型承载"结论文本", 其 label 就是快照里的命题 id。
-CLAIM_KINDS = frozenset({"theorem", "lemma", "proposition", "corollary"})
-
-
-def manuscript_from_snapshot(snapshot: Any, topic: str = "",
-                             delivery_level: str = "") -> tuple[Any, dict[str, str]]:
-    """由冻结快照确定性起草正文 (零 LLM), 返回 (快照稿件, 写作映射)。
-
-    这是 WritingAgent 的**降级路径**: 无 LLM、调用失败或输出不可解析时走它。
-    它保证"可交付骨架 + 完整追溯": 每段都来自一条已登记对象, 不生成新论断。
-
-    返回的是快照渲染器的稿件对象 (`rag.theory_render.Manuscript`): 它与现有交付链
-    (Markdown/LaTeX 渲染、可反查性检查) 直接兼容, 因此离线交付**逐字不变**。
-    需要出版块表示时用 `to_publication_manuscript()` 转换。
-    """
-    from src.agents.theory_writer import build_manuscript as _snapshot_render
-
-    legacy = _snapshot_render(snapshot, topic, delivery_level=delivery_level)
-    return legacy, dict(getattr(legacy, "writing_map", {}) or {})
-
-
-def to_publication_manuscript(snapshot_manuscript: Any, snapshot: Any = None
-                              ) -> Manuscript:
-    """把快照渲染的稿件转成出版块表示 (供团队/追溯视图与产物级校对使用)。
-
-    转换只改变表示, 不改变文本: 每个块的 `text` 逐字保留, 结论块的 label (命题 id)
-    变成 `claim` 引用, 于是"从段落回到冻结快照对象"在两种表示下都成立。
-    """
-    manuscript = Manuscript(
-        title=str(getattr(snapshot_manuscript, "title", "") or ""),
-        version=1,
-        snapshot_id=str(getattr(snapshot, "snapshot_id", "") or ""),
-        input_versions={
-            str(getattr(c, "id", "")): int(getattr(c, "version", 1) or 1)
-            for c in getattr(snapshot, "claims", []) if getattr(c, "id", "")},
-    )
-    section = Section(heading="正文", role="result")
-    # **块锚点必须确定性**: `Block.block_id` 默认是随机 id, 于是"同一份冻结快照渲染两次"
-    # 会得到不同的正文锚点 —— 离线交付不再是可复现的 (同一输入两次产物不同), 版本之间
-    # 也无法按锚点对齐。这里按**位置**给稳定 id (文档序), 只对"由快照确定性渲染"这条
-    # 路径负责; 模型起草的稿件保留它自己的 id (内容本来就不同)。
-    position = 0
-    for block in getattr(snapshot_manuscript, "blocks", []):
-        kind = str(getattr(block, "kind", "") or "prose")
-        text = str(getattr(block, "text", "") or "")
-        label = str(getattr(block, "label", "") or "")
-        title = str(getattr(block, "title", "") or "")
-        if kind == "heading":
-            if section.blocks:
-                manuscript.sections.append(section)
-            section = Section(heading=text or "正文", role="")
-            continue
-        chunk = Block(role=_ROLE_BY_KIND.get(kind, BlockRole.reasoning),
-                      heading=title, text=text,
-                      block_id=f"blk-{position}",
-                      input_versions=dict(manuscript.input_versions))
-        position += 1
-        if kind == "equation":
-            chunk.math = text
-            chunk.text = ""
-        if label and kind in CLAIM_KINDS:
-            chunk.add_ref(RefKind.claim.value, ObjectRef(id=label))
-        section.blocks.append(chunk)
-    if section.blocks:
-        manuscript.sections.append(section)
-    return manuscript
-
-
-def write_main_manuscript(
-    snapshot: Any,
-    topic: str = "",
-    delivery_level: str = "",
-    *,
-    task: AgentTask | None = None,
-    context: ContextPack | None = None,
-    runtime: AgentRuntime | None = None,
-    usage: UsageRecord | None = None,
-    agent: WritingAgent | None = None,
-) -> tuple[Any, str, dict[str, str], str]:
-    """**唯一的正文生产入口** (合并计划 §7.3: 退役"双正文"主路径)。
-
-    返回 `(稿件, Markdown, writing_map, note)`, 其中稿件是
-    `rag.theory_render.Manuscript` —— 交付链 (LaTeX 渲染、可反查性检查) 只认这一种。
-
-    两种执行方式, 同一个生产者:
-    - 有 LLM 与运行时 → WritingAgent 起草 (提示词要求逐段给出依据对象 id),
-      再把出版块稿件**复原成**快照稿件表示;
-    - 无 LLM (离线/未授权) 或模型输出不可解析/调用失败 → 由冻结快照确定性起草,
-      输出与旧渲染器**逐字一致**, 降级原因写进 `note`。
-
-    这样"离线复现"与"模型起草"不会退化成两套实现: 前者就是后者的降级路径。
-    """
-    writer = agent or WritingAgent()
-    reasons: list[str] = []
-    if runtime is not None and task is not None and context is not None:
-        try:
-            if runtime.llm_available():
-                packet = build_packet_from_context(task, context)
-                drafted, parse_note = writer._draft_with_llm(  # noqa: SLF001 - 同一模块内复用
-                    task, context, runtime, usage or UsageRecord(), packet)
-                if drafted is not None:
-                    legacy = _snapshot_manuscript_from_blocks(drafted)
-                    unified = to_publication_manuscript(legacy, snapshot)
-                    # **Markdown 与 LaTeX 从同一份稿件出来** (§3.3 G17): 此前 Markdown
-                    # 走旧快照 IR, 而交付的 .tex/.pdf 走唯一 IR —— 同一次运行的两份产物
-                    # 来自两种表示, "同源同版"只能靠人工比。现在两者都是 `Manuscript`。
-                    return (unified, render_markdown(unified),
-                            _writing_map_of(drafted), "由写作智能体起草 (LLM)")
-                if parse_note:
-                    reasons.append(parse_note)
-        except Exception as e:  # noqa: BLE001 - 写作失败必须降级而不是中断交付
-            reasons.append(f"写作智能体调用失败: {type(e).__name__}: {e}")
-
-    manuscript, writing_map = manuscript_from_snapshot(snapshot, topic, delivery_level)
-    unified = to_publication_manuscript(manuscript, snapshot)
-    note = "确定性起草 (由冻结快照渲染, 未经过写作模型润色)"
-    if reasons:
-        note += "; 降级原因: " + "; ".join(reasons)
-    return unified, render_markdown(unified), writing_map, note
-
-
-def _snapshot_manuscript_from_blocks(manuscript: Manuscript) -> Any:
-    """把 WritingAgent 的出版块稿件**复原**为快照稿件表示 (交付链的唯一输入)。"""
-    from src.rag.theory_render import Block as SnapshotBlock
-    from src.rag.theory_render import Manuscript as SnapshotManuscript
-
-    _kind_by_role = {
-        BlockRole.claim.value: "proposition",
-        BlockRole.certificate.value: "prose",
-        BlockRole.evidence.value: "prose",
-        BlockRole.definition.value: "prose",
-        BlockRole.method.value: "prose",
-        BlockRole.limitation.value: "prose",
-        BlockRole.background.value: "prose",
-        BlockRole.transition.value: "prose",
-        BlockRole.figure_ref.value: "prose",
-        BlockRole.table.value: "prose",
-        BlockRole.reasoning.value: "prose",
-    }
-    out = SnapshotManuscript(title=manuscript.title or "",
-                             writing_map=_writing_map_of(manuscript))
-    for section in manuscript.sections:
-        out.blocks.append(SnapshotBlock("heading", section.heading or "正文"))
-        for block in section.blocks:
-            kind = _kind_by_role.get(block.role.value, "prose")
-            label = ""
-            for ref_kind, ref in zip(block.ref_kinds, block.refs):
-                if ref_kind == RefKind.claim.value:
-                    label = ref.id
-                    break
-            text = block.text or (f"$$ {block.math} $$" if block.math else "")
-            out.blocks.append(SnapshotBlock(kind, text, label=label,
-                                            title=block.heading or ""))
-    return out
-
-
-def _writing_map_of(manuscript: Manuscript) -> dict[str, str]:
-    """从**已生成的稿件**反推 writing_map (claim id → 正文锚点)。
-
-    锚点取块的 `block_id`: 渲染器把它写进正文, 因此"锚点必须出现在正文里"
-    这条可反查判据对模型起草同样成立。
-    """
-    mapping: dict[str, str] = {}
-    for block in manuscript.all_blocks():
-        for kind, ref in zip(block.ref_kinds, block.refs):
-            if kind == RefKind.claim.value and ref.id not in mapping:
-                mapping[ref.id] = block.block_id
-    return mapping

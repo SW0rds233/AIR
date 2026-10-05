@@ -123,7 +123,7 @@ describe('统一入口 (start)', () => {
     // 统一载荷: 这些字段不再取决于"用户选了哪种模式"
     expect(payload.project_id).toBe('proj-draft');
     expect(payload.problem_id).toBe('problem');
-    expect(payload.source_policy).toBe('user_kb');
+    expect(payload.source_policy).toBe('both');
     expect(payload.attachment_ids).toEqual([]);
     expect(payload.max_actions).toBe(40);
     expect(payload.max_tool_calls).toBe(60);
