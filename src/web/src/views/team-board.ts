@@ -168,6 +168,7 @@ export function renderTaskRow(task: TeamTaskRow): string {
     `<td>${statusBadge(status)}</td>` +
     `<td>${esc(task.objective)}` +
     (task.subquestion ? `<div class="wb-note">子问题: ${esc(task.subquestion)}</div>` : '') +
+    (task.summary ? `<div class="task-summary">阶段成果: ${esc(task.summary)}</div>` : '') +
     (task.failureReason ? `<div class="wb-note warn">原因: ${esc(task.failureReason)}</div>` : '') +
     '</td>' +
     `<td class="mono">${task.attempt > 1 ? `第 ${esc(task.attempt)} 次` : '首次'}</td>` +

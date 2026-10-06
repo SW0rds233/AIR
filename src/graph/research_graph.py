@@ -229,7 +229,7 @@ class TeamRun:
         self.attachment_text = attachment_text
         self.source_set_ids = [s for s in source_set_ids if s]
         self.source_policy = source_policy
-        self.autonomous_retrieval = autonomous_retrieval
+        self.autonomous_retrieval = source_policy in {"both", "autonomous"}
         self.outcome = TeamRunOutcome(run_id=self.run_id)
         self._context_builder: Callable[[AgentTask, dict[str, Any]],
                                         ContextPack] | None = None
@@ -292,25 +292,48 @@ class TeamRun:
         `problem_id` 找规格。团队路径此前不写规格, 于是同一个项目在团队模式下
         "没有研究问题" —— 界面读不到任何对象, 只读端点直接 404, 尽管对象就在库里。
 
-        **不覆盖已有规格**: 规格是冻结的输入契约 (可能是理论路径或上一次运行写的),
-        覆盖它等于悄悄改掉"这次研究的问题定义"。
+        已确认规格不覆盖。仅对同一请求的未确认空模板补全附件题面，并保存新版本。
         """
         from src.research.schemas import SourcePolicy
         from src.research.store import KIND_SPEC
 
         try:
-            if self.task_store.store.get(KIND_SPEC, self.problem_id):
-                return
+            previous = self.task_store.store.get(KIND_SPEC, self.problem_id)
+            if previous:
+                frozen = (previous.get("contract") or {}).get("frozen_version", 0)
+                empty_template = (not previous.get("confirmed") and not frozen
+                    and not str(previous.get("problem_statement") or "").strip()
+                    and str(previous.get("original_request") or "") == self.request
+                    and str(previous.get("direction") or "").strip() in ("", self.request.strip())
+                    and bool(self.attachment_text.strip()))
+                if not empty_template:
+                    return
             from src.research.question_planner import build_spec_from_input
 
+            from src.research.query_planner import research_question_text
+            question = research_question_text("\n".join([self.request, self.attachment_text]))
             spec = build_spec_from_input(
-                request=self.request, topic="", project_id=self.project_id,
+                request=question, topic="", project_id=self.project_id,
                 problem_id=self.problem_id)
+            spec.original_request = self.request
+            if previous:
+                spec.version = int(previous.get("version") or 1) + 1
+            if not spec.problem_statement:
+                spec.problem_statement = question
             spec.source_set_id = (self.source_set_ids[0] if self.source_set_ids else "")
             try:
                 spec.source_policy = SourcePolicy(self.source_policy)
             except ValueError:
                 spec.source_policy = SourcePolicy.user_kb
+            brief = getattr(getattr(self, "loop", None), "brief", None)
+            if brief is not None:
+                spec.objects = list(brief.objects)
+                spec.variables = list(brief.variables)
+                spec.quantifiers = brief.quantifiers
+                spec.user_constraints = list(brief.constraints)
+                spec.success_conditions = list(brief.success_conditions)
+            if not spec.domain:
+                spec.unknown_fields.append("domain: 尚未明确登记学科/变量域")
             self.task_store.store.put(KIND_SPEC, self.problem_id,
                                       spec.model_dump(mode="json"))
             self.runtime.emit("spec_persisted", {
@@ -358,7 +381,8 @@ class TeamRun:
                                           "brief": brief.to_dict()})
         self.runtime.emit("plan_ready", {"plan_id": plan.plan_id,
                                          "version": plan.version,
-                                         "tasks": plan.task_ids()})
+                                         "tasks": plan.task_ids(),
+                                         "task_details": [dict(row) for row in plan.tasks]})
         return brief
 
     def step(self) -> bool:
@@ -503,7 +527,7 @@ class TeamRun:
         try:
             assessment = assess_delivery(
                 store, project_id=self.project_id, problem_id=self.problem_id,
-                run_id=self.run_id, manuscript_md=manuscript_markdown(store),
+                run_id=self.run_id, manuscript_md=manuscript_markdown(store, problem_id=self.problem_id),
                 compile_status="deferred",
                 on_skip=lambda payload: self.runtime.emit(
                     "snapshot_export_incomplete", payload))
@@ -681,7 +705,8 @@ class TeamRun:
             brief_getter=lambda: self.outcome.brief,
             object_source=lambda kind: slim_object_rows(
                 self.projection.rows(kind) if hasattr(self.projection, "rows")
-                else object_rows(self.projection.store, kind)),
+                else object_rows(self.projection.store, kind),
+                text_limit=6000 if kind in {"manuscript", "model", "claim", "evidence"} else 600),
             source_sets=source_sets,
             request=self.request,
             attachments=self.attachments,
@@ -1066,6 +1091,7 @@ def _slim_sections(sections: list[Any], text_limit: int) -> list[dict[str, Any]]
             "needs_check": b.get("needs_check", False), "math": b.get("math", ""),
         } for b in (section.get("blocks") or []) if isinstance(b, dict)]
         out.append({"heading": section.get("heading", ""),
+                    "level": section.get("level", 1),
                     "role": section.get("role", ""), "blocks": blocks})
     return out
 

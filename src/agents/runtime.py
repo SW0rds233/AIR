@@ -195,13 +195,9 @@ class ToolSpec:
         """包装为 LangChain StructuredTool (供 bind_tools 使用)。"""
         from langchain_core.tools import StructuredTool
 
-        def _call(**kwargs):
-            return self.fn(**kwargs)
-
         return StructuredTool.from_function(
-            func=_call, name=self.name,
+            func=self.fn, name=self.name,
             description=self.description or self.name,
-            args_schema=None,
         )
 
     def render(self, result: Any) -> str:
@@ -310,7 +306,7 @@ class ToolLoop:
             usage: UsageRecord | None = None,
             budget: TaskBudget | None = None) -> tuple[str, list[ToolObservation]]:
         """执行循环; 返回 (模型最后的文本, 工具观察列表)。"""
-        from langchain_core.messages import ToolMessage
+        from langchain_core.messages import HumanMessage, ToolMessage
 
         visible = [t for t in self.tools.values() if t.llm_visible]
         bound = llm
@@ -321,6 +317,7 @@ class ToolLoop:
                 self.sink.event("tool_loop_degraded",
                                 {"reason": f"无法绑定工具: {e}", "task_id": task_id})
         final_text = ""
+        needs_final_answer = False
         for round_index in range(self.max_rounds):
             if cancel is not None:
                 cancel.raise_if_cancelled(task_id)
@@ -334,9 +331,8 @@ class ToolLoop:
             messages.append(result)
             final_text = _content_of(result)
             calls = getattr(result, "tool_calls", None) or []
+            needs_final_answer = bool(calls)
             if not calls:
-                break
-            if not self._round_allowed(round_index, task_id):
                 break
             for call in calls:
                 observation = self._execute(call, grant=grant)
@@ -350,10 +346,20 @@ class ToolLoop:
                     tool_call_id=str(call.get("id", "")),
                     name=observation.name,
                 ))
+        if needs_final_answer and not (budget is not None and usage is not None
+                                       and budget.exceeded_by(usage)):
+            if cancel is not None:
+                cancel.raise_if_cancelled(task_id)
+            messages.append(HumanMessage(content="工具执行轮次已结束。请根据已有观察返回最终结构化结果，不再请求工具。"))
+            result = llm.invoke(messages)
+            messages.append(result)
+            final_text = _content_of(result)
+            # 个别后端即使未绑定工具仍返回调用；也必须配齐协议消息。
+            for call in getattr(result, "tool_calls", None) or []:
+                messages.append(ToolMessage(content="工具轮次已结束，此调用未执行。",
+                                            tool_call_id=str(call.get("id", "")),
+                                            name=str(call.get("name", ""))))
         return final_text, list(self.observations)
-
-    def _round_allowed(self, round_index: int, task_id: str) -> bool:
-        return round_index + 1 < self.max_rounds
 
     def _execute(self, call: dict, *, grant: CapabilityGrant | None) -> ToolObservation:
         name = str(call.get("name", "") or "")
@@ -450,6 +456,8 @@ class AgentRuntime:
         #: `RuntimeError`, 再退回确定性实现 —— 症状被掩盖成"跑通了", 实际每次都在
         #: 走异常路径。这里按需解析一次并缓存, 让"有没有模型"成为**实测事实**。
         self._resolved_llm: dict[str, Any] = {}
+        # Only executed, authorized tool observations populate this run-local cache.
+        self.search_cache: dict[str, list[dict]] = {}
         #: 事件计数 (供测试与运行指标断言)。
         self.events: list[dict[str, Any]] = []
         #: 本运行的研究存储 (由装配层注入; 团队里就是 `TeamRun.task_store.store`)。

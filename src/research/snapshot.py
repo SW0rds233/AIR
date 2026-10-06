@@ -152,21 +152,31 @@ def snapshot_from_store(store: Any, *, project_id: str, problem_id: str, run_id:
     # 正文位置映射必须**真的**算出来 (§3.2 G12): 交付门槛用 `writing_map` 判断
     # "核心结论能否在正文里反查到"。留空会让一份明明写了结论的稿件被判成
     # "主要结论未映射到正文位置" —— 那不是内容缺失, 是映射没做。
-    snapshot.writing_map = _writing_map_from_store(store)
+    snapshot.writing_map = _writing_map_from_store(store, problem_id=problem_id)
     return snapshot
 
 
-def _writing_map_from_store(store: Any) -> dict[str, str]:
+def latest_manuscript_row(store: Any, *, problem_id: str = "") -> dict:
+    """Select the actual latest draft within a problem, without cross-problem fallback."""
+    rows = list(store.list_latest("manuscript") or [])
+    def owner(row):
+        return str(row.get("problem_id") or (row.get("_scope") or {}).get("problem_id") or "")
+    if problem_id:
+        foreign = any(owner(row) and owner(row) != problem_id for row in rows)
+        rows = [row for row in rows if owner(row) == problem_id or (not owner(row) and not foreign)]
+    return rows[-1] if rows else {}
+
+
+def _writing_map_from_store(store: Any, *, problem_id: str = "") -> dict[str, str]:
     """由最新稿件块的**引用**反推 `claim_id -> 正文锚点` (零 LLM)。"""
     try:
-        rows = store.list_latest("manuscript") or []
+        row = latest_manuscript_row(store, problem_id=problem_id)
     except Exception:  # noqa: BLE001 - 读不出来就是没有映射, 门槛会如实报缺
         return {}
-    if not rows:
+    if not row:
         return {}
     from src.publication.schemas import Manuscript
 
-    row = rows[-1]
     payload = row.get("manuscript") if isinstance(row.get("manuscript"), dict) else row
     try:
         manuscript = Manuscript.model_validate({k: v for k, v in payload.items()
@@ -186,21 +196,20 @@ def _row_payload(row: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in row.items() if not k.startswith("_")}
 
 
-def manuscript_markdown(store: Any) -> str:
+def manuscript_markdown(store: Any, *, problem_id: str = "") -> str:
     """取已登记的稿件 Markdown (唯一 Manuscript IR 优先, 退回已有文本)。
 
     交付门槛判的是"正文有没有如实表达结论", 因此这里必须给出**真实正文**, 而不是
     一句摘要 —— 拿摘要去判门槛会让"正文过短/缺条件"这类问题全部漏过。
     """
     try:
-        rows = store.list_latest("manuscript") or []
+        row = latest_manuscript_row(store, problem_id=problem_id)
     except Exception:  # noqa: BLE001 - 读不出来按"没有正文"处理 (门槛会如实报缺)
         return ""
-    if not rows:
+    if not row:
         return ""
     import json
 
-    row = rows[-1]
     from src.agents.writing import render_markdown
     from src.publication.schemas import Manuscript
 

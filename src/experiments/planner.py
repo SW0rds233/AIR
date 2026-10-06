@@ -95,17 +95,25 @@ def design_experiment(claim: Claim,
                                       basis="由命题声明的变量域确定"))
     # P1-3: 被选模型的变量与单位优先 (模型说了算, 而不是命题文本)
     model_units = {str(k): str(v) for k, v in dict(model.get("units") or {}).items()}
-    for name in (model.get("variables") or []):
-        name = str(name)
-        unit = model_units.get(name, "") or _unit_for(claim, name)
+    for variable in (model.get("variables") or []):
+        declaration = variable if isinstance(variable, dict) else {"symbol": str(variable)}
+        name = str(declaration.get("symbol", "") or "")
+        if not name:
+            continue
+        unit = str(declaration.get("unit", "") or model_units.get(name, "")
+                   or _unit_for(claim, name))
+        domain = str(declaration.get("domain", "")
+                     or (model.get("variable_domains") or {}).get(name, ""))
         existing = next((v for v in variables if v.name == name), None)
         if existing is not None:
             # 模型给了单位就采用 (命题文本里往往识别不出单位)
             if unit and not existing.unit:
                 existing.unit = unit
                 existing.basis = "单位来自被选模型"
+            if domain and not existing.range:
+                existing.range = domain
             continue
-        variables.append(VariableSpec(name=name, role="manipulated", unit=unit,
+        variables.append(VariableSpec(name=name, role="manipulated", unit=unit, range=domain,
                                       basis="来自被选模型的变量表"))
     if claim.study.treatment:
         variables.append(VariableSpec(name=claim.study.treatment, role="manipulated",

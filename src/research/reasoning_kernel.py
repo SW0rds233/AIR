@@ -185,7 +185,7 @@ def derive_steps_for(claim: Claim, *, attempt: ProofAttempt,
         attempt.steps = [ProofStep(
             index=1,
             statement=f"该命题尚无形式化片段, 无法给出符号推导 (陈述: {claim.statement[:80]})",
-            justification="应用类命题的结论强度取决于证据与设计, 不是推导",
+            justification="尚无可核验的形式化编码，需要补充适用条件与核验方法；不代表命题为假",
             rule="adversarial_review_only",
         )]
 

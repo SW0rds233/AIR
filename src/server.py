@@ -857,6 +857,10 @@ def _run_session(session: Session, initial_state: dict | None = None):
                             "type": "node",
                             "name": node_name,
                             "text": _describe_node(node_name, node_state),
+                            # 团队角色事件必须连同结构化载荷到达浏览器；仅发送摘要会让
+                            # `team-controller` 收不到任务状态、成果和对象变更。
+                            "team_event": (node_state if node_name == "research_team" else None),
+                            "run_id": str((node_state or {}).get("run_id") or session.run_id),
                             # 研究进度已由团队事件 (`team_event` → SSE) 携带: 每个角色
                             # 的派工/成果/缺口都从图里发出。此前这里另外建一个研究引擎
                             # 去"补一份进度摘要"—— 那是**第二个读模型的入口**, 也是

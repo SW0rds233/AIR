@@ -309,8 +309,12 @@ class AgentBase:
         loop = ToolLoop(tools, max_rounds=max_rounds or runtime.max_tool_rounds,
                         sink=runtime.sink)
         llm = runtime.llm(task, usage, stage=self.role)
-        return loop.run(llm, messages, grant=grant, cancel=runtime.cancel,
-                        task_id=task.task_id, usage=usage, budget=task.budget)
+        text, observations = loop.run(llm, messages, grant=grant, cancel=runtime.cancel,
+                                     task_id=task.task_id, usage=usage, budget=task.budget)
+        from src.agents.evidence import _observed_searches
+        _, cached = _observed_searches(observations, task.source_policy or "user_kb")
+        runtime.search_cache.update(cached)
+        return text, observations
 
     def blocked(self, task: AgentTask, reason: str, *,
                 needs: list[ResearchNeed] | None = None,

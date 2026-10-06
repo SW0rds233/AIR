@@ -48,7 +48,7 @@ def _norm_title(title: str) -> str:
     """
     t = (title or "").lower()
     t = _re.sub(r"^\s*pre-?print\s*[:：]\s*", "", t)
-    return _re.sub(r"[^a-z0-9]", "", t)
+    return _re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", t)
 
 
 def _dedup_key(paper: dict) -> str:
@@ -68,30 +68,28 @@ def merge_papers(existing: list[dict], found: list[dict]) -> list[dict]:
     关键: 同一篇论文的 arXiv 版(无 DOI, 以标题为键)与正式版(有 DOI, 以 DOI 为键)
     会被旧逻辑判为两篇。这里同时维护 DOI 集合与标题集合, 任一命中即去重。
     """
-    seen_dois: set[str] = set()
-    seen_titles: set[str] = set()
-    for p in existing:
-        doi = (p.get("doi") or "").strip().lower()
-        if doi:
-            seen_dois.add(doi)
-        norm = _norm_title(p.get("title", ""))
-        if norm:
-            seen_titles.add(norm)
-
+    from src.publication.references import normalize_doi
     for p in found:
         if "error" in p or not p.get("title"):
             continue
-        p["title"] = _clean_title(p.get("title", ""))
-        doi = (p.get("doi") or "").strip().lower()
+        p = {**p, "title": _clean_title(p.get("title", ""))}
+        doi = normalize_doi(p.get("doi", "")).lower()
         norm = _norm_title(p.get("title", ""))
-        if doi and doi in seen_dois:
+        duplicate = next((old for old in existing if
+                          (doi and normalize_doi(old.get("doi", "")).lower() == doi)
+                          or (norm and _norm_title(old.get("title", "")) == norm)), None)
+        if duplicate is not None:
+            # Prefer a publication candidate, but keep the real excerpt and preprint link.
+            formal = bool(p.get("published") and "arxiv" not in str(p.get("venue", "")).lower()
+                          and not doi.startswith("10.48550/arxiv"))
+            if "arxiv" in str(duplicate.get("url", "")):
+                duplicate.setdefault("preprint_url", duplicate["url"])
+            for key, value in p.items():
+                if value and (not duplicate.get(key) or (formal and key in {
+                        "doi", "url", "venue", "year", "authors", "published", "publication_type",
+                        "volume", "issue", "pages", "publisher", "pdf_url"})):
+                    duplicate[key] = value
             continue
-        if norm and norm in seen_titles:
-            continue
-        if doi:
-            seen_dois.add(doi)
-        if norm:
-            seen_titles.add(norm)
         existing.append(p)
     return existing
 
@@ -127,8 +125,10 @@ def arxiv_search(query: str, max_results: int = 20) -> list[dict]:
     限流/失败时返回空列表（不抛异常，避免中断流水线）。
     """
     query = _clean_query(query)
+    from src.kb.publication import tokens
+    parts = sorted(tokens(query))[:6] + _re.findall(r"\b\d{2,4}\b", query)[:2]
     params = {
-        "search_query": f"all:{query}",
+        "search_query": " AND ".join(f'all:"{part}"' for part in parts) if parts else f'all:"{query}"',
         "start": 0,
         "max_results": min(max_results, ARXIV_MAX_RESULTS),
         "sortBy": "relevance",
@@ -170,14 +170,16 @@ def arxiv_search(query: str, max_results: int = 20) -> list[dict]:
 
         papers.append({
             "title": title,
-            "authors": ", ".join(authors[:5]),
+            "authors": ", ".join(authors),
             "year": year,
             "source": "arXiv",
             "api_source": "arXiv",
             "abstract": abstract[:1000],
             "citations": 0,
             "url": url,
-            "doi": "",
+            "doi": (entry.findtext("arxiv:doi", default="", namespaces=ns) or ""),
+            "publication_doi": (entry.findtext("arxiv:doi", default="", namespaces=ns) or ""),
+            "journal_ref": (entry.findtext("arxiv:journal_ref", default="", namespaces=ns) or ""),
             "bibtex": _to_bibtex(title, authors, year, url),
             "published": False,  # arXiv 记录不含发表信息, precheck 阶段解析
         })
@@ -270,7 +272,7 @@ def openalex_search(query: str, max_results: int = 20) -> list[dict]:
         # (`quote_is_locatable`), 没有摘要就永远判不成可引用 (实测: 检索到了却一条
         # 也引不了)。摘要里通常就写着定理名与定理陈述, 是核对该定理最直接的依据。
         "select": ("id,title,authorships,publication_year,doi,primary_location,"
-                   "cited_by_count,abstract_inverted_index"),
+                   "cited_by_count,abstract_inverted_index,type,locations,biblio,is_retracted"),
     }
     if OPENALEX_API_KEY:
         params["api_key"] = OPENALEX_API_KEY
@@ -289,10 +291,13 @@ def openalex_search(query: str, max_results: int = 20) -> list[dict]:
     for item in data.get("results", []):
         authors = ", ".join(
             a.get("author", {}).get("display_name", "")
-            for a in item.get("authorships", [])[:5]
+            for a in item.get("authorships", [])
             if a.get("author", {}).get("display_name")
         )
-        loc = item.get("primary_location") or {}
+        loc = next((location for location in item.get("locations") or []
+                    if location.get("is_published")
+                    and (location.get("source") or {}).get("type") != "repository"),
+                   item.get("primary_location") or {})
         source = loc.get("source") or {}
         venue = source.get("display_name", "") or ""
         # 预印本时 primary_location 可能是 arXiv, 从 landing_page_url 提取 arXiv ID
@@ -317,7 +322,14 @@ def openalex_search(query: str, max_results: int = 20) -> list[dict]:
             "doi": item.get("doi", "") or "",
             "openalex_id": openalex_id,
             "bibtex": "",
-            "published": bool(venue),
+            "published": bool(loc.get("is_published") and source.get("type") != "repository"
+                              and not item.get("is_retracted")),
+            "publication_type": {"article": "journal-article"}.get(item.get("type"), item.get("type", "")),
+            "volume": (item.get("biblio") or {}).get("volume") or "",
+            "issue": (item.get("biblio") or {}).get("issue") or "",
+            "pages": "-".join(str((item.get("biblio") or {})[k]) for k in ("first_page", "last_page")
+                              if (item.get("biblio") or {}).get(k)),
+            "pdf_url": loc.get("pdf_url") or "",
         })
 
     return papers

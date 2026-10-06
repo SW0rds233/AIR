@@ -80,27 +80,6 @@ SUBQUESTION_KINDS: tuple[str, ...] = (
     "validation_plan",          # 验证方案
 )
 
-#: 不需要外部依据的子问题类型: 纯自足证明 (§3.1 G05 的例外)。
-#:
-#: 只有"证明某个数学对象存在/不存在"这类问题可以在没有文献的情况下启动。其余类型
-#: (文献综合、机理、案例比较、数据可用性…) 都必须先有依据再推理。
-SELF_CONTAINED_SUBQUESTION_KINDS: frozenset[str] = frozenset({"existence_proof"})
-
-
-def _all_reasoning_self_contained(brief: ResearchBrief) -> bool:
-    """主控把推理排在了哪些子问题上, 这些子问题是否全是自足证明。
-
-    保守判据: 只要**有一个**需要依据的子问题交给推理, 推理就必须等证据就绪 ——
-    宁可多一轮检索, 也不要让模型凭记忆引用定理。
-    """
-    reasoning_subs = [sub for sub in brief.subquestions
-                      if role_of(sub.owner) == "reasoning"]
-    if not reasoning_subs:
-        return True
-    return all(sub.kind in SELF_CONTAINED_SUBQUESTION_KINDS
-               for sub in reasoning_subs)
-
-
 #: 交付形态。
 DELIVERABLES: tuple[str, ...] = (
     "source_list",              # 文献清单
@@ -369,7 +348,10 @@ def _detect_quantifier(text: str) -> tuple[str, bool]:
 
 def _compose_main_question(request: str, attachment_text: str = "") -> str:
     """主问题 = 请求文本 + 附件题面 (附件是**来源**, 不因此变成指令)。"""
-    parts = [p.strip() for p in (request or "", attachment_text or "") if p and p.strip()]
+    from src.research.query_planner import research_question_text
+
+    attachment = research_question_text(attachment_text)
+    parts = [p.strip() for p in (request or "", attachment) if p and p.strip()]
     return "\n\n".join(parts)
 
 
@@ -442,15 +424,15 @@ class SupervisorAgent:
         输入精确时保持用户的定义与边界; 输入仅是方向时提出少量有区别的路线
         (§4.1)。未知字段**保留为未知**并列出 —— 不因一个关键词强行设定类型。
         """
-        kinds, deliverables, basis = classify_request(
-            f"{request}\n{attachment_text}".strip())
-        quantifier, quantifier_known = _detect_quantifier(
-            f"{request}\n{attachment_text}")
+        main_question = _compose_main_question(request, attachment_text)
+        attachment_question = _compose_main_question("", attachment_text)
+        kinds, deliverables, basis = classify_request(main_question)
+        quantifier, quantifier_known = _detect_quantifier(main_question)
         brief = ResearchBrief(
             project_id=project_id, problem_id=problem_id,
             original_request=request or "",
             attachments=list(attachments or []),
-            main_question=_compose_main_question(request, attachment_text),
+            main_question=main_question,
             source_set_ids=[s for s in source_set_ids if s],
             source_policy=source_policy,
             autonomous_retrieval=bool(autonomous_retrieval),
@@ -480,8 +462,12 @@ class SupervisorAgent:
             "data_availability": "evidence",
             "validation_plan": "validation",
         }
+        from src.utils.external_data import wrap_external
+
         model_proposed = self._propose_subquestions(
-            request, attachment_text, kinds, owner_map=owner_map)
+            request,
+            wrap_external(attachment_question, max_chars=2000) if attachment_question else "",
+            kinds, owner_map=owner_map)
         if model_proposed:
             for index, item in enumerate(model_proposed):
                 brief.add_subquestion(
@@ -495,7 +481,7 @@ class SupervisorAgent:
         else:
             for index, kind in enumerate(kinds):
                 brief.add_subquestion(
-                    statement=f"{_KIND_LABELS.get(kind, kind)}: {_short(request or attachment_text)}",
+                    statement=f"{_KIND_LABELS.get(kind, kind)}: {_short(main_question)}",
                     kind=kind, owner=owner_map.get(kind, "reasoning"), priority=index,
                     needs=["给出可核查的结论或明确的未决说明"],
                 )
@@ -503,6 +489,15 @@ class SupervisorAgent:
                 # 有模型却没走上模型: 这是**降级**, 必须可见 ——
                 # 不能让"规则跑通"看起来像"模型理解过任务"
                 brief.unknown_fields.append("subquestions_from_model")
+        if any(kind in kinds for kind in ("existence_proof", "mechanism", "model_construction")) \
+                and not any(role_of(sub.owner) == "modeling" for sub in brief.subquestions):
+            brief.add_subquestion(
+                statement="形式化研究对象、变量、量词、约束与适用条件",
+                kind="model_construction", owner="modeling", priority=2,
+                needs=["说明数学对象及其与原题的对应关系",
+                       "区分题目给定、文献支持与本研究引入的假设",
+                       "列出变量的域、约束和仍未知的条件"],
+            )
         # 资料需求: 只要需要检索就必须有一条独立子问题 (§3.1: 检索覆盖文献/案例/数据)
         if "existence_proof" in kinds or "literature_synthesis" in kinds \
                 or "mechanism" in kinds or autonomous_retrieval:
@@ -684,40 +679,24 @@ class SupervisorAgent:
             plan.add_task(task)
             task_by_sub[sub.subquestion_id] = task.task_id
         # 资料是下游的前提: 让同一子问题内"检索"先于"写作/审阅"由 plan 的依赖表达
-        self._wire_default_dependencies(plan, brief)
+        self._wire_default_dependencies(plan)
         return plan
 
     @staticmethod
-    def _wire_default_dependencies(plan: TeamPlan,
-                                   brief: ResearchBrief | None = None) -> None:
-        """把"必须先有依据"的默认依赖写进计划 (§5.4 串行条件 / §3.1 G05)。
-
-        只用**已存在**的依赖边做加边, 不改任务本身: 写作依赖推理、检索与图表,
-        审阅依赖写作。结论前提变更时的失效传播由判定层处理, 不在这里假装完成。
-
-        **为什么推理也要等证据** (G05): 审计复现的首轮顺序是
-        `reasoning, reasoning, evidence`, 且推理任务的依赖为空 —— 也就是主控先让模型
-        推导, 再去查文献。对"需要已有定理/数据/案例"的问题, 这等于**凭记忆推导**:
-        模型可能引用一个记错的定理, 而检索结果只在最后一轮才出现, 没人回头核对。
-
-        例外 (计划 §3.1 G05 明确允许): **纯自足证明**可以无文献启动 —— 组合设计存在性
-        这类问题本身不需要外部依据, 强行先检索只是浪费预算。判据是子问题类型
-        (`existence_proof`), 不是"要不要省事"。这类情况下 `reference_status` 会留在
-        未核对状态, 交付时必须如实标出, 不能算成"引用已核实"。
-        """
+    def _wire_default_dependencies(plan: TeamPlan) -> None:
+        """把研究成果依赖写入计划：推理先读资料与模型，写作等待研究结果，审阅等待稿件。"""
         by_role: dict[str, list[str]] = {}
         for record in plan.tasks:
             by_role.setdefault(str(record.get("agent", "")), []).append(
                 str(record.get("task_id", "")))
         prerequisites: dict[str, tuple[str, ...]] = {
+            "modeling": ("evidence",),
             "writing": ("reasoning", "evidence", "modeling", "figures"),
             "figures": ("reasoning", "evidence"),
             "review": ("writing", "reasoning", "figures"),
         }
-        # 推理是否需要先读资料: 只有当**所有**推理任务都是自足证明时才豁免
-        if brief is not None and by_role.get("reasoning"):
-            if not _all_reasoning_self_contained(brief):
-                prerequisites["reasoning"] = ("modeling", "evidence")
+        if by_role.get("reasoning"):
+            prerequisites["reasoning"] = ("modeling", "evidence")
         for role, needed in prerequisites.items():
             for task_id in by_role.get(role, []):
                 extra = [t for src in needed for t in by_role.get(src, [])]
@@ -1163,6 +1142,8 @@ def needs_to_tasks(needs: Iterable[ResearchNeed], *, brief: ResearchBrief,
             subquestion="",
             expected_gain=need.why or "补上缺失的前置条件",
             project_id=brief.project_id, problem_id=brief.problem_id,
+            source_set_ids=list(brief.source_set_ids),
+            source_policy=brief.source_policy,
             plan_version=plan_version,
             input_refs=list(need.blocked_refs),
             depends_on=[],

@@ -365,6 +365,9 @@ def _decide_task_kind(text: str, summary: SourceSummary,
                       explicit_formal: bool) -> tuple[TaskKind, str]:
     """按"题目措辞 + 资料摘要"判定研究类型, 并给出可审计的依据。"""
     influence = parse_effect_direction(text).matched
+    from src.research.classification import is_formal_question
+    if is_formal_question(text) and not summary.has_observational_data:
+        return TaskKind.formal_proof, "题面要求数学对象的存在性、构造或证明；尚需分别核验编码和论证"
     if explicit_formal and not influence:
         return TaskKind.formal_proof, "题目含显式关系/量词, 按形式化证明处理"
     if influence and summary.has_observational_data:
@@ -479,8 +482,9 @@ def build_spec_from_input(request: str, topic: str = "", project_id: str = "",
 
     text = (request or topic or "").strip()
     has_direction_marker = _has_any(text, _DIRECTION_MARKERS)
+    from src.research.classification import is_formal_question
     explicit = (bool(parse_questions(text)) and not has_direction_marker) \
-        or formulate_from_text(text) is not None
+        or formulate_from_text(text) is not None or is_formal_question(text)
     if not project_id:
         from src.utils.file_utils import sanitize_filename
 

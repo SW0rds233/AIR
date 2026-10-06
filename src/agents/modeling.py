@@ -10,14 +10,16 @@ from __future__ import annotations
 因此 `validate_model_payload()` 是独立的确定性检查, 不依赖模型自述。
 """
 
+import json
 from typing import Any
+
+from pydantic import ValidationError
 
 from src.agents.base import (
     AgentBase,
     as_list_of_str,
     build_proposal,
     clip,
-    context_summary,
     extract_json,
     task_intent,
 )
@@ -32,8 +34,19 @@ from src.agents.protocol import (
 )
 from src.agents.runtime import AgentRuntime, ToolSpec
 from src.agents.tools import readonly_data_tools
+from src.research.schemas import ResearchModel
 
-__all__ = ["ModelingAgent", "validate_model_payload"]
+__all__ = ["ModelingAgent", "normalise_model_candidate", "validate_model_payload"]
+
+
+def normalise_model_candidate(model: dict[str, Any]) -> dict[str, Any]:
+    """把智能体的结构化公式草案无损转为模型契约要求的字符串。"""
+    candidate = dict(model)
+    encoding = candidate.get("formal_encoding")
+    if isinstance(encoding, (dict, list)):
+        candidate["formal_encoding"] = json.dumps(
+            encoding, ensure_ascii=False, sort_keys=True)
+    return candidate
 
 
 class ModelingAgent(AgentBase):
@@ -58,10 +71,15 @@ class ModelingAgent(AgentBase):
 - 不得为了适配某个求解器而偷换题意; 量词与域必须与原题一致;
 - 变不出来就如实列为未知, 不要编造;
 - 只提交**候选模型**, 不声明结论成立。
+纯数学问题应保持题面的对象、整数域、量词和约束，给出等价编码与两个方向的映射。
+不得套用人群、处理/对照、测量误差等实证机制；题面定义可作为输入前提，
+不需要为题面自定义对象虚构外部机制来源。使用既有定理仍需核读原文与适用条件。
+返工应围绕指定 claim_id 补齐编码，不重新扩写整个领域的候选模型清单。
 
 最终输出 JSON:
-{"models": [{"name": "", "mechanism": "", "variables": [{"symbol": "", "meaning": "", "unit": "", "domain": ""}],
-            "assumptions": [{"statement": "", "origin": "user_assumption|proposed|external"}],
+{"models": [{"name": "", "claim_id": "", "formal_encoding": "用字符串写出公式、约束和量词", "mechanism": "", "variables": [{"symbol": "", "meaning": "", "unit": "", "domain": ""}],
+            "assumptions": [{"statement": "", "origin": "user_assumption|proposed|external",
+                             "source_ids": []}],
             "applicability": "", "why_chosen": "", "rejected": [{"name": "", "reason": ""}],
             "open_conditions": [""]}],
  "unknowns": [""]}
@@ -88,10 +106,24 @@ class ModelingAgent(AgentBase):
         if runtime.llm_available() and not task.budget.exceeded_by(usage):
             from langchain_core.messages import HumanMessage, SystemMessage
 
+            brief = (context.objects.get("brief") or [{}])[0]
+            source_lines = "\n".join(
+                f"- ref_id={row.get('source_id') or row.get('id')} "
+                f"{clip(str(row.get('title', '')), 140)} | "
+                f"{clip(str(row.get('excerpt', '')), 350)} | "
+                f"定位 {row.get('locator') or '无'}"
+                for row in (context.objects.get("evidence") or [])[:20])
             prompt = (
+                f"# 原始研究问题\n{clip(str(brief.get('main_question') or context.request), 2000)}\n"
+                f"# 已识别对象与边界\n"
+                f"对象: {clip(str(brief.get('objects') or []), 700)}\n"
+                f"变量: {clip(str(brief.get('variables') or []), 700)}\n"
+                f"量词: {clip(str(brief.get('quantifiers') or '未知'), 300)}\n"
+                f"约束: {clip(str(brief.get('constraints') or []), 700)}\n"
                 f"# 建模目标\n{task_intent(task)}\n"
                 f"# 验收标准\n" + "\n".join(f"- {c}" for c in task.acceptance_criteria) + "\n"
-                f"# 上下文\n{context_summary(context)}"
+                f"# 已检索资料 (只可据此标记文献支持的假设)\n"
+                f"{source_lines or '(当前没有可定位资料)'}"
             )
             llm = runtime.llm(task, usage, stage="modeling")
             try:
@@ -124,8 +156,40 @@ class ModelingAgent(AgentBase):
 
         changes: list[ChangeProposal] = []
         checks: list[str] = []
+        accepted_candidates: list[dict[str, Any]] = []
+        rejected_models = 0
+        claim_rows = [row for row in (context.objects.get("claim") or [])
+                      if row.get("id")]
+        known_source_ids = {
+            str(row.get("source_id") or row.get("id") or "")
+            for row in (context.objects.get("evidence") or [])
+            if row.get("source_id") or row.get("id")
+        }
+        from pathlib import PureWindowsPath
+        known_input_ids = {str(value) for item in context.attachments if isinstance(item, dict)
+                           for key in ("id", "attachment_id", "name", "filename", "path", "uri")
+                           if (value := item.get(key))}
+        known_input_ids |= {PureWindowsPath(value).name for value in known_input_ids}
+        input_versions = {
+            str(row.get("id") or row.get("source_id")): int(row.get("version", 1) or 1)
+            for kind in ("claim", "evidence")
+            for row in (context.objects.get(kind) or [])
+            if row.get("id") or row.get("source_id")
+        }
         for index, model in enumerate(candidates):
-            problems = validate_model_payload(model)
+            model = normalise_model_candidate(model)
+            if not model.get("claim_id") and len(claim_rows) == 1:
+                model["claim_id"] = str(claim_rows[0]["id"])
+            try:
+                ResearchModel.model_validate(model)
+            except ValidationError as error:
+                rejected_models += 1
+                unknowns.append(
+                    f"候选模型 {index + 1} 未提交：字段不符合入库契约 ({error.errors()[0]['msg']})")
+                continue
+            accepted_candidates.append(model)
+            problems = validate_model_payload(model, known_source_ids=known_source_ids,
+                                              known_input_ids=known_input_ids)
             checks.extend(problems)
             changes.append(build_proposal(
                 "model",
@@ -133,13 +197,28 @@ class ModelingAgent(AgentBase):
                          "subquestion": task.subquestion},
                 rationale=clip(str(model.get("why_chosen", "") or ""), 300)
                           or "候选模型 (忠实度由规则检查)",
-                input_versions={},
+                input_versions=input_versions,
             ))
-        payload_out = {"schema": "ModelProposal/v1", "models": candidates,
+        payload_out = {"schema": "ModelProposal/v1", "models": accepted_candidates,
                        "unknowns": unknowns, "fidelity_checks": checks}
-        summary = f"提出 {len(candidates)} 个候选模型"
+        summary = f"提出 {len(changes)} 个候选模型"
         if checks:
             summary += f"; 忠实度检查发现 {len(checks)} 处需核查"
+        if rejected_models:
+            summary += f"; {rejected_models} 个候选因入库字段错误未提交"
+        if not changes:
+            return self.blocked(
+                task, summary,
+                needs=[ResearchNeed(
+                    kind=NeedKind.model_condition,
+                    statement="重新给出符合模型字段契约的候选编码",
+                    why="所有建模候选均未通过入库字段校验",
+                    acceptance=["给出名称、变量符号与可保存的形式化编码"],
+                    blocking=False)],
+                usage=usage, payload=payload_out)
+        if rejected_models:
+            return self.partial(task, summary, changes=changes,
+                                unresolved=unknowns[:6], usage=usage, payload=payload_out)
         return self.completed(task, summary, changes=changes, unresolved=checks[:6],
                               usage=usage, payload=payload_out)
 
@@ -155,9 +234,13 @@ class ModelingAgent(AgentBase):
         """
         from src.research.reasoning_kernel import model_proposal_for
 
-        claim, evidence = _modelling_subject(context)
+        claim, evidence = _modelling_subject(context, task)
         if claim is None:
             return None
+        from src.research.classification import is_theoretical_claim, is_formal_question, has_empirical_context
+        question = str((context.objects.get("brief") or [{}])[0].get("main_question") or context.request)
+        if is_theoretical_claim(claim) or (is_formal_question(question) and not has_empirical_context(claim)):
+            return None  # Mathematical encoding must not be selected by an empirical mechanism template.
         if not evidence:
             # 有命题但没读到原文: 内核会拒绝, 这里如实提出需求 (不调 LLM 编模型)
             needs = [ResearchNeed(
@@ -236,7 +319,9 @@ class ModelingAgent(AgentBase):
         }]
 
 
-def validate_model_payload(model: dict[str, Any]) -> list[str]:
+def validate_model_payload(model: dict[str, Any], *,
+                           known_source_ids: set[str] | None = None,
+                           known_input_ids: set[str] | None = None) -> list[str]:
     """忠实度与结构检查 (零 LLM)。
 
     只检查**可判定**的问题: 缺名称、变量无量纲/域、假设无来源、机制为空。
@@ -270,10 +355,20 @@ def validate_model_payload(model: dict[str, Any]) -> list[str]:
             if not str(assumption.get("origin", "") or "").strip():
                 problems.append(
                     f"模型 {name} 的第 {index} 条假设没有来源 (题目/资料/本研究)")
+            source_ids = as_list_of_str(assumption.get("source_ids"))
+            if assumption.get("origin") == "external" and not source_ids:
+                problems.append(f"模型 {name} 的外部假设 {index} 未关联来源")
+            if known_source_ids is not None:
+                permitted = set(known_source_ids)
+                if assumption.get("origin") == "user_assumption":
+                    permitted |= known_input_ids or set()
+                unknown = sorted(set(source_ids) - permitted)
+                if unknown:
+                    problems.append(f"模型 {name} 的假设 {index} 引用了未登记来源: {unknown}")
     return problems
 
 
-def _modelling_subject(context: ContextPack):
+def _modelling_subject(context: ContextPack, task: AgentTask | None = None):
     """从角色上下文还原"可建模的命题 + 已读原文"。
 
     与 `ReasoningAgent` 的还原口径一致: 图状态只放引用, 角色侧按引用重建领域对象,
@@ -282,7 +377,13 @@ def _modelling_subject(context: ContextPack):
     from src.research.schemas import Claim, SourceEvidence
 
     claim: Claim | None = None
-    for row in context.objects.get("claim") or []:
+    rows = list(context.objects.get("claim") or [])
+    requested = str((task.hints or {}).get("claim_id") or "") if task else ""
+    requested_ids = [requested] if requested else [ref.id for ref in (task.input_refs if task else [])
+                                                if any(row.get("id") == ref.id for row in rows)]
+    if requested_ids:
+        rows = [row for row in rows if row.get("id") in requested_ids]
+    for row in rows:
         candidate = _parse(Claim, row)
         if candidate is not None and candidate.statement:
             claim = candidate

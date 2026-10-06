@@ -134,6 +134,7 @@ class Manuscript(BaseModel):
     version: int = 1
     title: str = ""
     abstract: str = ""
+    keywords: list[str] = Field(default_factory=list)
     sections: list[Section] = Field(default_factory=list)
     status: ManuscriptStatus = ManuscriptStatus.draft
     #: 稿件所依赖的研究快照 (过期即 stale, 界面须明确标记)。
@@ -178,6 +179,7 @@ class Manuscript(BaseModel):
         return {
             "manuscript_id": self.manuscript_id, "version": self.version,
             "title": self.title, "abstract": self.abstract,
+            "keywords": list(self.keywords),
             "sections": [s.to_dict() for s in self.sections],
             "status": self.status.value, "snapshot_id": self.snapshot_id,
             "input_versions": dict(self.input_versions),
@@ -215,6 +217,7 @@ class WritingPacket(BaseModel):
     figures: list[dict[str, Any]] = Field(default_factory=list)
     #: 审阅意见 (修订任务的输入)。
     review_issues: list[dict[str, Any]] = Field(default_factory=list)
+    prior_manuscript: dict[str, Any] = Field(default_factory=dict)
     #: 未决项: 写作不得掩盖未决, 必须如实写出来 (§12)。
     unresolved: list[str] = Field(default_factory=list)
     snapshot_id: str = ""
@@ -240,6 +243,7 @@ class WritingPacket(BaseModel):
             "validations": list(self.validations),
             "sources": list(self.sources), "figures": list(self.figures),
             "review_issues": list(self.review_issues),
+            "prior_manuscript": dict(self.prior_manuscript),
             "unresolved": list(self.unresolved),
             "snapshot_id": self.snapshot_id,
             "input_versions": dict(self.input_versions),

@@ -604,7 +604,7 @@ WRITABLE_KINDS: dict[str, frozenset[str]] = {
     "evidence": frozenset({"evidence", "source", "card", "case", "dataset",
                            "evidence_link", "novelty"}),
     "modeling": frozenset({"model", "assumption", "definition"}),
-    "reasoning": frozenset({"claim", "obligation", "verification", "gap",
+    "reasoning": frozenset({"claim", "obligation", "verification", "gap", "attempt",
                             # 证据与命题的关系由**推理角色**也登记一份: 检索角色派工时
                             # 常常还没有命题 (依赖顺序: 先检索再推理), 只有推理角色
                             # 同时看得到"命题"和"可用证据"。两边都能写同一张表,
@@ -735,6 +735,7 @@ def agent_capability(agent: str) -> AgentContract | None:
 #: 第二份真相源。
 OBJECT_KINDS: frozenset[str] = frozenset({
     "claim",
+    "attempt",
     "obligation",
     "model",
     "assumption",

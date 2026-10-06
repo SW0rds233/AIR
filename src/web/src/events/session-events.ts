@@ -28,7 +28,8 @@ export type BusinessEventType =
   | 'task_dispatched' | 'task_started' | 'task_blocked' | 'task_completed'
   | 'object_changed' | 'manuscript_ready' | 'figure_ready'
   | 'review_issue' | 'waiting_user' | 'run_finished'
-  | 'supervisor_decision' | 'brief_ready' | 'plan_ready';
+  | 'supervisor_decision' | 'brief_ready' | 'plan_ready'
+  | 'change_proposed' | 'task_result' | 'task_finished';
 
 /** 工具进度等只作辅助, 不触发整页刷新。 */
 export const AUXILIARY_EVENT_TYPES: string[] = ['tool_run', 'llm_call', 'log', 'ping', 'heartbeat'];
@@ -64,8 +65,11 @@ export function refreshTargets(type: string): RefreshTarget[] {
     case 'task_started':
     case 'task_blocked':
     case 'task_completed':
+    case 'task_result':
+    case 'task_finished':
     case 'supervisor_decision':
     case 'plan_ready':
+    case 'brief_ready':
       return ['team', 'timeline'];
     case 'manuscript_ready':
     case 'figure_ready':
@@ -73,7 +77,8 @@ export function refreshTargets(type: string): RefreshTarget[] {
     case 'review_issue':
       return ['review', 'team'];
     case 'object_changed':
-      return ['overview', 'sources'];
+    case 'change_proposed':
+      return ['team', 'overview', 'sources'];
     case 'waiting_user':
       return ['team'];
     case 'run_finished':
@@ -141,6 +146,31 @@ function applyPayload(store: ResearchStore, event: TeamEvent): ResearchStore {
         },
       });
     }
+    case 'plan_ready': {
+      let next = store;
+      const rows = Array.isArray(payload.task_details) ? payload.task_details : [];
+      for (const raw of rows as Array<Record<string, unknown>>) {
+        const taskId = String(raw.task_id ?? raw.taskId ?? '');
+        if (!taskId) continue;
+        next = reduce(next, {
+          type: 'entities/task', runId,
+          task: {
+            taskId,
+            agent: String(raw.agent ?? ''),
+            objective: String(raw.objective ?? ''),
+            subquestion: String(raw.subquestion ?? ''),
+            expectedGain: String(raw.expected_gain ?? ''),
+            status: String(raw.status ?? 'queued'),
+            outcome: '', summary: '', failureReason: '',
+            dependsOn: Array.isArray(raw.depends_on) ? raw.depends_on as string[] : [],
+            attempt: Number(raw.attempt ?? 1),
+            needsHuman: Boolean(raw.needs_human ?? false),
+            planVersion: Number(raw.plan_version ?? payload.version ?? 1),
+          },
+        });
+      }
+      return next;
+    }
     case 'task_dispatched':
     case 'task_started':
     case 'task_blocked':
@@ -157,6 +187,33 @@ function applyPayload(store: ResearchStore, event: TeamEvent): ResearchStore {
           subquestion: String(payload.subquestion ?? existing?.subquestion ?? ''),
           expectedGain: String(payload.expected_gain ?? existing?.expectedGain ?? ''),
           status: String(payload.status ?? statusForType(event.type, existing?.status)),
+          outcome: String(payload.outcome ?? existing?.outcome ?? ''),
+          summary: String(payload.summary ?? existing?.summary ?? ''),
+          failureReason: String(payload.failure_reason ?? existing?.failureReason ?? ''),
+          dependsOn: (payload.depends_on as string[]) ?? existing?.dependsOn ?? [],
+          attempt: Number(payload.attempt ?? existing?.attempt ?? 1),
+          needsHuman: Boolean(payload.needs_human ?? existing?.needsHuman ?? false),
+          planVersion: Number(payload.plan_version ?? existing?.planVersion ?? 1),
+        },
+      });
+    }
+    case 'task_result':
+    case 'task_finished': {
+      const taskId = String(event.taskId ?? payload.task_id ?? '');
+      if (!taskId) return store;
+      const existing = store.entities.tasksByRun[runId]?.[taskId];
+      return reduce(store, {
+        type: 'entities/task', runId,
+        task: {
+          taskId,
+          agent: String(event.agent ?? payload.agent ?? existing?.agent ?? ''),
+          objective: String(payload.objective ?? existing?.objective ?? ''),
+          subquestion: String(payload.subquestion ?? existing?.subquestion ?? ''),
+          expectedGain: String(payload.expected_gain ?? existing?.expectedGain ?? ''),
+          status: String(payload.status ?? (payload.outcome === 'failed' ? 'failed'
+            : payload.outcome === 'cancelled' ? 'cancelled'
+            : payload.outcome === 'blocked' ? 'waiting'
+            : payload.outcome === 'partial' ? 'partial' : 'completed')),
           outcome: String(payload.outcome ?? existing?.outcome ?? ''),
           summary: String(payload.summary ?? existing?.summary ?? ''),
           failureReason: String(payload.failure_reason ?? existing?.failureReason ?? ''),
@@ -187,8 +244,22 @@ function applyPayload(store: ResearchStore, event: TeamEvent): ResearchStore {
       if (kind) counts[kind] = Number(payload.count ?? (counts[kind] ?? 0) + 1);
       return reduce(store, { type: 'entities/objectCounts', runId, counts });
     }
+    case 'change_proposed': {
+      const counts = { ...(store.entities.objectCountsByRun[runId] ?? {}) };
+      const kind = String(payload.kind ?? '');
+      if (kind && payload.committed !== false)
+        counts[kind] = Number(counts[kind] ?? 0) + 1;
+      return reduce(store, { type: 'entities/objectCounts', runId, counts });
+    }
     case 'waiting_user':
       return reduce(store, { type: 'ui/notice', notice: String(payload.question ?? '需要你的确认') });
+    case 'brief_ready': {
+      const brief = payload.brief as Record<string, unknown> | undefined;
+      const question = String(brief?.main_question ?? '');
+      return reduce(store, { type: 'ui/notice',
+        notice: question ? `主控已完成问题拆解：${question.slice(0, 300)}`
+          : '主控已完成问题拆解，开始安排研究任务' });
+    }
     case 'run_finished':
       return reduce(store, { type: 'ui/notice', notice: String(payload.stop_reason ?? '运行已结束') });
     default:

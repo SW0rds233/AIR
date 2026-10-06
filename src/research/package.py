@@ -10,6 +10,7 @@ manifest, 不允许把"可导出部分结果"显示为"已完整解决原问题"
 """
 
 import json
+import re
 from pathlib import Path
 
 from src.research.acceptance import GateResult
@@ -32,6 +33,7 @@ def export_package(
     run_id: str = "",
     input_snapshot: dict | None = None,
     manuscript: Manuscript | None = None,
+    publication: GateResult | None = None,
 ) -> Path:
     root = Path(base_dir) if base_dir else _default_root(snapshot)
     root.mkdir(parents=True, exist_ok=True)
@@ -53,6 +55,7 @@ def export_package(
                 [e.model_dump(mode="json") for e in snapshot.evidence_links])
     _write_json(root / "routes.json", [r.model_dump(mode="json") for r in snapshot.routes])
     _write_json(root / "gaps.json", [g.model_dump(mode="json") for g in snapshot.gaps])
+    _write_json(root / "writing_gaps.json", list(manuscript.gaps) if manuscript is not None else [])
 
     for record in snapshot.verifications:
         _write_json(root / "verification" / f"{record.id}.json", record.model_dump(mode="json"))
@@ -81,12 +84,19 @@ def export_package(
         "snapshot_id": snapshot.snapshot_id,
         "created_at": snapshot.created_at,
         "claims": len(snapshot.claims),
+        "models": len(snapshot.models),
+        "obligations": len(snapshot.obligations),
+        "proof_attempts": len(snapshot.attempts),
+        "definitions": len(snapshot.definitions),
+        "assumptions": len(snapshot.assumptions),
+        "gaps": len(snapshot.gaps),
+        "writing_gaps": len(manuscript.gaps) if manuscript is not None else 0,
+        "routes": len(snapshot.routes),
+        "decisions": len(decisions),
         "verifications": len(snapshot.verifications),
         "evidence": len(snapshot.evidence),
         "experiment_specs": len(snapshot.experiment_specs),
-        "gate_passed": bool(gate.passed) if gate else None,
-        "theory_gate_passed": bool(gate.passed) if gate else None,
-        "delivery_gate_passed": bool(delivery.passed) if delivery else None,
+        **gate_manifest_fields(gate, delivery, publication),
         "delivery_level": delivery_level or ("论文草稿" if gate and gate.passed else "研究备忘录"),
         "writing_map": snapshot.writing_map,
         # P1-3: 正文每条核心论断能否回到冻结快照 (只查可反查性, 不判断论证正确性)
@@ -134,16 +144,35 @@ def _traceability(snapshot: ResearchSnapshot, manuscript_md: str,
                 unlabeled.append(block.block_id)
             orphan_refs.extend(ref for ref in refs if ref not in known)
     checked = "markdown" if text.strip() else "snapshot_only"
-    ok = (checked == "markdown" and not unmapped and not missing
+    ok = (bool(core) and checked == "markdown" and not unmapped and not missing
           and not unlabeled and not orphan_refs)
     return {
         "ok": ok, "checked": checked, "mapped": mapped,
+        "status": "not_applicable" if not core else "passed" if ok else "failed",
         "unmapped_claims": unmapped, "missing_anchors": missing,
         "unlabeled_blocks": unlabeled, "orphan_claim_refs": sorted(set(orphan_refs)),
         "core_claims": len(core),
-        "note": ("真实正文的核心结论已反查到冻结快照对象" if ok else
+        "note": ("没有可核查的核心结论映射，不能据此认定论文结论已通过核验" if not core else
+                 "真实正文的核心结论已反查到冻结快照对象" if ok else
                  "正文与快照的映射不完整，或缺少可核对的正文"),
     }
+
+
+def gate_manifest_fields(theory=None, delivery=None, publication=None) -> dict:
+    """One serialized gate contract, shared by initial and post-compilation export."""
+    stages = {"theory": theory, "delivery": delivery, "publication": publication}
+    fields = {f"{name}_gate_passed": bool(gate.passed) if gate is not None else None
+              for name, gate in stages.items()}
+    for name, gate in stages.items():
+        fields[f"{name}_gate_reasons"] = list(dict.fromkeys(
+            [*gate.reasons, *(gate.unresolved if not gate.passed else [])])) if gate is not None else []
+        fields[f"{name}_gate_unresolved"] = list(gate.unresolved) if gate is not None else []
+    fields["blocking"] = list(dict.fromkeys(reason for name in stages
+                                            for reason in fields[f"{name}_gate_reasons"]))
+    fields["unresolved"] = list(dict.fromkeys(reason for gate in stages.values() if gate is not None
+                                              for reason in gate.unresolved))
+    fields["gate_passed"] = all(gate is not None and gate.passed for gate in stages.values())
+    return fields
 
 
 def _source_set(spec: ResearchSpec | None, snapshot: ResearchSnapshot) -> dict:
@@ -159,15 +188,24 @@ def _source_set(spec: ResearchSpec | None, snapshot: ResearchSnapshot) -> dict:
             continue
         seen.add(key)
         files.append({"source_id": item.source_id, "title": item.title, "doi": item.doi,
+                      "authors": item.authors, "year": item.year, "url": item.url,
+                      "content_level": item.content_level, "source_set_id": item.source_set_id,
                       "file_hash": item.file_hash, "locator": item.location,
-                      "retrieved_at": item.retrieved_at})
+                      "retrieved_at": item.retrieved_at,
+                      **{key: getattr(item, key, "") for key in (
+                          "publication_status", "publication_type", "publication_verified_by",
+                          "publication_note", "preprint_url", "volume", "issue", "pages", "venue")}})
     coverage = getattr(spec, "coverage", None) if spec is not None else None
     return {
         "source_set_id": str(getattr(spec, "source_set_id", "") or ""),
         "source_set_kind": str(getattr(spec, "source_set_kind", "") or ""),
         "source_policy": (spec.source_policy.value
                           if spec is not None and getattr(spec, "source_policy", None) else ""),
-        "queries": list(coverage.queries) if coverage is not None else [],
+        "queries": list(dict.fromkeys(
+            (list(coverage.queries) if coverage is not None else [])
+            + [query for item in snapshot.evidence for query in item.retrieval_queries])),
+        "source_set_ids": list(dict.fromkeys(item.source_set_id for item in snapshot.evidence
+                                             if item.source_set_id)),
         "uncovered": list(coverage.uncovered) if coverage is not None else [],
         "documents": files,
         "note": "只记录版本/hash 与原文定位, 不外发原始数据",
@@ -274,19 +312,51 @@ def _render_novelty(snapshot: ResearchSnapshot) -> str:
 def _render_unresolved(snapshot: ResearchSnapshot, notes: list[str]) -> str:
     lines = ["# 未决问题与后续建议", ""]
     open_items = [o for o in snapshot.obligations if o.status.value in ("open", "blocked")]
+    required = [o for o in open_items if o.required]
+    optional = [o for o in open_items if not o.required]
+    pending = [c for c in snapshot.claims if c.status.value in ("proposed", "in_progress", "blocked")]
+    lines += [f"必要义务 {len(required)} 条；可选审查 {len(optional)} 条；未核验/受阻命题 {len(pending)} 条。",
+              "必要义务关闭仍需有效核验记录；可选审查不等于科学证明。", ""]
     if open_items:
-        for o in open_items:
-            lines.append(f"- {o.id} ({o.status.value}): {o.statement} — {o.detail}")
+        for heading, items in (("必要义务", required), ("可选审查", optional)):
+            if items:
+                lines.extend([f"## {heading}", ""])
+                for o in items:
+                    lines.append(f"- {o.id} → {o.claim_id} v{o.claim_version} ({o.status.value}): {o.statement} — {o.detail}")
+                lines.append("")
     else:
-        lines.append("- 无未关闭义务")
+        lines.append("- 未发现未关闭的形式化证明义务")
     blocked_claims = [c for c in snapshot.claims if c.status.value == "blocked"]
     for c in blocked_claims:
         lines.append(f"- 受阻结论 {c.id}: {c.statement}")
     if notes:
         lines.append("")
-        lines.append("## 过程说明")
-        lines.extend(f"- {n}" for n in notes)
+        lines.append("## 交付缺口与过程说明")
+        groups: dict[str, list[str]] = {}
+        seen: set[str] = set()
+        for note in notes:
+            # Strip only transport wrappers, not object IDs or substantive conditions.
+            value = re.sub(r"^(?:(?:need|gap|需求|缺口)\s*:\s*)+", "", str(note).strip())
+            key = re.sub(r"\s+", " ", value)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            category = value.split(":", 1)[0] if ":" in value else "其他"
+            if len(category) > 40:
+                category = "其他"
+            groups.setdefault(category, []).append(value)
+        for category, items in groups.items():
+            lines += ["", f"### {category}（{len(items)}）", ""]
+            lines.extend(f"- {item}" for item in items)
     return "\n".join(lines) + "\n"
+
+
+def write_unresolved_report(base_dir: str | Path, snapshot: ResearchSnapshot,
+                            notes: list[str] | None = None) -> Path:
+    """写入与最终交付评估一致的未决项报告。"""
+    target = Path(base_dir) / "unresolved.md"
+    target.write_text(_render_unresolved(snapshot, list(notes or [])), encoding="utf-8")
+    return target
 
 
 def _limitation(snapshot: ResearchSnapshot) -> str:

@@ -376,10 +376,11 @@ class TeamSession:
         from src.research.package import export_package
 
         store = self.team.task_store.store
-        manuscript_md = _manuscript_markdown(store)
+        from src.research.snapshot import manuscript_markdown
+        manuscript_md = manuscript_markdown(store, problem_id=self.team.problem_id)
         # 先渲染 .tex 并**真编译**: 出版门槛要的是"能不能交付 .pdf"这个事实,
         # 不能用"尚未尝试"占位 (§3.3 G17: 预览/Markdown/PDF 同源同版)。
-        manuscript_obj = _manuscript_object(store)
+        manuscript_obj = _manuscript_object(store, problem_id=self.team.problem_id)
         figure_sources, figure_warnings = _figure_sources(store, self.team.run_id)
         figure_paths = {figure_id: f"figures/{figure_id}.png"
                         for figure_id in figure_sources}
@@ -399,7 +400,9 @@ class TeamSession:
         assessment = assess_delivery(
             store, project_id=self.team.project_id, problem_id=self.team.problem_id,
             run_id=run_id or self.team.run_id, manuscript_md=manuscript_md,
-            references=_reference_rows(store),
+            references=_reference_rows(store, manuscript_obj),
+            blocks=manuscript_obj.all_blocks() if manuscript_obj else [],
+            latex_source=tex_text,
             compile_status="deferred" if not tex_text else "not_attempted",
             on_skip=lambda payload: self.team.runtime.emit(
                 "snapshot_export_incomplete", payload))
@@ -428,13 +431,19 @@ class TeamSession:
                 spec = ResearchSpec.model_validate(raw)
         except Exception:  # noqa: BLE001 - 规格缺失不阻断导出
             spec = None
+        package_notes = [
+            *(self.team.outcome.unresolved_report.get("unresolved") or []),
+            *[str(gap.get("detail") or gap.get("kind") or "")
+              for gap in (manuscript_obj.gaps if manuscript_obj else [])],
+        ]
         try:
             package = export_package(
-                snapshot, spec, [], manuscript_md,
+                snapshot, spec, [decision.to_dict() for decision in self.team.outcome.decisions], manuscript_md,
                 manuscript=manuscript_obj,
-                notes=list(self.team.outcome.unresolved_report.get("unresolved") or []),
+                notes=package_notes,
                 gate=assessment.theory,
                 delivery=assessment.delivery,
+                publication=assessment.publication,
                 delivery_level=assessment.level,
                 run_id=run_id or self.team.run_id,
                 usage=self.team.outcome.usage.to_dict(),
@@ -464,10 +473,18 @@ class TeamSession:
             self.delivery = assess_delivery(
                 store, project_id=self.team.project_id,
                 problem_id=self.team.problem_id, run_id=run_id or self.team.run_id,
-                manuscript_md=manuscript_md, references=_reference_rows(store),
+                manuscript_md=manuscript_md, references=_reference_rows(store, manuscript_obj),
+                blocks=manuscript_obj.all_blocks() if manuscript_obj else [],
+                latex_source=tex_text,
                 compile_status=compile_status,
                 on_skip=None)
             _rewrite_manifest(package, self.delivery, compile_status, compile_log)
+        from src.research.package import write_unresolved_report
+        self.team.outcome.delivery = self.delivery.to_dict()
+        self.team.outcome.unresolved_report["delivery"] = self.delivery.to_dict()
+        write_unresolved_report(package, snapshot, [
+            *package_notes, *(self.delivery.blocking or []), *(self.delivery.unresolved or [])
+        ])
         return package
 
     def _compile_package(self, package: Path, tex_text: str) -> tuple[str, str]:
@@ -492,7 +509,7 @@ class TeamSession:
             return "unavailable", log[-2000:]
         if ok and not has_pdf:
             return "failed: 编译器报告成功但未生成 PDF", log[-2000:]
-        return f"failed: {(log or '')[-400:]}", log[-2000:]
+        return f"failed: {(log or '').splitlines()[0][:400] if log else '无编译诊断'}", log[-2000:]
 
 
 def _snapshot_from_store(store, team: TeamRun):
@@ -526,17 +543,17 @@ def _manuscript_markdown(store) -> str:
     return manuscript_markdown(store)
 
 
-def _manuscript_object(store):
+def _manuscript_object(store, *, problem_id: str = ""):
     """取唯一稿件 IR (渲染 `.tex` 与算 `writing_map` 用的是同一份对象)。"""
     from src.publication.schemas import Manuscript
 
     try:
-        rows = store.list_latest("manuscript") or []
+        from src.research.snapshot import latest_manuscript_row
+        row = latest_manuscript_row(store, problem_id=problem_id)
     except Exception:  # noqa: BLE001 - 读不出来就没有可渲染的稿件
         return None
-    if not rows:
+    if not row:
         return None
-    row = rows[-1]
     payload = row.get("manuscript") if isinstance(row.get("manuscript"), dict) else row
     try:
         return Manuscript.model_validate({k: v for k, v in payload.items()
@@ -608,31 +625,21 @@ def _evidence_rows(store) -> list[dict[str, Any]]:
 def _reference_labels(store) -> dict[str, str]:
     """`{来源对象 id: 参考文献条目文本}` —— 只由**已登记来源**拼出, 不编造。"""
     labels: dict[str, str] = {}
+    from src.publication.references import format_reference
     for row in _evidence_rows(store):
         source_id = str(row.get("id") or "")
         if not source_id:
             continue
-        parts = [str(row.get("authors") or "").strip(),
-                 str(row.get("title") or "").strip(),
-                 str(row.get("year") or "").strip()]
-        entry = ". ".join(part for part in parts if part) or source_id
-        locator = str(row.get("location") or row.get("locator") or "").strip()
-        if locator:
-            entry += f". 定位: {locator}"
-        labels[source_id] = entry
+        labels[source_id] = format_reference(row)
     return labels
 
 
-def _reference_rows(store) -> list[dict[str, Any]]:
+def _reference_rows(store, manuscript=None) -> list[dict[str, Any]]:
     """交付门槛要的文献表形态 (编号在渲染时分配, 这里只给条目)。"""
-    rows: list[dict[str, Any]] = []
-    for index, row in enumerate(_evidence_rows(store), 1):
-        source_id = str(row.get("id") or "")
-        rows.append({"index": index, "source_id": source_id,
-                     "title": row.get("title", ""), "authors": row.get("authors", ""),
-                     "year": row.get("year", ""),
-                     "locator": row.get("location") or row.get("locator", "")})
-    return rows
+    if manuscript is None:
+        return []
+    from src.publication.references import cited_reference_rows
+    return cited_reference_rows(manuscript, _evidence_rows(store))
 
 
 def _rewrite_manifest(package: Path, assessment, compile_status: str,
@@ -646,7 +653,11 @@ def _rewrite_manifest(package: Path, assessment, compile_status: str,
     except Exception:  # noqa: BLE001 - manifest 读不出来不阻断交付
         return
     manifest["delivery_level"] = assessment.level
+    from src.research.package import gate_manifest_fields
+    manifest.update(gate_manifest_fields(assessment.theory, assessment.delivery, assessment.publication))
     manifest["compilation_status"] = compile_status
+    from src.publication.compiler import layout_diagnostics
+    manifest["layout_diagnostics"] = layout_diagnostics(compile_log)
     if compile_status == "ok":
         manifest["compilation_log_tail"] = ""
     else:
@@ -657,6 +668,8 @@ def _rewrite_manifest(package: Path, assessment, compile_status: str,
         (assessment.publication.reasons if assessment.publication else []))
     if compile_status == "ok" and (Path(package) / "manuscript.pdf").is_file():
         manifest["pdf"] = "manuscript.pdf"
+    else:
+        manifest["pdf"] = ""
     try:
         path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
                         encoding="utf-8")

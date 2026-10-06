@@ -223,7 +223,16 @@ def _obligations_for(claim: Claim, wants_equality: bool, method_available: dict[
     # 义务绑定到具体命题版本: 命题换代后义务不得沿用
     ver = claim.version
 
-    if claim.claim_type == ClaimType.causal:
+    from src.research.classification import is_theoretical_claim
+    theoretical = is_theoretical_claim(claim)
+    if theoretical and not (claim.lhs and claim.rhs) and not (claim.expr and claim.wrt):
+        return [ProofObligation(
+            statement=f"在明确变量域、前提与量词下独立核查论证: {claim.statement}",
+            kind="formal_argument", acceptance_method="informal_review",
+            claim_id=claim.id, claim_version=ver,
+            detail="尚无可核验编码；需补充逐步推导与定理条件，不能以文献数量或自述证明关闭")]
+
+    if claim.claim_type == ClaimType.causal and not theoretical:
         stats_ok = method_available.get("stats", True)
         obligations.append(ProofObligation(
             statement=f"在声明设计与数据下估计「{claim.study.treatment}」对「{claim.study.outcome}」的效应",
@@ -293,7 +302,7 @@ def _obligations_for(claim: Claim, wants_equality: bool, method_available: dict[
         ))
         return obligations
 
-    if claim.claim_type != ClaimType.definitional:
+    if claim.claim_type != ClaimType.definitional and not theoretical:
         # 计划书 §7.2: 描述/关联/预测/情景/规范类问题**不能**靠符号推导成立,
         # 也不能因为"没有可核验的不等式"就没有义务 —— 否则会被当成无需证据的命题。
         return _applied_obligations(claim, ver, method_available)
@@ -343,6 +352,12 @@ def parse_questions(text: str) -> list[ClaimQuestion]:
     clauses = [c.strip() for c in re.split(r"[。\n]+", norm) if c.strip()]
     questions: list[ClaimQuestion] = []
     for clause in clauses:
+        # 这里的轻量解析器只支持标量表达式；附件溯源行、Markdown/LaTeX
+        # 公式和带下标的函数若硬拆，会把哈希或 d_H(c_i,c_j) 截成伪命题。
+        if (re.match(r"^\[附件\b.*\bsha256\s*=", clause)
+                or re.search(r"[\\$_]", clause)
+                or "<<<EXTERNAL_DATA_" in clause):
+            continue
         domains, names, _quant = _detect_quantifier(clause)
         wants_eq = bool(re.search(r"等号(成立)?条件", clause))
         # "把 A 换成 B" / "改成" → 基于上一问题派生

@@ -51,7 +51,9 @@ import {
 } from './views/library';
 import {
   createTeamMount,
+  applyTeamEvent,
   getStore as getTeamStore,
+  refreshTeamSection,
   resetTeamStore,
   type TeamMount,
 } from './team-controller';
@@ -765,7 +767,38 @@ function handleEvent(ev: any) {
     case 'node':
       addMsg(ev.text, 'msg-node');
       if (ev.research) updateRunHint(ev.research);
-      refreshWorkbench();
+      if (ev.name === 'research_team' && ev.team_event) {
+        const source = ev.team_event;
+        const type = String(source.event || source.node || '');
+        const visible = new Set([
+          'brief_ready', 'plan_ready', 'supervisor_decision', 'task_started',
+          'task_result', 'task_finished', 'commit_failed', 'change_proposed',
+          'review_issue', 'run_finished',
+        ]);
+        if (visible.has(type)) {
+          const teamCursor = `team:${String(ev._session_id || currentThreadId())}`;
+          const effect = applyTeamEvent({
+            seq: (getTeamStore().transport.cursorBySession[teamCursor] || 0) + 1,
+            sessionId: teamCursor,
+            runId: String(ev.run_id || selectionOf().runId),
+            type: type === 'commit_failed' ? 'task_blocked' : type,
+            taskId: String(source.task_id || ''),
+            agent: String(source.agent || ''),
+            payload: type === 'commit_failed'
+              ? { ...source, status: 'failed', failure_reason: source.reason }
+              : source,
+          });
+          if (effect.kind === 'apply') {
+            refreshTeamSection();
+            if (effect.refresh.includes('overview') || effect.refresh.includes('sources'))
+              refreshWorkbench();
+          } else if (effect.kind === 'resync' || effect.kind === 'incompatible') {
+            void team().mount(currentProjectId(), selectionOf().runId);
+          }
+        }
+      } else {
+        refreshWorkbench();
+      }
       break;
     case 'log': addMsg(ev.text, 'msg-node'); break;
     case 'interrupt': onInterrupt(ev.payload); break;

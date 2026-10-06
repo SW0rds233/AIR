@@ -62,6 +62,7 @@ def ref_to_evidence(service: KnowledgeService, ref: SourceRef,
                     claim: Claim | None = None) -> SourceEvidence:
     """把可定位的检索引用转成候选证据 (不改写支持关系)。"""
     resolved = service.resolve(ref) if service.available else {}
+    from src.publication.references import BIBLIO_FIELDS
     doc_type = str(resolved.get("doc_type") or ref.doc_type or "other")
     try:
         source_kind = _DOC_TYPE_TO_SOURCE.get(DocType(doc_type), SourceKind.other)
@@ -74,12 +75,18 @@ def ref_to_evidence(service: KnowledgeService, ref: SourceRef,
     locator = read.get("locator") or ref.locator
 
     item = SourceEvidence(
+        **{key: resolved.get(key, "") for key in BIBLIO_FIELDS},
         # 确定性 ID: 同一来源 + 同一片段永远得到同一证据对象
         id=stable_id("ev", ref.source_id or ref.title, ref.chunk_id, (ref.excerpt or "")[:200]),
         literature_id=ref.source_id or ref.doi or ref.title,
         title=ref.title or str(resolved.get("title", "")),
+        authors=str(resolved.get("authors", "")),
+        venue=str(resolved.get("venue", "")),
         doi=ref.doi or str(resolved.get("doi", "")),
-        url="",
+        url=str(resolved.get("url", "")),
+        content_level=("fulltext" if resolved.get("has_fulltext") and read.get("text") and not read.get("failure") else
+                       "abstract" if excerpt else "metadata"),
+        source_set_id=service.topic,
         source_kind=source_kind,
         credibility=_credibility(str(resolved.get("credibility") or ref.credibility or "low")),
         peer_reviewed=bool(resolved.get("peer_reviewed", ref.peer_reviewed)),
@@ -114,6 +121,8 @@ def ref_to_evidence(service: KnowledgeService, ref: SourceRef,
         item.location = item.location or f"p{item.page}"
     if read.get("failure"):
         item.notes = (item.notes + " " + str(read["failure"])).strip()
+    if item.content_level == "abstract" and not item.location.lower().startswith("abstract"):
+        item.location = "abstract " + item.location
     return item
 
 
@@ -213,8 +222,37 @@ def _default_search_fn() -> Callable[[str, int], list[dict]] | None:
         return None
 
 
+def _embedding_enabled() -> bool:
+    try:
+        from src.rag.vector_store import embedding_available
+
+        return bool(embedding_available())
+    except Exception:
+        return False
+
+
+def _paper_evidence(paper: dict, *, topic: str = "") -> SourceEvidence:
+    """保留真正返回的摘要和书目信息，不把元数据当作已读全文。"""
+    from src.publication.references import BIBLIO_FIELDS
+    excerpt = str(paper.get("abstract") or "")[:2000]
+    source_id = stable_id("lit", _paper_key(paper))
+    return SourceEvidence(
+        id=source_id, source_id=source_id, literature_id=_paper_key(paper),
+        title=str(paper.get("title") or ""), authors=str(paper.get("authors") or ""),
+        year=str(paper.get("year") or ""), venue=str(paper.get("venue") or ""),
+        doi=str(paper.get("doi") or ""), url=str(paper.get("url") or ""),
+        **{key: paper.get(key, "") for key in BIBLIO_FIELDS},
+        excerpt=excerpt, location=(f"abstract chars 0-{len(excerpt)}" if excerpt else
+                                  f"metadata: {paper.get('doi') or paper.get('url') or source_id}"),
+        char_start=0 if excerpt else -1, char_end=len(excerpt) if excerpt else -1,
+        content_level="abstract" if excerpt else "metadata", source_set_id=topic,
+        retrieved_at=utcnow(), retrieval_queries=list(paper.get("_retrieval_queries") or []),
+        support_reason="外部检索候选材料，支持关系尚未判定",
+        notes="未入库；只读到摘要/书目信息，不能核对完整定理条件")
+
+
 def _harvest_external(queries: list[str], policy: SourcePolicy, coverage: RetrievalCoverage,
-                      *, topic: str, search_fn, per_query: int, ingest: bool) -> None:
+                      *, topic: str, search_fn, per_query: int, ingest: bool) -> list[SourceEvidence]:
     """按规划的多条检索式自主检索, 命中入库, 并把覆盖情况写进 coverage。"""
     import os
 
@@ -222,11 +260,11 @@ def _harvest_external(queries: list[str], policy: SourcePolicy, coverage: Retrie
     if search_fn is None and os.getenv("THEORY_LLM", "").strip().lower() in {"0", "false", "off"}:
         coverage.failures.append("显式离线运行: 未执行外部文献检索")
         coverage.uncovered.append("外部文献未核查")
-        return
+        return []
     fn = search_fn if search_fn is not None else _default_search_fn()
     if fn is None:
         coverage.failures.append("外部检索能力不可用 (工具未安装或配置缺失)")
-        return
+        return []
     coverage.engines = list(_EXTERNAL_ENGINES)
     fetched: dict[str, dict] = {}
     for query in queries:
@@ -237,30 +275,65 @@ def _harvest_external(queries: list[str], policy: SourcePolicy, coverage: Retrie
             continue
         # 只要有一条检索式跑完, 就算"检索执行过": 之后的零命中是"无命中"而不是"失败"
         coverage.executed = True
-        coverage.hits += len(papers)
+        from src.kb.publication import relevance_score
+        usable = [paper for paper in papers if isinstance(paper, dict) and paper.get("title")]
+        coverage.failures.extend(str(paper.get("error")) for paper in papers
+                                 if isinstance(paper, dict) and paper.get("error"))
+        coverage.hits += len(usable)
+        ranked = sorted(usable, key=lambda paper: relevance_score(paper, query), reverse=True)
+        papers = [paper for paper in ranked if relevance_score(paper, query) >= .1][:per_query]
+        if len(papers) < len(usable):
+            coverage.uncovered.append(f"查询 {query}: {len(usable) - len(papers)} 条低相关候选未纳入研究材料")
         for paper in papers:
             key = _paper_key(paper)
             if key:
-                fetched.setdefault(key, paper)
+                record = fetched.setdefault(key, {**paper, "_retrieval_queries": []})
+                if query not in record["_retrieval_queries"]:
+                    record["_retrieval_queries"].append(query)
     if not fetched:
         coverage.uncovered.append("自主检索未返回任何可用记录")
-        return
-    if not ingest or not topic:
-        coverage.uncovered.append(f"{len(fetched)} 条命中未入库 (未指定主题或关闭入库)")
-        return
+        return []
+    if not ingest:
+        coverage.uncovered.append(f"{len(fetched)} 条命中未入库 (调用方关闭入库)，保留摘要候选")
+        return [_paper_evidence(paper) for paper in fetched.values()]
     # 先取全文并落盘, 再入库 —— 顺序不能反: 入库时 `pdf_path` 必须已存在, 否则只会写入
     # 元数据 (无 sections/chunks/定理卡片), 后续拿不到可定位的原文引文。
     # 这一步与综述模式的 `pdf_ingestion` 节点**复用同一套下载工具**
     # (`download_pdfs_for_papers`), 只按本轮规模上限控制。
-    papers = _download_fulltext_for(fetched.values(), topic=topic, per_query=per_query,
+    from src.kb.publication import verify_publication
+    publications = [verify_publication(paper) for paper in fetched.values()]
+    for paper in publications:
+        if paper.get("publication_status") != "published":
+            coverage.uncovered.append(f"未确认正式出版: {paper.get('title')}；{paper.get('publication_note')}")
+    papers = _download_fulltext_for(publications, topic=topic, per_query=per_query,
                                    coverage=coverage)
     from src.kb.ingest import ingest_machine
 
-    report = ingest_machine(topic, papers, embed=False)
-    coverage.ingested = len(report["ingested"])
-    coverage.duplicates = len(report["merged"])
-    if report.get("errors"):
-        coverage.failures.extend(str(e) for e in report["errors"])
+    from src.kb.store import KBStore
+
+    store = None
+    try:
+        store = KBStore(topic)
+        report = ingest_machine(topic, papers, embed=_embedding_enabled(), store=store)
+        coverage.ingested += len(report["ingested"])
+        coverage.duplicates += len(report["merged"])
+        coverage.failures.extend(str(e) for e in report.get("errors", []))
+        ids = {row["title"]: row["doc_id"] for row in [*report["ingested"], *report["merged"]]}
+        service = KnowledgeService(topic, store=store)
+        items = []
+        for paper in papers:
+            ref = service.document_ref(ids.get(paper.get("title"), ""))
+            item = ref_to_evidence(service, ref) if ref else _paper_evidence(paper)
+            item.retrieval_queries = list(paper.get("_retrieval_queries") or [])
+            items.append(item)
+        return items
+    except Exception as e:
+        coverage.failures.append(f"命中资料入库失败: {type(e).__name__}: {e}")
+        coverage.uncovered.append("已保留外部命中的摘要/元数据，入库与全文核对尚未完成")
+        return [_paper_evidence(paper) for paper in papers]
+    finally:
+        if store is not None:
+            store.close()
 
 
 def _download_fulltext_for(papers, *, topic: str, per_query: int,
@@ -283,13 +356,6 @@ def _download_fulltext_for(papers, *, topic: str, per_query: int,
         from src.tools.pdf_fetcher import download_pdfs_for_papers
     except Exception as e:  # noqa: BLE001 - 工具不可用时退回元数据入库
         coverage.failures.append(f"全文下载工具不可用: {type(e).__name__}: {e}")
-        return candidates
-
-    from src.rag.vector_store import embedding_available
-
-    if not embedding_available():
-        # 无向量化能力时全文检索不到, 下载只会白占磁盘 —— 如实记录并跳过
-        coverage.uncovered.append("全文下载跳过: 向量化不可用 (SKIP_EMBEDDING)")
         return candidates
 
     limit = max(1, min(int(per_query or 1), int(PDF_DOWNLOAD_LIMIT)))
@@ -362,17 +428,26 @@ def gather_sources(
                            limit=query_limit)
     # 检索智能体通过工具循环提出的查询优先进入同一条入库/覆盖路径；
     # 不另起一套"模型搜到了但结果没登记"的隐形检索。
-    selected = [str(q).strip()[:300] for q in (extra_queries or []) if str(q).strip()]
+    from src.research.query_planner import research_question_text
+    selected = [research_question_text(str(q))[:300] for q in (extra_queries or []) if str(q).strip()]
     queries = list(dict.fromkeys([*selected, *(q.text for q in planned)]))[:query_limit]
     coverage.queries = list(queries)
+    external_items: list[SourceEvidence] = []
     if policy in (SourcePolicy.autonomous, SourcePolicy.both):
-        _harvest_external(queries, policy, coverage, topic=topic, search_fn=search_fn,
-                          per_query=per_query, ingest=ingest)
+        topic = topic or stable_id("research-kb", _claim_goal(claim), contract.goal if contract else "")
+        external_items = _harvest_external(queries, policy, coverage, topic=topic, search_fn=search_fn,
+                                          per_query=per_query, ingest=ingest)
 
     refs: list[SourceRef] = []
     # 自主检索刚入库的资料, 与用户资料库走同一条检索路径 (这就是"合并"的含义)
+    owned_service = service is None
     service = service if service is not None else _open_service(topic)
-    if service is not None:
+    # autonomous 只使用本轮外部命中；both 才合并用户资料库。
+    if policy is SourcePolicy.autonomous:
+        service_for_search = None
+    else:
+        service_for_search = service
+    if service_for_search is not None:
         for query in queries:
             outcome = service.search(RetrievalRequest(
                 query=query, claim_id=claim.id if claim else "", gap_type=gap_type,
@@ -383,11 +458,11 @@ def gather_sources(
             else:
                 coverage.uncovered.append(f"资料库检索未执行: {query}")
             refs.extend(outcome.refs)
-        if not refs:
+        if not refs and not external_items:
             coverage.uncovered.append("在所授权资料内没有命中 (不等于不存在)")
-    elif policy is SourcePolicy.autonomous:
+    elif policy is SourcePolicy.autonomous and not external_items:
         coverage.uncovered.append("没有可用的用户资料库, 本次只用自主检索结果")
-    else:
+    elif not external_items:
         uncovered_note = "没有可用的用户资料库 (未绑定或为空)"
         if uncovered_note not in coverage.uncovered:
             coverage.uncovered.append(uncovered_note)
@@ -407,13 +482,29 @@ def gather_sources(
         else:
             coverage.abstract_only += 1
 
+    items = [ref_to_evidence(service, ref, claim) for ref in merged] if service is not None else []
+    items.extend(external_items)
+    unique: dict[str, SourceEvidence] = {}
+    for item in items:
+        key = f"doi:{item.doi.lower()}" if item.doi else item.source_id or item.literature_id
+        previous = unique.get(key)
+        if previous is None or (previous.content_level != "fulltext" and item.content_level == "fulltext"):
+            if previous is not None:
+                item.retrieval_queries = list(dict.fromkeys([*previous.retrieval_queries, *item.retrieval_queries]))
+            unique[key] = item
+        elif item.retrieval_queries:
+            previous.retrieval_queries = list(dict.fromkeys([*previous.retrieval_queries, *item.retrieval_queries]))
+    items = list(unique.values())
+    coverage.fulltext_available = sum(item.content_level == "fulltext" for item in items)
+    coverage.abstract_only = sum(item.content_level == "abstract" for item in items)
     coverage.scope_note = (
         f"策略 {policy.value}: 检索式 {len(queries)} 条, "
         f"外部命中 {coverage.hits} 条 (入库 {coverage.ingested}, 重复 {coverage.duplicates}), "
-        f"资料库去重后 {len(merged)} 条 (全文 {coverage.fulltext_available}, "
+        f"可用来源去重后 {len(items)} 条 (全文 {coverage.fulltext_available}, "
         f"仅摘要 {coverage.abstract_only})")
     coverage.finished_at = utcnow()
-    items = [ref_to_evidence(service, ref, claim) for ref in merged] if service is not None else []
+    if owned_service and service is not None and service.store is not None:
+        service.store.close()
     return detect_contradictions(items), coverage
 
 

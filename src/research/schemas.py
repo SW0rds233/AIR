@@ -587,16 +587,24 @@ class Definition(BaseModel):
     depends_on: list[str] = Field(default_factory=list)
 
 
-class SourceEvidence(BaseModel):
+from src.publication.references import PublicationMetadata
+
+
+class SourceEvidence(PublicationMetadata):
     id: str = Field(default_factory=lambda: new_id("ev"))
     literature_id: str = ""
     version: int = 1
     title: str = ""
+    authors: str = ""
+    venue: str = ""
     doi: str = ""
     url: str = ""
     file_hash: str = ""
     location: str = ""  # 页码/节号/定理号 (人可读定位)
     excerpt: str = ""
+    content_level: str = "unknown"
+    source_set_id: str = ""
+    retrieval_queries: list[str] = Field(default_factory=list)
     source_kind: SourceKind = SourceKind.other
     evidence_grade: EvidenceGrade = EvidenceGrade.unsupported
     credibility: Credibility = Credibility.low
@@ -720,6 +728,31 @@ class ResearchRoute(BaseModel):
     created_at: str = Field(default_factory=utcnow)
 
 
+class ModelVariable(BaseModel):
+    """模型变量声明；未知的含义、单位和域保留为空。"""
+
+    symbol: str = Field(min_length=1)
+    meaning: str = ""
+    unit: str = ""
+    domain: str = ""
+
+
+class ModelAssumption(BaseModel):
+    """模型内的假设声明，或对已登记假设的引用。"""
+
+    id: str = ""
+    statement: str = ""
+    origin: Origin | None = None
+    source_ids: list[str] = Field(default_factory=list)
+    applicability: str = ""
+
+    @model_validator(mode="after")
+    def _has_statement_or_reference(self) -> ModelAssumption:
+        if not self.id.strip() and not self.statement.strip():
+            raise ValueError("模型假设必须提供 statement 或已登记假设的 id")
+        return self
+
+
 class ResearchModel(BaseModel):
     """候选领域模型 (计划书 §4.1 / §5.2): 系统必须能够建模。
 
@@ -731,19 +764,69 @@ class ResearchModel(BaseModel):
     name: str = ""
     natural_language: str = ""
     formal_encoding: str = ""
-    variables: list[str] = Field(default_factory=list)
+    claim_id: str = ""
+    variables: list[ModelVariable] = Field(default_factory=list)
     variable_domains: dict[str, str] = Field(default_factory=dict)
     units: dict[str, str] = Field(default_factory=dict)
     mechanism: str = ""
     source_refs: list[str] = Field(default_factory=list)  # 来源: 文献/用户/系统提出
     origin: Origin = Origin.proposed
-    assumptions: list[str] = Field(default_factory=list)  # assumption id
+    assumptions: list[ModelAssumption] = Field(default_factory=list)
+    applicability: str = ""
+    why_chosen: str | bool = ""
+    rejected: list[dict[str, Any]] = Field(default_factory=list)
+    open_conditions: list[str] = Field(default_factory=list)
+    validation_problems: list[str] = Field(default_factory=list)
+    subquestion: str = ""
     approximations: list[str] = Field(default_factory=list)
     boundaries: str = ""
     fidelity: str = ""          # 与问题的忠实度说明
     verified_scope: str = ""    # 该模型下结论的适用范围
     selected: bool = False
     created_at: str = Field(default_factory=utcnow)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalise_declarations(cls, value: Any) -> Any:
+        """把既有字符串记录与团队结构化提案读成同一契约。"""
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        if isinstance(data.get("variables"), list):
+            data["variables"] = [
+                {"symbol": variable} if isinstance(variable, str) else variable
+                for variable in data["variables"]
+            ]
+        if isinstance(data.get("assumptions"), list):
+            assumptions = []
+            for assumption in data["assumptions"]:
+                if isinstance(assumption, str):
+                    assumption = ({"id": assumption}
+                                  if assumption.startswith(("asm-", "asmobj-", "assobj-"))
+                                  else {"statement": assumption})
+                assumptions.append(assumption)
+            data["assumptions"] = assumptions
+        if isinstance(data.get("source_ids"), list) and isinstance(data.get("source_refs", []), list):
+            data["source_refs"] = [*data.get("source_refs", []), *data["source_ids"]]
+        return data
+
+    @model_validator(mode="after")
+    def _complete_metadata(self) -> ResearchModel:
+        for variable in self.variables:
+            for field_name, index in (("domain", self.variable_domains), ("unit", self.units)):
+                declared = getattr(variable, field_name)
+                indexed = index.get(variable.symbol, "")
+                if declared and indexed and declared != indexed:
+                    raise ValueError(f"变量 {variable.symbol} 的 {field_name} 声明不一致")
+                if declared:
+                    index[variable.symbol] = declared
+                elif indexed:
+                    setattr(variable, field_name, indexed)
+        sources = [*self.source_refs]
+        for assumption in self.assumptions:
+            sources.extend(assumption.source_ids)
+        self.source_refs = list(dict.fromkeys(sources))
+        return self
 
 
 class ActionExecution(BaseModel):
@@ -826,6 +909,8 @@ class Claim(BaseModel):
     # 旧数据为空 → 归属当前正在研究的问题 (由工作台过滤逻辑判定, 不猜测)。
     problem_id: str = ""
     claim_type: ClaimType = ClaimType.definitional
+    strategy: str = ""  # 推理方法与命题语义类型是两个维度。
+    claim_type_input: str = ""  # 兼容旧记录时保留原始误填值以便审计。
     # 应用/因果: 作用对象与范围
     scope_population: str = ""
     scope_region: str = ""
@@ -871,6 +956,18 @@ class Claim(BaseModel):
     # 该结论被验证时所用的对象版本闭包 (假设/模型), 变化后即失效
     verification_closure: dict[str, int] = Field(default_factory=dict)
     notes: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalise_legacy_strategy_type(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or value.get("claim_type") != "derivation":
+            return value
+        data = dict(value)
+        data["claim_type_input"] = data.get("claim_type_input") or "derivation"
+        data["claim_type"] = ClaimType.descriptive.value
+        data["strategy"] = data.get("strategy") or "derivation"
+        # This is classification compatibility only, never evidence of proof.
+        return data
 
     @model_validator(mode="after")
     def _guard_supported(self) -> Claim:

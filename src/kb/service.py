@@ -407,6 +407,28 @@ class KnowledgeService:
             existence_verified=bool(doc.get("existence_verified")),
         )
 
+    def document_ref(self, doc_id: str) -> SourceRef | None:
+        """读取本轮已命中的文档，无需对同一命中再做关键词匹配。"""
+        doc = self._store.get_document(doc_id) if self._store else None
+        if not doc:
+            return None
+        chunks = self._store.get_chunks(doc_id, limit=1)
+        if chunks:
+            chunk = chunks[0]
+            start, end = int(chunk.get("char_start", -1)), int(chunk.get("char_end", -1))
+            page = int(chunk.get("page") or 0)
+            return SourceRef(source_id=doc_id, chunk_id=f"{doc_id}#{chunk['idx']}",
+                             title=doc.get("title", ""), excerpt=chunk.get("text", "")[:600],
+                             locator=f"p{page} chars {start}-{end}" if page else f"chars {start}-{end}",
+                             page=page, char_start=start, char_end=end, kind="chunk", topic=self.topic,
+                             doi=doc.get("doi", ""), year=str(doc.get("year", "")))
+        abstract = str(doc.get("abstract") or "")[:600]
+        locator = (f"abstract chars 0-{len(abstract)}" if abstract else
+                   f"metadata: {doc.get('doi') or doc.get('url') or doc_id}")
+        return self._doc_ref({"doc_id": doc_id, "text": abstract, "locator": locator,
+                              "char_start": 0 if abstract else -1,
+                              "char_end": len(abstract) if abstract else -1}, doc)
+
     def _doc_ref(self, item: dict, doc: dict) -> SourceRef:
         from src.utils.file_utils import get_timestamp
 
@@ -566,10 +588,15 @@ class KnowledgeService:
         if not doc:
             return {"found": False, "source_id": ref.source_id,
                     "failure": "权威库中无该来源记录"}
+        from src.publication.references import BIBLIO_FIELDS
         return {
+            **{key: doc.get(key, "") for key in BIBLIO_FIELDS},
             "found": True,
             "source_id": ref.source_id,
             "title": doc.get("title", ""),
+            "authors": doc.get("authors", ""),
+            "venue": doc.get("venue", ""),
+            "url": doc.get("url", ""),
             "year": doc.get("year", ""),
             "doi": doc.get("doi", ""),
             "doc_type": doc.get("doc_type", ""),

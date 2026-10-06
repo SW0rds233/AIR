@@ -45,6 +45,9 @@ def load_meta(topic: str) -> dict:
 
 
 def _doc_type_from(item: dict) -> DocType:
+    published_type = {"journal-article": DocType.journal, "proceedings-article": DocType.conference}.get(item.get("publication_type"))
+    if item.get("publication_status") == "published" and published_type:
+        return published_type
     t = str(item.get("type", "") or "").strip()
     if t in ("D", "thesis", "学位论文"):
         return DocType.thesis
@@ -235,6 +238,7 @@ def ingest_machine(topic: str, papers: list[dict], embed: bool = False,
     ensure_topic(topic)
     store = store or KBStore(topic)
     report = {"topic": topic, "ingested": [], "merged": [], "errors": []}
+    from src.publication.references import BIBLIO_FIELDS
     for paper in papers:
         title = (paper.get("title") or "").strip()
         if not title:
@@ -251,6 +255,7 @@ def ingest_machine(topic: str, papers: list[dict], embed: bool = False,
             manual_asserted=False, existence_verified=bool(paper.get("doi") or paper.get("url")),
             peer_reviewed=peer, credibility=credibility,
             identity=build_identity(paper),
+            **{key: str(paper.get(key) or "") for key in BIBLIO_FIELDS},
         )
         parsed = None
         pdf_path = paper.get("pdf_path")
@@ -260,6 +265,24 @@ def ingest_machine(topic: str, papers: list[dict], embed: bool = False,
             record.num_pages = len(parsed.pages)
             record.parse_quality = parsed.parse_quality
             record.visibility_flags = list(parsed.visibility_flags)
+        if not is_new:
+            prior = store.get_document(doc_id) or {}
+            record.created_at = prior.get("created_at", record.created_at)
+            if not record.abstract:
+                record.abstract = prior.get("abstract") or ""
+            # A repeated metadata-only hit must not erase an already read full text.
+            if not record.has_fulltext and prior.get("has_fulltext"):
+                for field in ("has_fulltext", "num_pages", "parse_quality", "visibility_flags"):
+                    if field in prior:
+                        setattr(record, field, prior[field])
+            from src.publication.references import citation_eligible
+            if citation_eligible(prior) and not citation_eligible(record.model_dump()):
+                for field in (*BIBLIO_FIELDS, "title", "authors", "year", "venue", "doi", "url"):
+                    if field in prior:
+                        setattr(record, field, prior[field])
+                record.identity = build_identity(record.model_dump())
+                record.doc_type = _doc_type_from(record.model_dump())
+                record.peer_reviewed, record.credibility = _credibility(record.doc_type, manual=False)
         store.upsert_document(record, search_text=_build_search_text(
             record, "\n".join(s.text for s in parsed.sections) if parsed else ""))
         store.set_identity(candidate_keys(record.identity), doc_id)

@@ -56,6 +56,7 @@ class DeliveryAssessment:
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        from src.research.package import gate_manifest_fields
         return {
             "level": self.level, "accepted": self.accepted,
             "blocking": list(self.blocking), "unresolved": list(self.unresolved),
@@ -63,6 +64,7 @@ class DeliveryAssessment:
             "theory_passed": bool(self.theory and self.theory.passed),
             "delivery_passed": bool(self.delivery and self.delivery.passed),
             "publication_passed": bool(self.publication and self.publication.passed),
+            **gate_manifest_fields(self.theory, self.delivery, self.publication),
         }
 
     def describe(self) -> str:
@@ -77,22 +79,34 @@ class DeliveryAssessment:
 def assess_delivery(store: Any, *, project_id: str, problem_id: str, run_id: str,
                     manuscript_md: str = "", references: Iterable[dict[str, Any]] = (),
                     compile_status: str = "", blocks: list[Any] | None = None,
+                    latex_source: str = "",
                     checklist: dict[str, Any] | None = None,
                     on_skip=None) -> DeliveryAssessment:
     """按三道门槛评估当前产出, 返回等级与理由 (不写任何状态)。"""
     snapshot = snapshot_from_store(store, project_id=project_id, problem_id=problem_id,
                                    run_id=run_id, on_skip=on_skip)
+    from src.research.snapshot import latest_manuscript_row
+    from src.publication.schemas import Manuscript
+    from src.publication.references import cited_reference_rows
+    if blocks is None:
+        row = latest_manuscript_row(store, problem_id=problem_id)
+        payload = row.get("manuscript") if isinstance(row.get("manuscript"), dict) else row
+        if payload:
+            draft = Manuscript.model_validate({k: v for k, v in payload.items() if not k.startswith("_")})
+            blocks = draft.all_blocks()
+            references = cited_reference_rows(draft, [source.model_dump(mode="json") for source in snapshot.evidence])
     theory = theory_validity_gate(
         snapshot.claims, snapshot.obligations, snapshot.verifications,
         snapshot.dependency_edges, snapshot=snapshot)
     delivery = delivery_gate(manuscript_md, snapshot, theory_gate=theory)
     publication = publication_gate(
         manuscript_md, snapshot, references=list(references),
-        compile_status=compile_status, blocks=blocks, checklist=checklist)
+        compile_status=compile_status, blocks=blocks, checklist=checklist,
+        latex_source=latex_source)
     level = classify_deliverable(theory, delivery, publication)
     assessment = DeliveryAssessment(
         level=level,
-        accepted=bool(theory.passed and delivery.passed),
+        accepted=bool(theory.passed and delivery.passed and publication.passed),
         theory=theory, delivery=delivery, publication=publication,
         blocking=[*theory.reasons, *delivery.reasons, *publication.reasons],
         unresolved=[*theory.unresolved, *delivery.unresolved,

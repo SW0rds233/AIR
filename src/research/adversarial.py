@@ -162,6 +162,20 @@ def _supporting(evidence: list[SourceEvidence]) -> list[SourceEvidence]:
 
 def _is_applied(claim: Claim) -> bool:
     """是否需要应用/因果类审查 (形式化命题不涉及这些失效方式)。"""
+    from src.research.classification import is_theoretical_claim
+    if is_theoretical_claim(claim):
+        return False
+    # Descriptive is a semantic type, not evidence that a claim has samples.
+    if claim.claim_type == ClaimType.descriptive:
+        study = claim.study
+        empirical = (study.design not in (StudyDesign.none, StudyDesign.theory)
+                     or bool(study.rows or study.data_ref or study.population or study.region
+                             or study.period or study.treatment or study.measurement_notes))
+        mathematical = claim.strategy in {"derivation", "proof"} or _hits(claim.statement, (
+            "矩阵", "定理", "子群", "等距码", "代数", "内积", "恒等式", "不等式",
+            "matrix", "matrices", "theorem", "subgroup", "inner product", "algebraic identity", "inequality"))
+        if not empirical and (study.design == StudyDesign.theory or mathematical):
+            return False
     return claim.claim_type in (ClaimType.causal, ClaimType.associational,
                                 ClaimType.descriptive, ClaimType.predictive,
                                 ClaimType.scenario)
@@ -267,7 +281,7 @@ def _check_measurement(claim: Claim, text: str,
 # ----------------------------------------------------------------------
 def _check_confounding(claim: Claim, text: str,
                        supporting: list[SourceEvidence]) -> Finding:
-    if claim.claim_type not in (ClaimType.causal, ClaimType.associational,
+    if not _is_applied(claim) or claim.claim_type not in (ClaimType.causal, ClaimType.associational,
                                 ClaimType.predictive):
         return Finding("confounding", CHECK_TITLES["confounding"], NOT_APPLICABLE,
                        "该命题类型不声称变量间因果/关联效应")
@@ -304,7 +318,7 @@ def _check_confounding(claim: Claim, text: str,
 # ----------------------------------------------------------------------
 def _check_multiple_comparisons(claim: Claim, text: str,
                                 supporting: list[SourceEvidence]) -> Finding:
-    if claim.claim_type not in (ClaimType.causal, ClaimType.associational,
+    if not _is_applied(claim) or claim.claim_type not in (ClaimType.causal, ClaimType.associational,
                                 ClaimType.predictive, ClaimType.descriptive):
         return Finding("multiple_comparisons", CHECK_TITLES["multiple_comparisons"],
                        NOT_APPLICABLE, "该命题类型不涉及假设检验")
@@ -327,7 +341,7 @@ def _check_multiple_comparisons(claim: Claim, text: str,
 # ----------------------------------------------------------------------
 def _check_reverse_causality(claim: Claim, text: str,
                              evidence: list[SourceEvidence]) -> Finding:
-    if claim.claim_type not in (ClaimType.causal, ClaimType.predictive):
+    if not _is_applied(claim) or claim.claim_type not in (ClaimType.causal, ClaimType.predictive):
         return Finding("reverse_causality", CHECK_TITLES["reverse_causality"],
                        NOT_APPLICABLE, "该命题不声称方向性效应")
     design = claim.study.design

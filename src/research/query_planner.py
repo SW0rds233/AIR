@@ -61,8 +61,21 @@ def _terms_in(text: str, terminology: dict[str, list[str]] | None) -> list[str]:
     return list(dict.fromkeys(term for term in terms if term))
 
 
+def research_question_text(text: str) -> str:
+    """保留附件题面内容，移除传输定界符、哈希与外部资料提示样板。"""
+    body = str(text or "").strip()
+    blocks = re.findall(r"<<<EXTERNAL_DATA_BEGIN>>>(.*?)<<<EXTERNAL_DATA_END>>>", body, re.S)
+    if blocks:
+        prefix = body.split("<<<EXTERNAL_DATA_BEGIN>>>", 1)[0]
+        prefix = re.split(r"以下定界区内", prefix, maxsplit=1)[0].strip()
+        body = "\n\n".join([*blocks, prefix])
+    body = re.sub(r"\[附件[^\]\n]*\]", "", body)
+    body = re.sub(r"<<<EXTERNAL_DATA_(?:BEGIN|END)>>>", "", body)
+    return body.strip()
+
+
 def _clean(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "").strip())
+    return re.sub(r"\s+", " ", research_question_text(text)).strip()
 
 
 # 核心意图词 (研究与结论强相关的谓词)。带这些词的术语最值得进英文检索式。
@@ -169,7 +182,7 @@ def plan_queries(contract: ProblemContract | None = None, *, goal: str = "",
         for name in _ORDER[kind]:
             queries.append(Query(text=by_angle[name], angle=name, why=why_by_angle[name]))
     elif text:
-        queries.append(Query(text=text, angle="goal", why="没有可分解的处理/结果对象, 直接检索目标表述"))
+        queries.append(Query(text=text[:240], angle="goal", why="按题面目标检索，关联概念由研究角色补充"))
 
     variants = _terms_in(f"{text} {treatment} {outcome}", terminology)
     if variants and queries:
@@ -199,4 +212,4 @@ def plan_queries(contract: ProblemContract | None = None, *, goal: str = "",
     return out
 
 
-__all__ = ["Query", "plan_queries"]
+__all__ = ["Query", "plan_queries", "research_question_text"]

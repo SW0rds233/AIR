@@ -106,13 +106,17 @@ def _search_local_kb(query: str, topic: str = "", limit: int = 8) -> str:
     from src.kb.service import KnowledgeService, RetrievalRequest
 
     service = KnowledgeService(topic, create_if_missing=False)
-    if not service.usable:
-        return (f"资料库 {topic!r} 不可用或为空: 没有可检索的已登记资料; "
-                f"如需外部检索请把资料范围改为 autonomous")
-    outcome = service.search(RetrievalRequest(query=query, max_results=limit))
-    if not outcome.searched:
-        return "资料库检索未执行: " + "; ".join(str(f) for f in outcome.failures)
-    return _format_refs(outcome.refs)
+    try:
+        if not service.usable:
+            return (f"资料库 {topic!r} 不可用或为空: 没有可检索的已登记资料; "
+                    f"如需外部检索请把资料范围改为 autonomous")
+        outcome = service.search(RetrievalRequest(query=query, max_results=limit))
+        if not outcome.searched:
+            return "资料库检索未执行: " + "; ".join(str(f) for f in outcome.failures)
+        return _format_refs(outcome.refs)
+    finally:
+        if service.store is not None:
+            service.store.close()
 
 
 def _format_refs(refs: Any) -> str:
@@ -131,19 +135,29 @@ def _format_refs(refs: Any) -> str:
     return "\n".join(lines)
 
 
-def _read_source(source_id: str, topic: str = "", context_chars: int = 1200) -> str:
-    from src.kb.service import KnowledgeService, SourceRef
+def _read_source(source_id: str, topic: str = "", context_chars: int = 1200,
+                 query: str = "") -> str:
+    from src.kb.service import KnowledgeService, RetrievalRequest
 
     service = KnowledgeService(topic, create_if_missing=False)
-    if not service.usable:
-        return f"资料库 {topic!r} 不可用, 无法回原文"
-    ref = SourceRef(source_id=source_id, kind="doc")
-    resolved = service.read(ref, context_chars=context_chars)
-    if not resolved:
-        return f"来源 {source_id} 无法读取"
-    locator = resolved.get("locator", "")
-    text = str(resolved.get("text") or "")
-    return f"来源 {source_id} @ {locator}\n{text[:context_chars]}"
+    try:
+        if not service.usable:
+            return f"资料库 {topic!r} 不可用, 无法回原文"
+        ref = service.document_ref(source_id)
+        if query:
+            outcome = service.search(RetrievalRequest(query=query, max_results=20))
+            ref = next((item for item in outcome.refs if item.source_id == source_id), ref)
+        if ref is None:
+            return f"来源 {source_id} 未登记，无法读取"
+        context_chars = max(200, min(int(context_chars), 12000))
+        resolved = service.read(ref, context_chars=context_chars)
+        locator = resolved.get("locator", "")
+        text = str(resolved.get("text") or ref.excerpt or "")
+        limitation = str(resolved.get("failure") or "")
+        return f"来源 {source_id} @ {locator}\n{text[:context_chars]}\n核读限制: {limitation or '当前读取的是全文片段，仍须核对定理的全部条件'}"
+    finally:
+        if service.store is not None:
+            service.store.close()
 
 
 def _scan_paths(paths: list[str], recursive: bool = True, label: str = "") -> str:

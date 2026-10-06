@@ -119,6 +119,8 @@ export function createSessionStream(deps: SessionStreamDeps): SessionStream {
         const next = Number.parseInt(e.lastEventId || '', 10) || 0;
         if (next && next <= previous) return; // 重连回放的重复事件
         if (previous && next > previous + 1) deps.onGap?.(tid, previous, next);
+        payload._event_seq = next;
+        payload._session_id = tid;
         deps.handleEvent(payload);
         if (next) deps.recordCursor(tid, next);
       } catch (err) {

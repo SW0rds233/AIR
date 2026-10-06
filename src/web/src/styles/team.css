@@ -208,6 +208,13 @@
   border-top: none;
 }
 
+.task-summary {
+  margin-top: 4px;
+  color: var(--text, #222);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 /* 窄屏: 团队状态条纵向堆叠, 不把多列挤成不可读的表格 */
 @media (max-width: 720px) {
   .team-statusbar {

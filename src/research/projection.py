@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.agents.protocol import AgentResult, AgentTask, ChangeProposal, ObjectRef
-from src.research.schemas import stable_id, utcnow
+from src.research.schemas import Claim, ResearchModel, stable_id, utcnow
 from src.research.store import ResearchStore
 
 __all__ = [
@@ -55,6 +55,7 @@ KIND_MAP: dict[str, str] = {
     "claim": "claim",
     "obligation": "obligation",
     "verification": "verification",
+    "attempt": "attempt",
     "gap": "gap",
     "validation_plan": "validation_plan",
     "manuscript": "manuscript",
@@ -98,8 +99,8 @@ class TeamProjection:
         key = proposal.idempotency_key(task.task_id)
         if self.store.has_event(f"projection:{key}"):
             return None                      # 幂等命中: 不重复登记
-        object_id, payload = object_payload_for(task, result, proposal, kind)
         try:
+            object_id, payload = object_payload_for(task, result, proposal, kind)
             version = self.store.put(kind, object_id, payload,
                                      expected_revision=proposal.expected_revision)
         except Exception as e:  # noqa: BLE001 - 版本冲突等如实记录, 不静默覆盖
@@ -186,6 +187,10 @@ def object_payload_for(task: AgentTask, result: AgentResult, proposal: ChangePro
         # 空串等同于"没写": 以运行身份为准 (候选自己填的值若与身份冲突, 也以身份为准,
         # 否则智能体可以用一个字段把对象挂到别人的问题上)。
         payload["problem_id"] = str(task.problem_id)
+    if kind == "model":
+        payload.update(ResearchModel.model_validate(payload).model_dump(mode="json"))
+    if kind == "claim":
+        payload.update(Claim.model_validate(payload).model_dump(mode="json"))
     return object_id, payload
 
 
@@ -199,6 +204,7 @@ def _model_for_kind(kind: str):
 
     return {
         "claim": schemas.Claim,
+        "attempt": schemas.ProofAttempt,
         "obligation": schemas.ProofObligation,
         "evidence": schemas.SourceEvidence,
         "source": schemas.SourceEvidence,
@@ -231,6 +237,10 @@ def object_rows(store: ResearchStore, kind: str, *, limit: int = 40,
                 if str((row.get("_scope") or {}).get("run_id", "")) == run_id]
     rows = rows[:limit]
     for row in rows:
+        if stored == "model":
+            row.update(ResearchModel.model_validate(row).model_dump(mode="json"))
+        if stored == "claim":
+            row.update(Claim.model_validate(row).model_dump(mode="json"))
         object_id = str(row.get("id", ""))
         if object_id:
             row["version"] = store.latest_version(stored, object_id)

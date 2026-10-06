@@ -6,8 +6,7 @@
  *
  * - 页面只有**一份**状态: `state/research-store.ts` 的
  *   `selection`/`entities`/`transport`/`ui` —— 本模块**不再持有**模块级 store;
- * - 数据来源是后端已有的投影接口 (`/api/team/roles`、`/api/team/{project}/{run}`),
- *   视图**不推断**科学结论, 也不在页面里另做一套主控调度;
+ * - 初始数据来自团队投影接口, 后续增量来自会话事件流；视图不推断科学结论;
  * - 身份 (project/problem/session/run) 由 `selection` 决定: 挂载时按显式身份做
  *   一次**整体切换** (`switchSelection`), 身份没变就不切 —— 不再从旧全局状态
  *   (`window.AIR.research`) 单向同步 (G19: `syncSelectionFromLegacy` 已删除);
@@ -167,6 +166,12 @@ export function renderTeamSection(targets?: string[]): string {
     return '';
   }
   return renderTeamBoard(getState());
+}
+
+/** 业务事件到达后立即重绘团队卡片；不额外请求整份投影。 */
+export function refreshTeamSection(): void {
+  const section = document.getElementById('team-section');
+  if (section) section.innerHTML = renderTeamSection();
 }
 
 /** 事件接入: 把后端事件交给状态层 (纯函数, 不改 DOM), 结果装入唯一 store。 */

@@ -30,6 +30,8 @@ expected_run_revision)` 隐藏授权、冲突、验证和落盘细节, 调用方
 from dataclasses import dataclass, field
 from typing import Any
 
+from pydantic import ValidationError
+
 from src.agents.protocol import (
     AgentResult,
     AgentTask,
@@ -44,6 +46,8 @@ from src.research.schemas import (
     Coverage,
     ObligationStatus,
     ProofObligation,
+    ProofAttempt,
+    ResearchModel,
     SupportKind,
     ValidationStatus,
     VerificationRecord,
@@ -132,6 +136,30 @@ class ResearchCommitService:
                     "reason": (f"角色 {task.agent} 不得提交 {proposal.kind} 类变更 "
                                f"(允许: {', '.join(sorted(allowed)) or '无'})")})
                 continue
+            if kind == "model":
+                try:
+                    ResearchModel.model_validate(proposal.payload)
+                except ValidationError as e:
+                    outcome.rejected.append({
+                        "proposal_id": proposal.proposal_id, "kind": proposal.kind,
+                        "reason": f"模型字段不符合契约: {e}"})
+                    continue
+            if kind == "claim":
+                try:
+                    # Ignore self-reported proof state, but reject malformed content.
+                    Claim.model_validate(_strip_claimed_state(proposal.payload))
+                except ValidationError as e:
+                    outcome.rejected.append({
+                        "proposal_id": proposal.proposal_id, "kind": proposal.kind,
+                        "reason": f"命题字段不符合契约: {e}"})
+                    continue
+            if kind == "attempt":
+                try:
+                    ProofAttempt.model_validate(proposal.payload)
+                except ValidationError as e:
+                    outcome.rejected.append({"proposal_id": proposal.proposal_id,
+                        "kind": proposal.kind, "reason": f"证明尝试字段不符合契约: {e}"})
+                    continue
             accepted.append(proposal)
         outcome.accepted = [p.proposal_id for p in accepted]
         if not accepted:
@@ -197,7 +225,10 @@ class ResearchCommitService:
             kind = KIND_MAP[proposal.kind]
             if proposal.kind == "verification":
                 continue
-            object_id, payload = object_payload_for(task, result, proposal, kind)
+            mapped = proposal
+            if kind == "claim":
+                mapped = proposal.model_copy(update={"payload": _strip_claimed_state(proposal.payload)})
+            object_id, payload = object_payload_for(task, result, mapped, kind)
             if proposal.kind == "claim":
                 # 丢弃角色自报的科学等级, 由判定层重算 (§6.2 第 3 条)
                 payload = _strip_claimed_state(payload)

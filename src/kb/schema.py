@@ -69,7 +69,10 @@ class Provenance(BaseModel):
     fetched_at: str = Field(default_factory=now)
 
 
-class LitRecord(BaseModel):
+from src.publication.references import PublicationMetadata
+
+
+class LitRecord(PublicationMetadata):
     doc_id: str
     title: str = ""
     authors: str = ""

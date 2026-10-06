@@ -290,25 +290,32 @@ def delivery_gate(manuscript: str, snapshot: ResearchSnapshot,
         reasons.append("研究稿过短或为空")
 
     mapped = set(snapshot.writing_map.keys())
+    if snapshot.claims and not mapped:
+        unresolved.append("正文结论映射缺失，无法判断未关闭义务对应的论断是否进入正文")
     for claim in snapshot.claims:
         if claim.status in (ClaimStatus.supported, ClaimStatus.refuted) and claim.id not in mapped:
             reasons.append(f"主要结论 {claim.id} 未映射到正文位置")
 
     # 未决义务的结论不得作为定理写入正文
     for obligation in snapshot.obligations:
-        if obligation.status in (ObligationStatus.open, ObligationStatus.blocked) \
+        if obligation.required and obligation.status in (ObligationStatus.open, ObligationStatus.blocked) \
                 and obligation.claim_id in mapped:
             reasons.append(f"未关闭义务 {obligation.id} 的结论被写入正文")
 
     # 正文不得把"证明计划"当作"已完成证明"陈述
     if snapshot.attempts:
-        complete = [a for a in snapshot.attempts if a.status == "complete"]
+        complete = {(a.target_claim_id, a.target_version) for a in snapshot.attempts
+                    if a.status == "complete"}
         proof_claims = [c for c in snapshot.claims
                         if c.claim_type.value in ("definitional", "descriptive")
                         and c.status == ClaimStatus.supported]
-        if proof_claims and not complete:
+        missing_attempts = [c.id for c in proof_claims
+                            if (c.id, c.version) not in complete]
+        if missing_attempts:
             unresolved.append(
-                "已定结论缺少已完成的证明尝试记录, 正文引用证明时须标明为非形式化论证"
+                "已定结论缺少对应版本的完整证明尝试记录: "
+                + ", ".join(missing_attempts[:5])
+                + "；正文引用证明时须标明为非形式化论证"
             )
 
     # 结论的条件必须出现在正文中 (不得删去条件后仍声称交付)
@@ -349,7 +356,8 @@ def publication_gate(manuscript: str, snapshot: ResearchSnapshot,
                      references: list[dict] | None = None,
                      compile_status: str = "",
                      blocks: list | None = None,
-                     checklist: dict | None = None) -> GateResult:
+                     checklist: dict | None = None,
+                     latex_source: str = "") -> GateResult:
     """出版完备门槛 (方案 v2 §5 阶段 1): 判断能否称为"完整论文"。
 
     与"论文表达门槛"的区别: 表达门槛问的是"正文有没有如实表达研究结论";
@@ -364,21 +372,13 @@ def publication_gate(manuscript: str, snapshot: ResearchSnapshot,
     unresolved: list[str] = []
     text = manuscript or ""
     references = list(references or [])
-    kinds = {getattr(b, "kind", "") for b in (blocks or [])}
-    # 有结构化块时以块为准: 正文里偶然出现"摘要"两个字不能算有摘要
-    structured = bool(blocks)
-
     # 1) 摘要与关键词
-    if structured:
-        if "abstract" not in kinds:
-            reasons.append("缺少摘要")
-        if "keywords" not in kinds:
-            reasons.append("缺少关键词")
-    else:
-        if "摘要" not in text and "\\begin{abstract}" not in text:
-            reasons.append("缺少摘要")
-        if "关键词" not in text and "Key words" not in text:
-            reasons.append("缺少关键词")
+    if not re.search(r"(?m)^#{1,3}\s*摘要\s*$", text) \
+            and r"\begin{abstract}" not in latex_source:
+        reasons.append("缺少摘要")
+    if not re.search(r"(?m)^\*\*关键词[：:]\*\*", text) \
+            and r"\textbf{关键词：}" not in latex_source:
+        reasons.append("缺少关键词")
 
     # 2) 参考文献章节必须在位 (即便为空, 也要说明检索范围)
     has_ref_section = ("参考文献" in text or "\\begin{thebibliography}" in text)
@@ -386,7 +386,9 @@ def publication_gate(manuscript: str, snapshot: ResearchSnapshot,
         reasons.append("缺少参考文献章节")
 
     # 3) 正文引用与文献表双向一致
-    cited = _cited_numbers(text)
+    body_for_citations = re.split(
+        r"(?im)^#{1,3}\s*(?:\d+[.、]?\s*)?参考文献\s*$", text, maxsplit=1)[0]
+    cited = _cited_numbers(body_for_citations)
     listed = _listed_numbers(text, len(references))
     unlisted = sorted(n for n in cited if n not in listed)
     uncited = sorted(n for n in listed if n not in cited)
@@ -394,16 +396,65 @@ def publication_gate(manuscript: str, snapshot: ResearchSnapshot,
         reasons.append(f"正文引用了参考文献表中没有的编号: {unlisted}")
     if uncited and references:
         unresolved.append(f"参考文献表中未被正文引用的条目: {uncited}")
+    if references and not cited:
+        unresolved.append("参考文献表存在，但正文没有文献引用")
+    unlocated = [row for row in references if not str(row.get("locator", "") or "").strip()]
+    if unlocated:
+        unresolved.append(f"{len(unlocated)} 条参考文献缺少可回到原文的定位")
+    untitled = [row for row in references if not str(row.get("title", "") or "").strip()]
+    if untitled:
+        unresolved.append(f"{len(untitled)} 条来源缺少书目标题")
+    from src.publication.references import citation_eligible
+    ineligible = [row.get("source_id") for row in references if not citation_eligible(row)]
+    if ineligible:
+        reasons.append(f"参考文献未确认正式出版或缺少必要书目信息: {', '.join(str(i) for i in ineligible[:5])}")
 
-    # 4) 核心结论必须能在正文反查到
+    # 4) 核心结论通过稿件块的结构化引用反查；内部 id 不进入读者正文。
+    linked_claims = {
+        ref.id for block in (blocks or [])
+        for kind, ref in zip(getattr(block, "ref_kinds", []), getattr(block, "refs", []))
+        if kind == "claim" and getattr(ref, "id", "")
+    }
+    unresolved_claim_ids = {claim.id for claim in snapshot.claims
+                            if claim.status not in (ClaimStatus.supported, ClaimStatus.refuted)}
+    from src.publication.claims import asserts_completed_proof
+    for block in blocks or []:
+        block_claims = {ref.id for kind, ref in zip(getattr(block, "ref_kinds", []), getattr(block, "refs", []))
+                        if kind == "claim"}
+        if block_claims & unresolved_claim_ids and asserts_completed_proof(getattr(block, "text", "")):
+            reasons.append(f"未定/未核验结论在正文中被写成已完成证明: {', '.join(sorted(block_claims & unresolved_claim_ids))}")
+    if not any(record.validation_status == ValidationStatus.verified and not record.stale
+               for record in snapshot.verifications) and asserts_completed_proof(text):
+        reasons.append("正文/摘要自述已完成证明，但冻结快照没有有效核验记录；需独立核验或改为待审论证")
     for claim in snapshot.claims:
         if claim.status in (ClaimStatus.supported, ClaimStatus.refuted) \
-                and claim.id not in text:
-            reasons.append(f"核心结论 {claim.id} 未出现在正文中 (无法反查)")
+                and ((blocks and claim.id not in linked_claims)
+                     or (not blocks and claim.id not in text)):
+            reasons.append(f"核心结论 {claim.id} 未通过正文块引用建立追溯关系")
+
+    if not references:
+        if snapshot.claims:
+            unresolved.append("没有已登记可引用文献；不得将未检索/无命中写成完整论文")
+
+    internal_ids = re.findall(r"\b(?:clm|obl|ver|model|evi|src)-[A-Za-z0-9_-]{5,}\b", text)
+    if internal_ids:
+        reasons.append(f"读者正文暴露了内部追溯 ID: {', '.join(sorted(set(internal_ids))[:5])}")
+
+    # 文中写出的章节编号必须在稿件标题中存在，避免手写交叉引用悬空。
+    missing_sections = missing_section_references(text)
+    if missing_sections:
+        reasons.append(f"正文引用了不存在的章节: {', '.join(missing_sections)}")
 
     # 5) 悬空引用与未标注占位符
     if _dangling_refs(text):
         reasons.append(f"存在悬空的 \\ref/\\cite: {', '.join(_dangling_refs(text)[:5])}")
+    if latex_source:
+        labels = re.findall(r"\\label\{([^}]+)\}", latex_source)
+        duplicates = sorted({label for label in labels if labels.count(label) > 1})
+        if duplicates:
+            reasons.append(f"LaTeX 标签重复定义: {', '.join(duplicates[:5])}")
+        if _dangling_refs(latex_source):
+            reasons.append("LaTeX 源码包含悬空的 \\ref/\\cite")
     placeholders = _unlabelled_placeholders(text)
     if placeholders:
         reasons.append(f"存在未标注的占位符: {', '.join(placeholders[:5])}")
@@ -418,8 +469,15 @@ def publication_gate(manuscript: str, snapshot: ResearchSnapshot,
     else:
         reasons.append(f"LaTeX 编译失败: {compile_status}")
 
-    passed = not reasons
+    passed = not reasons and not unresolved
     return GateResult(passed=passed, reasons=reasons, unresolved=unresolved)
+
+
+def missing_section_references(text: str) -> list[str]:
+    section_ids = set(re.findall(r"^#{1,4}\s*(?:第\s*)?(\d+(?:\.\d+)*)(?![\d.])", text, re.M))
+    refs = set(re.findall(r"第\s*(\d+(?:\.\d+)*)(?![\d.])\s*(?:节|小节)", text))
+    refs.update(re.findall(r"§\s*(\d+(?:\.\d+)*)(?![\d.])", text))
+    return sorted(refs - section_ids)
 
 
 def _cited_numbers(text: str) -> set[int]:

@@ -1,15 +1,6 @@
 from __future__ import annotations
 
-"""LaTeX 编译与错误修正循环 (合并计划 §5.5: `publication/compiler.py`)
-
-借鉴 AI-Scientist-v2 的 compile_latex + cleanup_map 后处理模式:
-- pdflatex/xelatex 编译 → 检测错误 → LLM 修正 → 再编译 (≤3 轮)
-- 编译后清理辅助文件 (.aux/.log/.out), 保留 .tex/.pdf
-
-**为什么它在 publication 里而不是 rag 里**: 排版与编译是"把唯一文稿 IR 变成交付物"
-的最后一步, 与文献检索无关。放在 `rag` 会让交付层依赖检索层的目录约定, 而 `rag/`
-本身按计划逐步收敛到资料接入能力。旧转发模块已删除，编译只有这一处实现。
-"""
+"""Compile the canonical manuscript; reject partial PDFs and unresolved citations."""
 
 import logging
 import re
@@ -21,28 +12,32 @@ logger = logging.getLogger(__name__)
 
 # 编译轮次上限
 MAX_COMPILE_ROUNDS = 3
-# 单遍编译的失败重试次数 (针对 dvipdfmx "Unable to open" 这类瞬时错误)。
-# Windows 实测: 杀毒软件/索引服务对新写出 PDF 的锁定可持续 10 秒以上,
-# 重试间隔必须足够长 (2/4/6s), 否则整轮编译被误判失败。
+# Retry transient Windows PDF locks with 2/4/6-second backoff.
 PASS_RETRY_ATTEMPTS = 4
+OVERFULL_TOLERANCE_PT = 2.0
+
+
+def layout_diagnostics(log: str) -> dict:
+    boxes = [float(value) for value in re.findall(
+        r"Overfull \\[hv]box\s*\(([\d.]+)pt too (?:wide|high)\)", log or "")]
+    return {"overfull_count": len(boxes), "max_overfull_pt": max(boxes, default=0.0),
+            "tolerance_pt": OVERFULL_TOLERANCE_PT,
+            "missing_glyphs": list(dict.fromkeys(re.findall(r"Missing character:[^\r\n]+", log or "")))}
+_RERUN_PATTERNS = (
+    r"Rerun to get cross-references right",
+    r"There were undefined references",
+    r"Citation\s+`[^']+'\s+.*undefined",
+    r"Label\s+[`']?[^`']+[`']?\s+multiply defined",
+)
 
 
 def compile_latex(tex_path: str, workdir: str | None = None, engine: str = "xelatex") -> tuple[bool, str]:
-    """编译 LaTeX → PDF（xelatex 多遍, thebibliography 不需 bibtex）
-
-    thebibliography 的 \\cite->\\bibitem 解析需要多遍编译:
-    第 1 遍生成 .aux (此时 PDF 中引用显示为 [?]), 第 2 遍起解析引用。
-    若第 2 遍后仍有 undefined 引用警告则再编译一遍。
-
-    Windows 实测问题: 目标 PDF 若被占用 (PDF 阅读器打开旧文件 / 杀毒瞬时锁),
-    dvipdfmx 报 "Unable to open" → 第一遍直接失败。旧版在第一遍失败即 return,
-    根本没走到"PDF 已生成"兜底。修复:
-    - 编译前删除旧 PDF (占用则警告提示关闭阅读器)
-    - 第一遍失败不中断, 继续后续遍 (锁可能在下一遍前释放)
-    """
+    """Compile until references stabilize; only file-lock failures are retried."""
     path = Path(tex_path).resolve()
-    cwd = str(path.parent) if workdir is None else str(workdir)
-    pdf_path = path.with_suffix(".pdf")
+    output_dir = Path(workdir).resolve() if workdir is not None else path.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cwd = str(output_dir)
+    pdf_path = output_dir / path.with_suffix(".pdf").name
 
     def _run_once():
         try:
@@ -53,9 +48,15 @@ def compile_latex(tex_path: str, workdir: str | None = None, engine: str = "xela
                 cwd=cwd, encoding="utf-8", errors="replace",
             )
             log = result.stdout + result.stderr
-            if "Fatal error" in log or "Emergency stop" in log:
-                err = [l.strip() for l in log.split("\n") if l.startswith("!")]
-                return False, "\n".join(err[:10]) if err else log[-2000:]
+            # TeX can leave a partial PDF on failure; its presence is not success.
+            errors = [line.strip() for line in log.splitlines() if line.startswith("!")]
+            if errors:
+                return False, "LaTeX 编译报错, 输出可能被截断:\n" + "\n".join(errors[:10])
+            if result.returncode != 0:
+                return False, (f"{engine} 退出码 {result.returncode}, 编译未正常结束:\n"
+                               + log[-2000:])
+            if "No pages of output" in log:
+                return False, "LaTeX 没有输出任何页面 (No pages of output):\n" + log[-2000:]
             return True, log
         except subprocess.TimeoutExpired:
             return False, "LaTeX 编译超时 (180s)"
@@ -94,25 +95,42 @@ def compile_latex(tex_path: str, workdir: str | None = None, engine: str = "xela
     # 多遍编译: 至多 MAX_COMPILE_ROUNDS 遍, 每遍带瞬时失败重试。
     # 某遍失败 (如第一遍锁) 不中断, 继续下一遍; 直到成功且无 undefined 引用。
     last_log = ""
+    last_ok = False
     for _ in range(MAX_COMPILE_ROUNDS):
         ok, last_log = _run_with_retry()
+        last_ok = ok
         if "未安装" in last_log:
             return False, last_log
         if not ok and "Unable to open" not in last_log:
             break
-        if ok and not re.search(r"Citation\s+`[^']+'\s+.*undefined", last_log):
+        if ok and not any(re.search(pattern, last_log, re.IGNORECASE)
+                          for pattern in _RERUN_PATTERNS):
             break
 
-    # 成功标准: PDF 实际生成且非空 (即使某遍报瞬时错误, 只要最终 PDF 在就算成功)。
-    # stat 也可能因文件瞬时被锁而失败, 做多次尝试。
+    # 编译报错时**不能**再用"PDF 存在且非空"兜底: LaTeX 遇错仍会写出截断的 PDF
+    # (实测 1 页), 旧逻辑据此返回成功, 于是半篇论文被当成正常交付。
+    if not last_ok:
+        return False, last_log[-2000:]
+
+    remaining = [pattern for pattern in _RERUN_PATTERNS
+                 if re.search(pattern, last_log, re.IGNORECASE)]
+    if remaining:
+        return False, "交叉引用/标签经过多遍编译仍未稳定:\n" + last_log[-2000:]
+    diagnostics = layout_diagnostics(last_log)
+    if diagnostics["max_overfull_pt"] > OVERFULL_TOLERANCE_PT:
+        return False, (f"LaTeX 排版溢出 {diagnostics['max_overfull_pt']:.2f}pt "
+                       f"(容差 {OVERFULL_TOLERANCE_PT:.1f}pt)，请修正后再交付\n" + last_log)
+
+    # A valid short article can be smaller than 10 KB. Check the PDF signature,
+    # after confirming successful compilation and stable references above.
     for wait in (0.0, 2.0, 4.0):
         if wait:
             time.sleep(wait)
         try:
-            if pdf_path.exists() and pdf_path.stat().st_size >= 10 * 1024:
-                if re.search(r"Citation\s+`[^']+'\s+.*undefined", last_log):
-                    logger.warning("PDF 已生成但仍存在未解析引用, 请检查参考文献编号一致性")
-                return True, last_log
+            if pdf_path.exists() and pdf_path.stat().st_size > 0:
+                with pdf_path.open("rb") as pdf:
+                    if pdf.read(5) == b"%PDF-":
+                        return True, last_log
         except OSError:
             continue
     return False, last_log[-2000:]
@@ -149,9 +167,15 @@ def pdflatex_count_pages(pdf_path: str) -> int:
         result = subprocess.run(
             ["pdftotext", "-l", "999", pdf_path, "-"],
             capture_output=True, text=True, timeout=30,
+            # 中文 PDF 的文本是 UTF-8; 不指定编码时用系统 ANSI (cp1252) 解码,
+            # 读取线程抛 UnicodeDecodeError, stdout 变 None, 页数恒为 0。
+            encoding="utf-8", errors="replace",
         )
-        # 统计换页符 \f 数量 + 1
-        pages = result.stdout.count("\f") + 1
-        return max(pages, 1) if result.stdout.strip() else 0
+        text = result.stdout or ""
+        if not text.strip():
+            return 0
+        # pdftotext 每页输出一个换页符, **末页也有**, 因此页数等于换页符个数。
+        # 旧实现 `count("\\f") + 1` 会把 4 页报成 5 页。
+        return text.count("\f")
     except Exception:
         return 0

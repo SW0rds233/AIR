@@ -32,6 +32,7 @@ from src.agents.protocol import (
     ChangeProposal,
     ContextPack,
     NeedKind,
+    ObjectRef,
     ResearchNeed,
     TaskOutcome,
     UsageRecord,
@@ -70,6 +71,9 @@ def classify_strategy(text: str, *, has_data: bool = False) -> str:
     不是再加一组关键词。
     """
     body = str(text or "")
+    from src.research.classification import is_formal_question
+    if is_formal_question(body):
+        return "derivation"
     if any(hint in body for hint in _SYMBOLIC_HINTS):
         return "derivation"
     if _precisely_formalisable(body):
@@ -98,7 +102,7 @@ class ReasoningAgent(AgentBase):
 
     role = "reasoning"
     prompt_version = "reasoning/v1"
-    kinds = ("claim", "obligation", "verification", "gap")
+    kinds = ("claim", "obligation", "verification", "gap", "attempt")
 
     SYSTEM = """你是"推理与结论综合"智能体。
 
@@ -115,10 +119,22 @@ class ReasoningAgent(AgentBase):
 - 不得为了凑出完整证明而编造中间步骤或引用不存在的定理;
 - 若文献证据互相冲突, 如实写出冲突并说明哪种解释更可能, 而不是只挑支持自己的一方;
 - 没有足够依据时如实给出"未决"与理由。
+- strategy 表示研究方法；claim_type 表示命题语义类型，不能填 derivation 等策略名。
+  纯数学/形式化命题应明确标注 study.design="theory"，同时交代变量域与证明义务。
+  不得把本轮检索不足表述成“学术界未决”；文献事实需要原文核查，形式化子结论需要实际核验。
+  数学推导所得的候选断言通常归 descriptive，而不是凭此宣称已证明。
+  数学等价、概率公式和矩阵恒等式不是实证因果/关联命题；研究建议不是数学命题。
+  每次只提交解决当前子问题所必需的少量命题（建议最多8条），复用已有命题 id，
+  修正旧命题时提供其 id 和修正条件，避免重新生成整套文献摘要命题。
+  可编码的结论必须给 lhs/rhs/relation/variables/variable_domains；不能编码时给逐步论证和缺口。
+  不得把综述、检索进度或写作建议注册成需要证明的科学命题。
 
 最终输出 JSON:
 {"strategy": "derivation|synthesis|counterexample|quantitative",
  "claims": [{"statement": "", "claim_type": "definitional|descriptive|associational|causal|predictive|scenario|normative",
+             "study": {"design": "theory|observational|simulation|none"},
+             "lhs": "", "rhs": "", "relation": "==|>=|<=|>|<|custom",
+             "variables": [""], "variable_domains": {}, "id": "",
              "reasoning": [""], "premises": [""], "informal": true}],
  "counterexamples": [{"statement": "", "witness": ""}],
  "missing_conditions": [""], "limitations": [""],
@@ -136,8 +152,10 @@ class ReasoningAgent(AgentBase):
              usage: UsageRecord, tools: list[ToolSpec]) -> AgentResult:
         topic = _topic_of(context)
         strategy = classify_strategy(
-            f"{task.objective}\n{context.request}",
+            f"{task_intent(task)}\n{_research_text(context)}",
             has_data=bool(context.objects.get("dataset")) or bool(topic and _has_data(context)))
+        if task.hints.get("need_kind") == "derivation" or task.hints.get("claim_id"):
+            strategy = "derivation"
         # 形式化推导策略先走**闭环路径** (合并计划 §3.1 G06): 它把
         # "候选/义务 → 工具核验 → 结构化记录 → 状态归并"整条链接进同一任务协议 ——
         # 义务与核验记录作为候选提交, 命题状态由唯一提交口按内核判据重算。
@@ -151,6 +169,7 @@ class ReasoningAgent(AgentBase):
         limitations: list[str] = []
         needs: list[ResearchNeed] = []
         parse_note = ""
+        observations = []
 
         if runtime.llm_available() and not task.budget.exceeded_by(usage):
             from langchain_core.messages import HumanMessage, SystemMessage
@@ -184,6 +203,23 @@ class ReasoningAgent(AgentBase):
                 needs = _needs_from_payload(payload.get("needs"))
                 strategy = str(payload.get("strategy") or strategy)
 
+        # A tool hit is not yet a registered, readable source. Evidence owns ingestion.
+        from src.agents.evidence import _observed_searches
+        queries, cached = _observed_searches(observations, task.source_policy or "user_kb")
+        known = {str(row.get("doi") or row.get("url") or row.get("title") or "")
+                 for row in context.objects.get("evidence") or []}
+        for query in queries:
+            new_hits = [row for row in cached.get(query, [])
+                        if str(row.get("doi") or row.get("url") or row.get("title") or "") not in known]
+            if not new_hits:
+                continue
+            needs.append(ResearchNeed(
+                kind=NeedKind.more_sources, statement=f"登记并核读推理联想到的文献: {query}",
+                why="检索工具返回的摘要不能冒充已经核对过的原文或定理证据",
+                acceptance=["文献入库、提供可读摘录与定位，回到推导核查适用条件"],
+                hints={"query": query, "research_context": "reasoning_lookup",
+                       "trigger_id": f"reasoning-source:{query}"}, blocking=True))
+
         if not claims and not counterexamples:
             fallback_claims, fallback_note = self.fallback_claims(task, context,
                                                                   strategy)
@@ -192,7 +228,7 @@ class ReasoningAgent(AgentBase):
                 return self.blocked(
                     task,
                     f"推理没有产出可审查内容 ({parse_note})",
-                    needs=[ResearchNeed(
+                    needs=needs + [ResearchNeed(
                         kind=NeedKind.derivation,
                         statement="推理调用失败且规则路径也没能给出推导",
                         why="没有推导就无法支撑结论",
@@ -211,13 +247,54 @@ class ReasoningAgent(AgentBase):
                 acceptance=["给出该条件的可定位出处, 或说明它不成立"],
                 blocking=False))
 
-        changes = [build_proposal(
-            "claim",
-            payload={**claim, "strategy": strategy, "subquestion": task.subquestion,
-                     "informal": bool(claim.get("informal", True))},
-            rationale=clip("; ".join(as_list_of_str(claim.get("reasoning"))[:3]), 400),
-            input_versions={},
-        ) for claim in claims]
+        from src.research.classification import is_formal_question, has_empirical_context
+        from src.research.schemas import stable_id
+        theory_context = is_formal_question(_research_text(context))
+        changes = []
+        seen_statements: set[str] = set()
+        known = {str(row.get("id")): row for row in context.objects.get("claim", [])}
+        for candidate in claims:
+            claim = dict(candidate)
+            statement = str(claim.get("statement") or "").strip()
+            if not statement or statement in seen_statements:
+                continue
+            seen_statements.add(statement)
+            if theory_context and not has_empirical_context(claim):
+                if claim.get("claim_type") == "normative":
+                    limitations.append("研究建议（非待证命题）: " + statement)
+                    continue
+                if claim.get("claim_type") in {"causal", "associational", "predictive", "scenario"}:
+                    claim["claim_type_input"] = claim["claim_type"]
+                    claim["claim_type"] = "descriptive"
+                    claim["classification_basis"] = "数学题面且无实证设计/样本；语义纠偏不构成核验"
+                claim["study"] = {**dict(claim.get("study") or {}), "design": "theory"}
+            requested_id = str(claim.get("id") or "")
+            existing = known.get(requested_id) or next((row for row in known.values()
+                if str(row.get("statement") or "").strip() == statement), None)
+            object_id = str(existing["id"]) if existing else stable_id("clm", {
+                "project": task.project_id, "problem": task.problem_id, "statement": statement})
+            claim["id"] = object_id
+            version = int(existing.get("version") or 1) if existing else 1
+            encoding_changed = existing and any(claim.get(key) and claim.get(key) != existing.get(key)
+                for key in ("lhs", "rhs", "expr", "wrt", "relation", "variable_domains", "study"))
+            if existing and str(existing.get("statement") or "").strip() == statement and not encoding_changed:
+                # Repeated prose is not new scientific progress and must not reset proof state.
+                continue
+            if existing:
+                claim = {**existing, **claim, "version": version + 1}
+            changes.append(build_proposal("claim", object_id=object_id,
+                payload={**claim, "strategy": strategy, "subquestion": task.subquestion,
+                         "informal": bool(claim.get("informal", True))},
+                rationale=clip("; ".join(as_list_of_str(claim.get("reasoning"))[:3]), 400),
+                input_versions={object_id: version} if existing else {}))
+            if claim.get("study", {}).get("design") == "theory":
+                needs.append(ResearchNeed(kind=NeedKind.derivation,
+                    statement="独立核验数学候选: " + statement[:500],
+                    why="推理产出尚非核验证据，需要回到具体命题执行证明义务",
+                    blocked_refs=[ObjectRef(id=object_id, version=int(claim.get("version") or 1))],
+                    acceptance=["核对编码与原命题等价、前提与定理条件，并提交实际核验；不能编码时明确未决"],
+                    hints={"claim_id": object_id, "trigger_id": "reasoning-proof:" + object_id},
+                    blocking=True))
         changes.extend(build_proposal(
             "gap",
             payload={"type": "unresolved_claim", "statement": c.get("statement", ""),
@@ -225,7 +302,7 @@ class ReasoningAgent(AgentBase):
             rationale="推理给出反例候选 (是否成立由判定层核验)",
         ) for c in counterexamples)
 
-        summary = f"策略 {strategy}: 提出 {len(claims)} 条命题候选"
+        summary = f"策略 {strategy}: 提出 {sum(c.kind == 'claim' for c in changes)} 条新增/修订命题候选"
         if counterexamples:
             summary += f", {len(counterexamples)} 条反例候选"
         if missing:
@@ -358,9 +435,12 @@ class ReasoningAgent(AgentBase):
                              or obligation.statement)
                 unresolved.append(f"{obligation.statement[:120]}: {reason[:200]}")
                 needs.append(ResearchNeed(
-                    kind=NeedKind.clause,
+                    kind=(NeedKind.model_condition if obligation.kind == "formal_argument" else NeedKind.clause),
                     statement=f"义务未关闭: {clip(obligation.statement, 160)}",
                     why=reason[:300],
+                    blocked_refs=[ObjectRef(id=claim.id, version=claim.version)],
+                    hints={"claim_id": claim.id, "obligation_id": obligation.id,
+                           "trigger_id": "obligation:" + obligation.id},
                     acceptance=["给出可定位依据、工具核验记录或显式声明"],
                     blocking=False))
 
@@ -385,6 +465,11 @@ class ReasoningAgent(AgentBase):
         # 没有这一步, 交付包里只有"一堆材料", 讲不出"这条结论依据哪条来源、适用条件
         # 是什么"; 而关系强度取自材料自己的判定 (不确定就是 insufficient), 不默认支持。
         changes.extend(_evidence_links_for(task, claim, context))
+        for kind, object_id, payload in steps_outcome.writes:
+            if kind == "attempt":
+                changes.append(build_proposal("attempt", payload=payload, object_id=object_id,
+                    rationale="保存实际推导步骤；complete 表示记录完整，不表示命题已证明",
+                    input_versions={claim.id: claim.version}))
 
         form_notes.extend(steps_outcome.notes)
         # 摘要里保留核验与独立审查的计数: 界面与用例据此看出"到底跑过什么",
@@ -492,7 +577,7 @@ class ReasoningAgent(AgentBase):
         return claims, note
 
 
-def _formalisable_subject(context: ContextPack):
+def _formalisable_subject(context: ContextPack, task: AgentTask | None = None):
     """从角色上下文还原"可形式化的命题 + 义务 + 证据"。
 
     图状态里只放引用与摘要 (`unified_state` 的约束), 因此角色侧按引用重建**领域对象**
@@ -501,8 +586,18 @@ def _formalisable_subject(context: ContextPack):
     """
     from src.research.schemas import Claim, ProofObligation, SourceEvidence
 
+    rows = list(context.objects.get("claim") or [])
+    requested = str((task.hints or {}).get("claim_id") or "") if task else ""
+    requested_ids = [requested] if requested else [ref.id for ref in (task.input_refs if task else [])
+                                                if any(row.get("id") == ref.id for row in rows)]
+    if requested_ids:
+        rows = [row for row in rows if row.get("id") in requested_ids]
+    else:
+        # General exploration must not repeatedly pick an unencoded background claim.
+        rows = [row for row in rows if (row.get("lhs") and row.get("rhs"))
+                or (row.get("expr") and row.get("wrt")) or row.get("design_v")]
     claim: Claim | None = None
-    for row in context.objects.get("claim") or []:
+    for row in rows:
         claim = _parse(Claim, row)
         if claim is not None and claim.statement:
             break
@@ -512,7 +607,7 @@ def _formalisable_subject(context: ContextPack):
 
     obligations = [o for o in (_parse(ProofObligation, row)
                                for row in context.objects.get("obligation") or [])
-                   if o is not None and o.claim_id in ("", claim.id)]
+                   if o is not None and o.claim_id in ("", claim.id) and o.claim_version == claim.version]
     evidence = [e for e in (_parse(SourceEvidence, row)
                             for row in context.objects.get("evidence") or [])
                 if e is not None]
@@ -528,9 +623,11 @@ def _formal_subject(task: AgentTask, context: ContextPack):
     `2-(211,15,1)` 那类题只有 evidence/reasoning(blocked)/writing 三个角色)。
     返回 `(claim, obligations, evidence, notes)`; 无法形式化时返回 `None`。
     """
-    claim, obligations, evidence = _formalisable_subject(context)
+    claim, obligations, evidence = _formalisable_subject(context, task)
     if claim is not None:
         return claim, obligations, evidence, []
+    if task.hints.get("claim_id"):
+        return None  # Never substitute another assertion for a missing requested target.
 
     formulated = _formulate_from_request(task, context)
     if formulated is None:
@@ -556,6 +653,8 @@ def _formulate_from_request(task: AgentTask, context: ContextPack):
         str((context.objects.get("brief") or [{}])[0].get("main_question", "")
             if context.objects.get("brief") else ""),
     ]
+    candidates.extend(str(row.get("text") or row.get("content") or row.get("extracted_text") or "")
+                      for row in context.attachments)
     seen: set[str] = set()
     for text in candidates:
         body = text.strip()
@@ -810,6 +909,15 @@ def _statement_for(task: AgentTask, context: ContextPack) -> str:
     if str(context.request or "").strip():
         return str(context.request).strip()
     return task_intent(task)
+
+
+def _research_text(context: ContextPack) -> str:
+    parts = [context.request]
+    parts.extend(str(row.get("main_question") or "") for row in context.objects.get("brief", []))
+    parts.extend(str(row.get("text") or row.get("content") or row.get("extracted_text") or "")
+                 for row in context.attachments)
+    from src.research.query_planner import research_question_text
+    return research_question_text("\n".join(parts))
 
 
 def _topic_of(context: ContextPack) -> str:
