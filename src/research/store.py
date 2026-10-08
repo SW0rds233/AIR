@@ -331,7 +331,7 @@ class ResearchStore:
             ).fetchone()
         return json.loads(row[0]) if row else None
 
-    # ---- 原子研究步骤提交 (计划书 §9.2) ----
+    # ---- 原子研究步骤提交 ----
     def submit_step(
         self,
         writes: list[tuple[str, str, dict[str, Any]]],
@@ -404,7 +404,7 @@ class ResearchStore:
         with self._lock:
             return self._event_exists(idempotency_key)
 
-    # ---- 工具运行账本 (计划书 §9.2-1/5, §9.3) ----
+    # ---- 工具运行账本 ----
     def begin_tool_run(
         self,
         run_id: str,

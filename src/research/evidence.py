@@ -84,7 +84,7 @@ def classify_source(paper: dict) -> SourceEvidence:
         excerpt=(paper.get("abstract") or "")[:1000],
         effect_size=effect,
         existence_verified=bool(doi or paper.get("url")),
-        # 定位信息: 检索结果必须能回到原文 (计划书 §6.1)
+        # 定位信息: 检索结果必须能回到原文
         source_id=doc_id,
         location=str(paper.get("locator") or ""),
         page=int(paper.get("page") or 0),
@@ -323,7 +323,7 @@ def build_support_judge(llm) -> Callable[[Claim, SourceEvidence], SourceEvidence
         if relation not in mapping:
             return assess_support(claim, item)
         quote = str(data.get("quote", "") or "")[:300]
-        # P0-4: 支持/部分支持/反对都必须给出**可在原文中定位**的引文与页节,
+        # 支持/部分支持/反对都必须给出**可在原文中定位**的引文与页节,
         # 否则降为待审 —— 只有摘要开头或空引文的判定不足以支撑强结论。
         if mapping[relation] in (SupportKindOfEvidence.supports,
                                  SupportKindOfEvidence.partially_supports,

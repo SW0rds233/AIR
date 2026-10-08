@@ -1,11 +1,6 @@
 from __future__ import annotations
 
-"""检索式规划: 由问题契约与缺口生成**多条**检索式, 并说明为什么这样问。
-
-计划书 §1 契约第 2 行要求系统"在授权范围内自行设计检索式"; 单一查询词
-(`claim.statement`) 既覆盖不到机制/定义/反例等不同角度, 也无法在覆盖记录里
-说清"检索了什么、为什么"。
-"""
+"""由问题契约与术语对照规划可追溯的多角度检索式。"""
 
 import re
 from dataclasses import dataclass, field
@@ -39,26 +34,19 @@ class Query:
     terms: list[str] = field(default_factory=list)
 
 
-def _terms_in(text: str, terminology: dict[str, list[str]] | None) -> list[str]:
-    """命中题目/契约术语表的变体 (中/英/缩写), 用于生成跨语言检索式。
+def _matched_terminology(text: str, terminology: dict[str, list[str]] | None):
+    """Keep synonym groups so one query never requires two names for one concept."""
+    from src.rag.relevance_filter import resolve_domain
 
-    显式术语表为空时**回退到领域术语对照表** (`publication_evidence.terminology_variants`):
-    中文题的检索式若只有中文, 外部检索会给出无关结果 (实测: OpenAlex 把"组合设计"
-    当成土木工程的"路面结构组合设计"), 必须补上英文术语变体。
-    """
-    source = text or ""
-    terms: list[str] = []
-    if terminology:
-        low = source.lower()
-        for concept, variants in terminology.items():
-            if concept and (concept.lower() in low
-                            or any(v.lower() in low for v in variants)):
-                terms.extend(v for v in variants if v and v.lower() not in low)
-    if not terms and re.search(r"[\u4e00-\u9fff]", source):
-        from src.research.publication_evidence import terminology_variants
-
-        terms.extend(terminology_variants(source))
-    return list(dict.fromkeys(term for term in terms if term))
+    field = resolve_domain(text)
+    entries = dict(field.translations)
+    for concept, variants in (terminology or {}).items():
+        entries[concept] = list(dict.fromkeys([*(entries.get(concept) or []), *variants]))
+    lower = text.casefold()
+    matched = [(concept, tuple(variants)) for concept, variants in entries.items()
+               if concept and (concept.casefold() in lower or any(
+                   variant and variant.casefold() in lower for variant in variants))]
+    return field, matched
 
 
 def research_question_text(text: str) -> str:
@@ -82,25 +70,13 @@ def _clean(text: str) -> str:
 _INTENT_TERMS = ("nonexistence", "non-existence", "does not exist", "impossible",
                  "existence", "classification", "construction", "construct",
                  "counterexample", "conjecture")
-# 只做角度而非领域的泛词: **整类排除**出跨语言检索式。
-# 依据来自实测 (OpenAlex, 每个检索式取前 3 条看相关性):
-#   `projective plane nonexistence`               -> 3/3 相关
-#   `necessary condition projective plane`        -> 3/3 相关
-#   `does not exist necessary condition …`        -> 1/3 (混进 "Finite semifields")
-#   `necessary condition projective plane existence count` -> 2/3 (混进 "Necessary
-#                                                          Condition Analysis (NCA)")
-# 结论: 泛词 (existence/count/design/theorem/order…) 会把领域名词短语稀释掉。
-# 注意 `nonexistence` **不在**泛词表里 —— 否定性结论词是强领域信号, 必须保留。
+# 角度泛词不作为领域检索核心；结论关系词由题面意图单独补入。
 _GENERIC_TERMS = {"design", "theorem", "count", "counting", "order", "graph",
                   "finite", "symmetric", "symmetry", "block", "necessity",
                   "existence", "necessary condition", "condition"}
 
 
-# 中文结论/关系 -> 英文意图词。用于**从题干识别研究意图**, 而不管术语表里凑巧命中了几个同义词。
-# 必要性来自实测: 题干"射影平面 不存在性"会同时命中 `nonexistence`/`non-existence`/
-# `does not exist` 三个同义变体, 全堆进检索式后返回的是 "Nonexistence, Vague Existence,
-# Merely Possible Existence" 这类无关结果; 而配对成 `projective plane nonexistence`
-# 才会返回 "The Nonexistence of Certain Finite Projective Planes" 等 3/3 命中。
+# 中文结论关系转为英文检索意图，避免把同义变体堆在一条查询里。
 _RELATION_INTENT: tuple[tuple[tuple[str, ...], str], ...] = (
     (("不存在", "不可能", "非存在", "nonexistence"), "nonexistence"),
     (("反例",), "counterexample"),
@@ -124,13 +100,7 @@ def _select_english_terms(variants: list[str], limit: int = 3,
                           relation_text: str = "") -> list[str]:
     """从术语变体里**精选**跨语言检索式的英文词。
 
-    由实测确定的三层规则:
-    1. 泛词整类剔除 (`existence`/`count`/`design`/`necessary condition`…);
-    2. **意图词与领域名词短语配对**: 只有领域词太泛 (只查 `projective plane` 返回
-       "Projective planes"、"Affine and projective planes" 教科书条目), 只有意图词更糟
-       (`nonexistence non-existence does not exist` 返回液滴模型等无关结果);
-       配对后 (`projective plane nonexistence`) 才 3/3 命中;
-    3. 题干里声明的结论关系 (`不存在`/`反例`/`等价`…) 若术语表没给, 由题干补上意图词。
+    剔除泛词；将题面结论关系与领域名词配对；同义意图词只取一个。
     """
     english = [term for term in variants
                if term and not re.search(r"[\u4e00-\u9fff]", term)]
@@ -159,6 +129,54 @@ def _select_english_terms(variants: list[str], limit: int = 3,
     return core[:max(int(limit), 1)]
 
 
+def _is_abbreviation(term: str) -> bool:
+    """Only glossary-declared acronyms qualify; do not guess them from initials."""
+    value = term.strip()
+    return bool(re.fullmatch(r"[A-Z0-9]{2,8}", value) and re.search(r"[A-Z]", value))
+
+
+def _chinese_concepts(text: str, terminology: dict[str, list[str]] | None,
+                      field) -> list[str]:
+    entries = dict(field.translations)
+    entries.update(terminology or {})
+    return list(dict.fromkeys(
+        concept for concept in entries
+        if re.search(r"[\u4e00-\u9fff]", concept) and concept in text))
+
+
+def choose_queries(planned: list[Query], selected: list[str], limit: int) -> list[str]:
+    """Keep model suggestions while reserving Chinese and mapped English coverage."""
+    ceiling = max(int(limit), 1)
+    pool = list(dict.fromkeys([*(q.strip() for q in selected if q.strip()),
+                               *(q.text for q in planned if q.text)]))
+    chosen = pool[:ceiling]
+    essential: list[str] = []
+    chinese = next((q.text for q in planned if q.angle == "chinese_terms"), "") or next(
+        (q.text for q in planned if re.search(r"[\u4e00-\u9fff]", q.text)), "")
+    english = next((q.text for q in planned if q.angle == "terminology"), "")
+    abbreviation = next((q.text for q in planned if q.angle == "abbreviation"), "")
+    if chinese and ceiling >= 2:
+        essential.append(chinese)
+    if english and ceiling >= 2:
+        essential.append(english)
+    if abbreviation and ceiling >= 4:
+        essential.append(abbreviation)
+    protected: set[str] = set()
+    for query in essential:
+        if query in chosen:
+            protected.add(query)
+            continue
+        if len(chosen) < ceiling:
+            chosen.append(query)
+        else:
+            replacement = next((i for i in range(len(chosen) - 1, -1, -1)
+                                if chosen[i] not in protected), None)
+            if replacement is not None:
+                chosen[replacement] = query
+        protected.add(query)
+    return list(dict.fromkeys(chosen))
+
+
 def plan_queries(contract: ProblemContract | None = None, *, goal: str = "",
                  terminology: dict[str, list[str]] | None = None,
                  limit: int = 6) -> list[Query]:
@@ -184,25 +202,57 @@ def plan_queries(contract: ProblemContract | None = None, *, goal: str = "",
     elif text:
         queries.append(Query(text=text[:240], angle="goal", why="按题面目标检索，关联概念由研究角色补充"))
 
-    variants = _terms_in(f"{text} {treatment} {outcome}", terminology)
-    if variants and queries:
-        # 跨语言检索式**精选核心英文术语**: 中英混排会稀释英文匹配, 而把命中到的术语
-        # 全堆进去更糟 —— 实测 `projective plane design existence necessary condition
-        # counting count` 返回 "Necessary Condition Analysis"、"动态车辆路径问题",
-        # 而 `projective plane nonexistence` 精准返回 "The Nonexistence of Certain
-        # Finite Projective Planes"。因此: 只留英文, 且按"领域术语 > 意图词"取前几个。
-        from src.rag.relevance_filter import resolve_domain
-
-        field = resolve_domain(f"{text} {treatment} {outcome}")
-        preferred = [term for term in field.query_core if term in variants]
+    term_text = f"{text} {contract.goal if contract else ''} {treatment} {outcome}"
+    field, matched = _matched_terminology(term_text, terminology)
+    if matched and queries:
+        # Full names and acronyms are separate searches: requiring both in one
+        # query misses papers that use only one of the two forms.
+        canonical: list[str] = []
+        alternatives: list[tuple[str, str]] = []
+        abbreviations: list[str] = []
+        for _concept, variants in matched:
+            full = [variant for variant in variants
+                    if not re.search(r"[\u4e00-\u9fff]", variant)
+                    and not _is_abbreviation(variant)]
+            abbreviations.extend(variant for variant in variants if _is_abbreviation(variant))
+            if full:
+                canonical.append(full[0])
+                if len(full) > 1:
+                    alternatives.append((full[0], full[1]))
+        preferred = [term for term in field.query_core if term in canonical]
         core = list(dict.fromkeys([*preferred, *_select_english_terms(
-            variants, relation_text=f"{text} {treatment} {outcome}")]))[:3]
+            canonical, relation_text=term_text)]))[:3]
         if core:
             queries.insert(1 if len(queries) > 1 else len(queries), Query(
                 text=_clean(" ".join(core)),
                 angle="terminology",
-                why="用术语表的英文变体覆盖非中文文献 (中文关键词在英文库里等于噪声)",
+                why="用已登记的英文全称检索英文文献，并与中文查询分开记录",
                 terms=core))
+        if abbreviations:
+            context = [next((word for word in term.split()
+                             if len(word) >= 4 and word.lower() not in _GENERIC_TERMS), "")
+                       for term in core]
+            context = [word for word in context if word][:2]
+            for abbreviation in abbreviations[:2]:
+                query = _clean(" ".join([abbreviation, *context]))
+                if query:
+                    queries.insert(2 if len(queries) > 2 else len(queries), Query(
+                        text=query, angle="abbreviation",
+                        why="用术语表声明的缩写加领域上下文检索，避免缩写单独造成歧义",
+                        terms=[abbreviation, *context]))
+        chinese = _chinese_concepts(term_text, terminology, field)
+        if len(chinese) >= 2:
+            queries.insert(min(3, len(queries)), Query(
+                text=_clean(" ".join(chinese[:4])), angle="chinese_terms",
+                why="用题面命中的中文专有名词生成精简关键词检索式",
+                terms=chinese[:4]))
+        for original, alternative in alternatives[:1]:
+            if original in core:
+                alt_terms = [alternative if term == original else term for term in core]
+                queries.insert(min(4, len(queries)), Query(
+                    text=_clean(" ".join(alt_terms)), angle="terminology_alternative",
+                    why="同一概念的另一种已登记英文名称单独检索，避免同义词相互限制",
+                    terms=alt_terms))
 
     seen: set[str] = set()
     out: list[Query] = []
@@ -217,4 +267,4 @@ def plan_queries(contract: ProblemContract | None = None, *, goal: str = "",
     return out
 
 
-__all__ = ["Query", "plan_queries", "research_question_text"]
+__all__ = ["Query", "choose_queries", "plan_queries", "research_question_text"]

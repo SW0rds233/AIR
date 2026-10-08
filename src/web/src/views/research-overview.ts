@@ -102,7 +102,7 @@ export function toggledClaimId(current: string, claimId: string): string {
 }
 
 /**
- * 问题类型能力声明与领域模型 (计划书 §5.2 / §7.2)。
+ * 问题类型能力声明与领域模型。
  *
  * R2: 候选机制比较 + 可区分检验 + 术语量纲也必须显示, 否则"缺模型/缺单位"这类
  * 缺口在界面上不可见。
@@ -210,7 +210,7 @@ export function renderResearchOverview(d: any, source: ResearchOverviewSource): 
     '</div>'
   );
 
-  // 问题类型能力声明与领域模型 (计划书 §5.2 / §7.2)
+  // 问题类型能力声明与领域模型
   parts.push(renderCapabilityCard(d));
 
   // 进度统计

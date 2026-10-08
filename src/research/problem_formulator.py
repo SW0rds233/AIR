@@ -177,7 +177,7 @@ def _population_scope(claim: Claim) -> bool:
 
 def _applied_obligations(claim: Claim, ver: int,
                          method_available: dict[str, bool]) -> list[ProofObligation]:
-    """非定义型命题的义务集合 (计划书 §7.2 / §7.4)。
+    """非定义型命题的义务集合。
 
     这些类型的共同点: **结论强度取决于证据与设计, 而不是推导**。因此义务里
     必须包含范围限定、证据分级, 以及该类型特有的前置条件 (预测需样本外方案,
@@ -209,7 +209,7 @@ def _applied_obligations(claim: Claim, ver: int,
     if claim.claim_type == ClaimType.scenario:
         obligations.append(_rule_obligation(
             claim, ver, "声明情景参数及其取值依据",
-            "design_feasibility", "情景参数是假设, 必须随结论一起给出"))
+            "scenario_parameters", "情景参数是假设, 必须随结论一起给出"))
     if claim.claim_type == ClaimType.normative:
         obligations.append(_rule_obligation(
             claim, ver, "列出价值前提并交由独立审查确认",
@@ -276,7 +276,7 @@ def _obligations_for(claim: Claim, wants_equality: bool, method_available: dict[
             claim_version=ver,
             detail="至少一条已判定支持关系且带可信度分级的公开文献/数据证据",
         ))
-        # 计划书 §7.4: "声明设计 + 填了混淆说明 + 区间不跨零"不足以建立因果结论。
+        # "声明设计 + 填了混淆说明 + 区间不跨零"不足以建立因果结论。
         # 识别假设 / 设计可行性 / 测量与缺失机制 / 误差结构必须各自成为独立义务。
         obligations.append(ProofObligation(
             statement="列出因果识别假设 (需要哪些不可检验假设才成立)",
@@ -313,7 +313,7 @@ def _obligations_for(claim: Claim, wants_equality: bool, method_available: dict[
         return obligations
 
     if claim.claim_type != ClaimType.definitional and not theoretical:
-        # 计划书 §7.2: 描述/关联/预测/情景/规范类问题**不能**靠符号推导成立,
+        # 描述/关联/预测/情景/规范类问题**不能**靠符号推导成立,
         # 也不能因为"没有可核验的不等式"就没有义务 —— 否则会被当成无需证据的命题。
         return _applied_obligations(claim, ver, method_available)
 

@@ -21,7 +21,7 @@ REQUIRED_FIELDS = (
     ("stop_criteria", "失败/停止判据"),
 )
 
-# P1-3: 计划书逐项列出的必备要素 (交付前必须逐条交代; 缺关键项只能维持草案)
+# 计划书逐项列出的必备要素 (交付前必须逐条交代; 缺关键项只能维持草案)
 REQUIRED_ELEMENTS: tuple[tuple[str, str], ...] = (
     ("alternatives", "待区分的两个解释或待核验假设 (alternative_explanations)"),
     ("variables", "变量与单位 (variables)"),
@@ -58,7 +58,7 @@ class SpecReport:
 
 
 def missing_elements(spec: ExperimentSpec) -> list[str]:
-    """逐条检查计划书要求的必备要素, 返回缺失项说明 (P1-3)。
+    """逐条检查计划书要求的必备要素, 返回缺失项说明。
 
     与 `REQUIRED_FIELDS` 的区别: 这里覆盖"变量与单位、参数依据、预期输出、资源"等
     交付审阅者要逐条核对的内容, 缺项会写进规格与工作台, 而不是只留在校验报告里。
@@ -146,7 +146,7 @@ def validate_spec(spec: ExperimentSpec) -> SpecReport:
     if spec.execution_status == ExecutionStatus.spec_validated and not spec.validation.get("ok"):
         warnings.append("状态为 spec_validated 但校验报告不完整")
 
-    # P1-3: 必备要素缺项一律记进规格本身 (工作台与交付审阅都要看到)
+    # 必备要素缺项一律记进规格本身 (工作台与交付审阅都要看到)
     spec.missing_elements = missing_elements(spec)
     if spec.missing_elements:
         warnings.append("缺少必备要素: " + "; ".join(spec.missing_elements))

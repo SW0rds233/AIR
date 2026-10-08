@@ -82,7 +82,7 @@ def theory_validity_gate(
     if cycle:
         reasons.append("存在循环证明: " + " -> ".join(cycle))
 
-    # 只检查本次快照实际引用的记录 (计划书 §4.3-6)
+    # 只检查本次快照实际引用的记录
     if snapshot is not None and snapshot.verification_index:
         referenced: set[str] = set()
         for ids in snapshot.verification_index.values():
@@ -141,7 +141,7 @@ def theory_validity_gate(
                 reasons.append(f"结论 {claim.id} 的全部义务已关闭但覆盖范围仍为 {claim.coverage.value}")
             if claim.support_kind == SupportKind.none:
                 reasons.append(f"结论 {claim.id} 未声明支持方式 (support_kind)")
-            # P0-4: 以原文/非形式化论证支持的强结论, 必须有可定位引文;
+            # 以原文/非形式化论证支持的强结论, 必须有可定位引文;
             # 工具核验类结论 (符号/求解/形式化/数值/统计) 另有验证输入作依据。
             if claim.support_kind in (SupportKind.textual_support,
                                       SupportKind.informal_argument):
@@ -193,7 +193,7 @@ def theory_validity_gate(
                 reasons.append(f"因果结论 {claim.id} 未声明混淆处理")
             if claim.evidence_grade == EvidenceGrade.unsupported:
                 reasons.append(f"因果结论 {claim.id} 缺少带可信度分级的证据")
-            # 计划书 §7.4: 识别假设 / 设计可行性 / 测量与缺失 / 误差结构必须各自成立,
+            # 识别假设 / 设计可行性 / 测量与缺失 / 误差结构必须各自成立,
             # 且不得用占位或合成数据产出"现实因果结论"。
             if not claim.study.identification_assumptions:
                 reasons.append(f"因果结论 {claim.id} 未列出识别假设 (设计声明不等于识别成立)")
@@ -297,7 +297,7 @@ def _aligned(record: VerificationRecord, claim: Claim) -> bool:
 
 def delivery_gate(manuscript: str, snapshot: ResearchSnapshot,
                   theory_gate: GateResult | None = None) -> GateResult:
-    """论文表达门槛 + 研究有效性门槛的联合出口检查 (计划书 §9.1、§14)。"""
+    """论文表达门槛 + 研究有效性门槛的联合出口检查。"""
     reasons: list[str] = []
     unresolved: list[str] = []
 

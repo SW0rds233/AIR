@@ -140,7 +140,7 @@ def evidence_payload(evidence) -> list[dict]:
             "credibility": e.credibility.value,
             "existence_verified": e.existence_verified,
             "excerpt": (e.excerpt or "")[:400],
-            # P1-4: 含视觉异常片段的来源在工作台标出 (需核对, 不作为强证据)
+            # 含视觉异常片段的来源在工作台标出 (需核对, 不作为强证据)
             "notes": e.notes,
             "needs_review": "需核对" in (e.notes or ""),
         }
@@ -294,7 +294,7 @@ esearch/inspection.py) 取出运行身份/指标/缺口等派生值。
             "selected_candidate_id": spec.selected_candidate_id,
             "variable_domains": spec.variable_domains,
             "unknown_fields": spec.unknown_fields,
-            # P0-2: 问题契约 (研究类型、允许的方法、研究路径、澄清问题)
+            # 问题契约 (研究类型、允许的方法、研究路径、澄清问题)
             "contract": (spec.contract.model_dump(mode="json")
                          if spec.contract is not None else None),
             # P0-1/§1 契约第 2 行: 授权策略与检索覆盖记录 (用了哪些检索式/库, 缺什么)
@@ -305,7 +305,7 @@ esearch/inspection.py) 取出运行身份/指标/缺口等派生值。
         "claims": claims_payload(claims, problem_id),
         "obligations": obligations_payload(obligations),
         "verifications": verifications_payload(verifications),
-        # 计划书 §5.2 / §7.2: 领域模型选中情况与问题类型能力声明
+        # 领域模型选中情况与问题类型能力声明
         "model_selection": dict(model_selection or {}),
         # R2: 候选机制的完整比较 (候选、舍弃理由、可区分检验、术语与量纲)
         "modeling": dict(modeling or {}),

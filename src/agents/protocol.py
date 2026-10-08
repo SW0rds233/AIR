@@ -198,7 +198,7 @@ class UsageRecord(BaseModel):
     """一次派工实际发生的用量。
 
     `calls`/`tokens`/`cost_usd` 缺失时用 `None` 表示**未知**, 不用 0 冒充 ——
-    费用报告里"没记录"与"花了 0 元"必须能区分 (合并计划 §5.3)。
+    费用报告里"没记录"与"花了 0 元"必须能区分。
     """
 
     llm_calls: int = 0
@@ -418,7 +418,7 @@ CAPABILITY_TOOLS: frozenset[str] = frozenset({
     "propose_review",
 })
 
-#: 资料策略 → **只有这些策略才允许**的外部取数能力 (G09)。
+#: 资料策略 → **只有这些策略才允许**的外部取数能力。
 #:
 #: 角色能力表 (`AGENT_CAPABILITIES`) 说的是"这个角色**能**做什么", 用户授权说的是
 #: "这次**准**做什么"。两者必须求交: 此前 `grant_for()` 只看角色表, 于是一个
@@ -730,7 +730,7 @@ def agent_capability(agent: str) -> AgentContract | None:
 # ----------------------------------------------------------------------
 # 对象与产物身份
 # ----------------------------------------------------------------------
-#: 权威对象的种类。**一次迁移中每种对象只能有一个权威写入口** (合并计划 §6.1),
+#: 权威对象的种类。**一次迁移中每种对象只能有一个权威写入口**,
 #: 因此这里是封闭集合: 拼错种类会在构造 `ObjectRef` 时被拒, 而不是静默建出
 #: 第二份真相源。
 OBJECT_KINDS: frozenset[str] = frozenset({
@@ -813,7 +813,7 @@ ARTIFACT_KINDS: frozenset[str] = frozenset(k.value for k in ArtifactKind)
 
 
 class ArtifactRef(BaseModel):
-    """产物引用: 只带标识与摘要, **正文不平铺进图状态** (合并计划 §6.1)。"""
+    """产物引用: 只带标识与摘要, **正文不平铺进图状态**。"""
 
     artifact_id: str
     kind: ArtifactKind = ArtifactKind.other
@@ -830,7 +830,7 @@ class ArtifactRef(BaseModel):
     @field_validator("uri")
     @classmethod
     def _no_absolute(cls, value: str) -> str:
-        """绝对路径不进入共享状态: 界面与日志只展示相对位置 (合并计划 §13.3)。"""
+        """绝对路径不进入共享状态: 界面与日志只展示相对位置。"""
         text = str(value or "")
         if len(text) > 2 and text[1] == ":" and text[2] in "\\/":
             raise ValueError(f"产物引用不得使用绝对路径: {text}")
@@ -969,7 +969,7 @@ class ChangeProposal(BaseModel):
     expected_revision: int | None = None     # 依据的版本; 与当前不一致则过期
     payload: dict[str, Any] = Field(default_factory=dict)
     rationale: str = ""
-    #: 依据的输入版本 (read-set)。运行时据此做事务一致性检查 (合并计划 §6.3)。
+    #: 依据的输入版本 (read-set)。运行时据此做事务一致性检查。
     input_versions: dict[str, int] = Field(default_factory=dict)
     evidence_refs: list[ObjectRef] = Field(default_factory=list)
     verification_refs: list[ObjectRef] = Field(default_factory=list)
@@ -1068,7 +1068,7 @@ class ReviewIssueRef(BaseModel):
 # 任务
 # ----------------------------------------------------------------------
 class TaskStatus(str, Enum):
-    """任务生命周期 (合并计划 §6.2)。"""
+    """任务生命周期。"""
 
     queued = "queued"
     running = "running"
@@ -1103,7 +1103,7 @@ def idempotency_key_for(project_id: str, problem_id: str, plan_version: int,
     """同一"角色 + 目标"的确定性键 —— **与计划版本无关**。
 
     用途: 重连、超时重试或主控重新派工时识别"这件事已经做过了", 避免重复付费调用与
-    无限重派 (合并计划 §5.3)。措辞变化会改变键 —— 这是有意的: 目标变了就是新任务。
+    无限重派。措辞变化会改变键 —— 这是有意的: 目标变了就是新任务。
 
     `plan_version` 只作为审计字段参与签名之外的记录, **不进入键**: 计划升版不代表
     要做新东西, 把版本算进键会让"同一句需求"每升一版就变成新任务 (实测: 同一件事
@@ -1254,7 +1254,7 @@ class ContextPack(BaseModel):
 
 
 class AgentResult(BaseModel):
-    """子智能体交回的成果 (合并计划 §5)。
+    """子智能体交回的成果。
 
     `outcome` 与"主问题是否解决"是两件事: 任务完成不等于研究完成 —— 主控据
     `followup_needs` 与缺口变化决定下一步。
@@ -1341,7 +1341,7 @@ class AgentResult(BaseModel):
 class AgentRun(BaseModel):
     """一次具体执行 (重试产生新 agent_run, 复用原 task_id)。
 
-    合并计划 §5.3: 记录 `agent/task/agent_run/prompt_version/model/tool_run/
+    记录 `agent/task/agent_run/prompt_version/model/tool_run/
     input_versions/output_hash`。
     """
 

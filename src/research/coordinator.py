@@ -39,7 +39,7 @@ _ACTION_VALUE = {
     ActionType.revise_hypothesis: (2, "按反馈修订假设/范围"),
 }
 
-# 义务受阻 (验证后端无法判定) 时能**产生新信息**的动作 (计划书 §5.3-2)。
+# 义务受阻 (验证后端无法判定) 时能**产生新信息**的动作。
 # 反复执行同一个 check_step 不会改变结果, 只是在烧预算 —— 必须换一类动作。
 _INFO_ACTIONS = {
     ActionType.derive_step: "生成推导步骤与反方审查, 可能补出缺失条件",
@@ -165,7 +165,7 @@ def rank_actions(state: dict, actions: list[ActionType] | None = None) -> list[t
     cost = max(1, int(state.get("budget_remaining", 1) or 1))
     stuck_actions = _stuck_resolving(state)
     review_first = _needs_review_first(state)
-    # P1-2: 最近一次失败的**类型**决定下一动作候选, 而不是笼统重试
+    # 最近一次失败的**类型**决定下一动作候选, 而不是笼统重试
     failure_actions = {str(a) for a in (state.get("failure_next_actions") or [])}
     failure_note = str(state.get("failure_judgement", "") or "")
 

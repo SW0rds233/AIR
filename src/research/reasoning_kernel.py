@@ -172,7 +172,7 @@ def derive_steps_for(claim: Claim, *, attempt: ProofAttempt,
                      ) -> ReasoningOutcome:
     """生成可审查的推导步骤, 并把反方审查意见转成**新的证明义务**。
 
-    合并计划 §7.1 / §5.5: 审查意见不直接改命题状态, 而是转为待核验义务。
+    审查意见不直接改命题状态, 而是转为待核验义务。
     应用/数据类命题没有可符号推导的形式化片段, 但**反方审查仍然适用** —— 这类命题
     会补一条显式的"尚无形式化片段"步骤 (早期实现因"没有结构化形式"直接返回失败,
     导致八项检查在实践中从未对应用类命题执行过)。
@@ -193,7 +193,7 @@ def derive_steps_for(claim: Claim, *, attempt: ProofAttempt,
     rule_obligations = issues_to_obligations(attempt, claim,
                                              existing_statements=existing)
     existing |= {o.statement for o in rule_obligations}
-    # 计划书 §7.2: 反方审查清单八项必须都跑过, 并在审计里留下每项结论
+    # 反方审查清单八项必须都跑过, 并在审计里留下每项结论
     review, review_obligations = review_claim_with_obligations(
         claim, evidence=[e for e in evidence if e.claim_id == claim.id],
         existing_statements=existing)
@@ -495,7 +495,7 @@ def novelty_comparison_for(claim: Claim, *, lookup: Any,
                            ) -> ReasoningOutcome:
     """新颖性对照 (零 LLM 判定; `lookup` 决定可比对的既有工作)。
 
-    关键约束 (合并计划 §7.2、§14.3): 检索命中**不等于**结论已被别人做过, 所以
+    关键约束: 检索命中**不等于**结论已被别人做过, 所以
     `novelty.assess` 只给候选对照行与 `unchecked` 状态, 由人/独立审查确认等价性。
     本函数不写命题真值, 只返回"该记什么"。
     """
@@ -607,9 +607,9 @@ def validation_plan_for(claim: Claim, *, distinguishing: Any = None,
                         evidence: list[Any] | None = None,
                         model: dict[str, Any] | None = None,
                         ) -> ReasoningOutcome:
-    """为具体未决问题生成实验/仿真规格 (计划书 §8)。
+    """为具体未决问题生成实验/仿真规格。
 
-    两条硬约束 (合并计划 §1 与 §11):
+    两条硬约束:
     1. **绝不产生"已执行结果"** —— `execution_status` 只到规格校验, 未执行的数据不得
        当作证据;
     2. **不套模板充数** —— 既没有竞争预测也没有未闭义务时明确拒绝 (`refused=True`),

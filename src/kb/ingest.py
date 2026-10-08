@@ -206,7 +206,7 @@ def ingest_manual(topic: str, embed: bool = True, store: KBStore | None = None) 
             peer_reviewed=peer, credibility=credibility, parse_quality=parsed.parse_quality,
             num_pages=len(parsed.pages) or (1 if parsed.full_text else 0),
             has_fulltext=bool(parsed.full_text), identity=build_identity(item, file_hash),
-            # P1-4: 视觉异常片段随文档落库, 供检索/工作台标注"需核对"
+            # 视觉异常片段随文档落库, 供检索/工作台标注"需核对"
             visibility_flags=list(parsed.visibility_flags),
         )
         if not is_new:

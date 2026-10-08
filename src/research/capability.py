@@ -109,7 +109,7 @@ CAPABILITIES: dict[str, Capability] = {
         backends=(), requires_data=True, requires_design=True,
         min_evidence_grade="anecdotal",
         description="情景/仿真命题: 只能给出条件性结论, 必须声明情景参数与适用边界",
-        obligation_kinds=("scope_check", "evidence_support", "design_feasibility"),
+        obligation_kinds=("scope_check", "evidence_support", "scenario_parameters"),
     ),
     "normative": Capability(
         category="normative", claim_type=ClaimType.normative,
@@ -243,7 +243,7 @@ def declare_capability(category: str, *, available: dict[str, bool] | None = Non
 
 
 # ----------------------------------------------------------------------
-# 领域模型选择 (计划书 §5.2)
+# 领域模型选择
 # ----------------------------------------------------------------------
 def candidate_scheme(claim) -> tuple[str, str, str]:
     """按命题类型给出**候选**模型方案 (名称, 机制说明, 忠实度说明)。

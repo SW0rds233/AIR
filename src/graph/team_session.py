@@ -96,7 +96,7 @@ class TeamApp:
             if not keep_going:
                 break
         # 收尾: 交付包在这里导出 (与团队会话的 export 同一实现)。
-        # **导出失败不得静默** (G12): 之前这里 `except: package = None`, 于是"导出失败"
+        # **导出失败不得静默**: 之前这里 `except: package = None`, 于是"导出失败"
         # 在界面上与"没跑过"完全一样。现在如实发一条可恢复错误事件。
         try:
             package = self.session.export()
@@ -177,7 +177,7 @@ class _TeamState:
 class _EventBridge:
     """把 `runtime.emit` 的事件转成会话级事件 (逐条推给 `emit`)。
 
-    合并计划 §9.4: 事件必须带类型与可选 task/agent ID, 未知事件不得静默丢弃。
+    事件必须带类型与可选 task/agent ID, 未知事件不得静默丢弃。
     团队事件名 (`supervisor_decision`/`task_started`/...) 直接作为事件类型保留,
     会话层再决定怎么渲染; 这里不翻译成"看起来更友好"的名字, 否则真实进度就丢了。
     """
@@ -693,10 +693,18 @@ def run_team_session(request: str, *, project_id: str = "", problem_id: str = ""
     """
     from src.bootstrap import role_llm_factory
     from src.graph.research_graph import TeamRun
+    from src.kb.sources import build_source_summary
+    from src.research.question_planner import formulate, requires_intent_clarification
+
+    source_ids = list(source_set_ids)
+    preflight = formulate(request, source_summary=build_source_summary(
+        source_set_id=source_ids[0] if source_ids else "", request=request))
+    if requires_intent_clarification(preflight):
+        raise ValueError(f"请先澄清研究目标：{preflight.clarification}")
 
     with TeamRun(project_id=project_id or "proj-team", problem_id=problem_id,
                  run_id=run_id, request=request,
-                 source_set_ids=list(source_set_ids), source_policy=source_policy,
+                 source_set_ids=source_ids, source_policy=source_policy,
                  max_rounds=max_rounds,
                  llm_factory=llm_factory or role_llm_factory) as team:
         session = TeamSession(team, emit=emit)

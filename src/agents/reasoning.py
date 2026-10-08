@@ -130,6 +130,8 @@ class ReasoningAgent(AgentBase):
   非人群研究用 scope_conditions 记录对象、环境及适用条件；有样本范围的研究才填
   scope_population/scope_region/scope_period。预测命题的 study.predictive_validation
   应记录样本外划分、评价指标和基线比较，不能用 design_feasibility 代替。
+  情景命题的 study.scenario_parameters 应记录参数、范围和取值依据；
+  study.design_feasibility 只表示因果研究设计在现有数据上的可行性。
   数学等价、概率公式和矩阵恒等式不是实证因果/关联命题；研究建议不是数学命题。
   每次只提交解决当前子问题所必需的少量命题（建议最多8条），复用已有命题 id，
   修正旧命题时提供其 id 和修正条件，避免重新生成整套文献摘要命题。

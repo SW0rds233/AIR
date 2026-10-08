@@ -61,7 +61,7 @@ class ExperimentSpec(BaseModel):
     claim_id: str = ""
     claim_version: int = 1
     gap_id: str = ""
-    # P1-3: 建议必须由**被选模型**导出, 而不是套模板; 记录模型来源便于复核
+    # 建议必须由**被选模型**导出, 而不是套模板; 记录模型来源便于复核
     model_ref: dict[str, Any] = Field(default_factory=dict)
     model_source: str = ""        # 模型名 + 形式化片段摘要
     target_gap: str = ""          # 本条建议针对的具体缺口
@@ -113,7 +113,7 @@ class ExperimentSpec(BaseModel):
     authorization: str = ""
     artifacts: list[str] = Field(default_factory=list)
     validation: dict[str, Any] = Field(default_factory=dict)
-    # P1-3: 计划书要求的必备要素里**还缺哪些** (缺关键项只能维持草案)
+    # 计划书要求的必备要素里**还缺哪些** (缺关键项只能维持草案)
     missing_elements: list[str] = Field(default_factory=list)
     notes: str = ""
     created_at: str = Field(default_factory=utcnow)

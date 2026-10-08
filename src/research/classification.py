@@ -67,5 +67,32 @@ def is_formal_question(text: str) -> bool:
                                re.search(r"两两|任意|所有|pairwise|for every", body, re.I))
     logical_relation = bool(re.search(r"证明|prove|proof", body, re.I) and
                             re.search(r"等价|当且仅当|equivalen|\biff\b", body, re.I))
+    bounded_existence = bool(re.search(r"是否存在|能否存在|does there exist", body, re.I)
+                             and _has_numeric_constraint(body))
+    explicit_intent = bool(re.search(
+        r"形式化|数学对象|抽象对象|formal proof|mathematical object", body, re.I))
+    explicit_bounded_proof = explicit_intent and bounded_existence
     return bool(tuple_values or symbolic_relation or quantified_relation or counted_design
+                or explicit_bounded_proof
                 or implicit_constraint or logical_relation)
+
+
+def _has_numeric_constraint(body: str) -> bool:
+    return bool(re.search(r"\d+\s*(?:阶|个|条|点|vertices?|nodes?)", body, re.I)
+                or re.search(r"(?:长度|length)\s*(?:为|是|=|of)?\s*\d+", body, re.I)
+                or re.search(r"(?:每|every).{0,35}(?:\d+|one|two|three|一个|两个)", body, re.I))
+
+
+def possibly_formal_question(text: str) -> bool:
+    """Flag a bounded existence question that needs semantic clarification.
+
+    One size or count does not prove that the object is mathematical: a physical
+    object can have the same wording.  Callers must ask which interpretation the
+    user intends instead of silently assigning a research type.
+    """
+    body = str(text or "")
+    if is_formal_question(body) or not re.search(
+        r"是否存在|能否存在|does there exist|is there", body, re.I
+    ):
+        return False
+    return _has_numeric_constraint(body)

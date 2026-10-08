@@ -30,8 +30,9 @@
 
 ```powershell
 # CLI
-.venv\Scripts\python.exe -m src.main --mode theory --project-id transfer-eval --problem-id p1 `
-  --topic "钙钛矿太阳能电池湿度稳定性" --max-actions 40
+# 将「资料源ID」替换为实际已入库的 source_set_id
+.venv\Scripts\python.exe -m src.main --request "结合我选定的资料库，说明湿度如何导致钙钛矿太阳能电池性能衰减，并给出理论结论与可区分竞争解释的仿真建议。" `
+  --project-id transfer-eval --problem-id p1 --source-set-id "资料源ID" --source-policy user_kb
 
 # Web
 .venv\Scripts\python.exe -m uvicorn src.server:app --port 8000

@@ -529,7 +529,6 @@ class WritingAgent(AgentBase):
                 if pending:
                     problems.append(f"未核验的结论块 {block.block_id}: {', '.join(pending)}")
         full_text = _manuscript_text(manuscript)
-        source_rows = [_source_text(row) for row in packet.sources]
         for record in packet.verifications:
             if record.get("stale") or record.get("validation_status") != "verified":
                 continue
@@ -940,7 +939,7 @@ def _manuscript_from_payload(payload: dict[str, Any],
 
 
 def build_packet_from_context(task: AgentTask, context: ContextPack) -> WritingPacket:
-    """从上下文组装 `WritingPacket` (合并计划 §3.1)。
+    """从上下文组装 `WritingPacket`。
 
     结果快照只带**引用与摘要**: 正文留在产物文件里, 不复制一份可写状态 (§6.1)。
     """

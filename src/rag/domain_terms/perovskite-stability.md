@@ -6,7 +6,7 @@ in_domain: perovskite solar cell; perovskite photovoltaic; photovoltaic efficien
 strong_in_domain: perovskite solar cell; perovskite photovoltaic; 钙钛矿太阳能电池
 off_domain_confusables: mantle; geophysics; mineral phase; geological perovskite
 query_core: perovskite solar cell; humidity; degradation
-translation: 钙钛矿太阳能电池 => perovskite solar cell|perovskite photovoltaic
+translation: 钙钛矿太阳能电池 => perovskite solar cell|perovskite photovoltaic|PSC
 translation: 湿度 => humidity|moisture
 translation: 衰减 => degradation|decay
 translation: 稳定性 => stability

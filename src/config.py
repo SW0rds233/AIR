@@ -223,7 +223,7 @@ HTTP_429_BACKOFF_BASE = float(os.getenv("HTTP_429_BACKOFF_BASE", "4"))
 LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "900"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
 
-# ===== 理论研究模式的资源预算 (计划书 §9.3) =====
+# ===== 理论研究模式的资源预算 =====
 # 除动作/工具调用次数外, 还要限制模型 token、费用与墙钟时间; 任一超限即**停止并导出
 # 部分报告**, 而不是继续跑到失败。三者都为上限, 0 表示不限制。
 RESEARCH_MAX_TOKENS = int(os.getenv("RESEARCH_MAX_TOKENS", "0"))

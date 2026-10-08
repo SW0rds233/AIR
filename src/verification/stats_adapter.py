@@ -35,7 +35,7 @@ def _version() -> str:
 
 
 def _authorized_roots() -> list[Path]:
-    """允许读取数据文件的根目录 (计划书 §6.3 / §9.4)。
+    """允许读取数据文件的根目录。
 
     实现已收敛到 `kb.adapters.readonly_data`: 授权目录、越界判定与只读打开
     只有一份实现, 避免"统计适配器"和"数据源适配器"两套规则漂移。

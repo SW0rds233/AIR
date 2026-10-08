@@ -5,6 +5,7 @@ from __future__ import annotations
 Retrieval records describe coverage and reading depth, not proof of a conclusion.
 """
 
+import re
 from typing import Any
 
 from src.agents.base import (
@@ -65,6 +66,8 @@ class EvidenceAgent(AgentBase):
 领域则优先联想其原始研究、机理、条件、测量指标和可检验假说，不套数学词表。
 关联只是待检索假设，不得声称某定理已适用或机理已被证实。
 给出简短中英文检索式，覆盖直接问题、相关机制或理论、原始出处与反例；保留关键参数。
+中文专有名词、可信英文全称与已知缩写分成不同检索式；缩写须带领域上下文，
+不凭首字母猜测缩写。
 不要把用户的写作指令、附件哈希或传输提示当作检索词。
 首轮检索式应包含领域专名与核心概念；分别规划精确检索与相邻概念的宽检索。
 不要把 solution、certificate 等泛词堆成查询；除非题目限定，不添加年份或“最新”。
@@ -76,7 +79,8 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
 
     def plan_retrieval(self, task: AgentTask, context: ContextPack,
                        runtime: AgentRuntime, usage: UsageRecord) -> dict[str, Any]:
-        from src.research.query_planner import plan_queries, research_question_text
+        from src.research.query_planner import (choose_queries, plan_queries,
+                                                research_question_text)
 
         question = _query_of(task, context)
         plan: dict[str, Any] = {"research_question": question, "field_key": "",
@@ -94,8 +98,6 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                                  + "已提出的模型/结论:\n" + "\n".join(related)[:3000])])
                 candidate, _ = extract_json(getattr(response, "content", ""))
                 if isinstance(candidate, dict):
-                    import re
-
                     key = str(candidate.get("field_key") or "").strip().lower()
                     try:
                         confidence = float(candidate.get("confidence") or 0)
@@ -123,7 +125,30 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                 for query in plan_queries(goal=text, limit=2):
                     if query.text not in {row["text"] for row in plan["queries"]}:
                         plan["queries"].append({"text": query.text, "purpose": query.why})
-        plan["queries"] = plan["queries"][:self.max_queries]
+        from src.rag.relevance_filter import resolve_domain
+
+        terminology = {name: list(variants) for name, variants in
+                       resolve_domain(question).translations}
+        for concept in plan["concepts"]:
+            name = str(concept.get("name") or "").strip()
+            english = str(concept.get("english") or "").strip()
+            if name not in question or not re.search(r"[\u4e00-\u9fff]", name):
+                continue
+            match = re.fullmatch(r"([A-Za-z][A-Za-z0-9 -]{1,80})\s*\(([A-Z0-9]{2,8})\)", english)
+            variants = [match.group(1).strip(), match.group(2)] if match else [english]
+            for variant in variants:
+                if re.fullmatch(r"[A-Za-z][A-Za-z0-9 -]{1,80}", variant):
+                    terminology.setdefault(name, []).append(variant)
+        planned = plan_queries(goal=question, terminology=terminology or None,
+                               limit=self.max_queries)
+        selected = choose_queries(planned, [row["text"] for row in plan["queries"]],
+                                  self.max_queries)
+        purposes = {row["text"]: row["purpose"] for row in plan["queries"]}
+        purposes.update({row.text: row.why for row in planned})
+        angles = {row.text: row.angle for row in planned}
+        plan["queries"] = [{"text": query, "purpose": purposes.get(query, "研究问题检索"),
+                            "angle": angles.get(query, "model")}
+                           for query in selected]
         runtime.emit("retrieval_plan", {"task_id": task.task_id, **plan})
         return plan
 
@@ -178,10 +203,16 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
         if policy in {"both", "autonomous"}:
             search_cache = {**runtime.search_cache, **search_cache}
         targeted = str((task.hints or {}).get("query", "") or "").strip()
-        selected_queries = list(dict.fromkeys(
+        from src.research.query_planner import Query, choose_queries
+
+        planned_queries = [Query(text=row["text"], angle=row.get("angle", "model"))
+                           for row in retrieval_plan["queries"]]
+        selected_queries = choose_queries(
+            planned_queries,
             ([targeted] if targeted else []) + selected_queries
             + _theorem_search_queries(context)
-            + [row["text"] for row in retrieval_plan["queries"]]))[:self.max_queries]
+            + [row["text"] for row in retrieval_plan["queries"]],
+            self.max_queries)
         collected = self.retrieve(task, context, runtime, topic=topic, query=query,
                                   policy=policy, selected_queries=selected_queries,
                                   search_cache=search_cache, usage=usage)
@@ -325,7 +356,7 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                     default = bridge._default_search_fn()
                     if default is None:
                         raise RuntimeError("外部检索能力不可用")
-                    papers = default(query_text, max(limit * 3, 12))
+                    papers = default(query_text, min(max(limit, 12), 30))
                 return self.select_related(papers, query_text, task, context, runtime, usage or UsageRecord())
 
             items, coverage = bridge.gather_sources(

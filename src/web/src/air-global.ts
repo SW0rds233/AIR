@@ -8,7 +8,7 @@
  *   表现为按钮无反应 / 直接抛错。
  * - 现在 `main.ts` 先 import 本模块, 再 import `app.ts`, 因此全局契约**必然先建立**。
  *
- * G19: 这里**不再持有任何可写状态**。
+ * 这里**不再持有任何可写状态**。
  *
  * 迁移前 `window.AIR.research` 是一个可写的 `CurrentResearch` 对象, 带
  * `apply()/reset()/load()` 三个写入口, 与 `state/research-store.ts` 并行存在 ——

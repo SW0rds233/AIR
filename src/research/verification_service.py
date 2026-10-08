@@ -514,7 +514,7 @@ def _to_validation_status(result: VerificationResult) -> ValidationStatus:
                        ValidationStatus.execution_error)
 
 
-#: 规则型义务里"由显式声明关闭"的那几种 (计划书 §7.4)。
+#: 规则型义务里"由显式声明关闭"的那几种。
 CAUSAL_DECLARATION_KINDS: frozenset[str] = frozenset({
     "identification_assumptions", "design_feasibility",
     "measurement_and_missing", "error_structure",
@@ -556,6 +556,11 @@ def _rule_verdict(claim: Any, obligation: ProofObligation,
             return True, study.predictive_validation.strip(), extra
         return False, "", {"detail": "缺少样本外划分、评价指标与基线比较方案"}
 
+    if kind == "scenario_parameters":
+        if study.scenario_parameters.strip():
+            return True, study.scenario_parameters.strip(), extra
+        return False, "", {"detail": "缺少情景参数、取值范围及依据"}
+
     if kind == "evidence_support":
         supporters = [e for e in evidence
                       if getattr(e, "support", None) in (
@@ -590,6 +595,13 @@ def _rule_verdict(claim: Any, obligation: ProofObligation,
                 "未列出识别假设; 声明研究设计不等于识别成立 "
                 "(如平行趋势/排他性/可忽略性等)")}
         if kind == "design_feasibility":
+            from src.research.schemas import ClaimType
+            if claim.claim_type == ClaimType.scenario:
+                # Older snapshots used this kind for scenario parameters.
+                previous = study.scenario_parameters or study.design_feasibility
+                if previous.strip():
+                    return True, previous.strip(), extra
+                return False, "", {"detail": "缺少情景参数、取值范围及依据"}
             if study.design_feasibility.strip():
                 return True, study.design_feasibility.strip(), extra
             return False, "", {"detail": (

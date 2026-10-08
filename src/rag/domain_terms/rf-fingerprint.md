@@ -6,6 +6,6 @@ in_domain: rf; radio; wireless; emitter; fingerprint; spectrum; transmitter; rec
 strong_in_domain: rf; radio; wireless; emitter; 射频; 无线; 辐射源; 电台
 off_domain_confusables: audio; acoustic; speech; music; multimedia; video; image; face; website; malware; recording device; 网站指纹; 浏览器指纹; tor traffic
 non_technical_venues: 教学; 教育; 人文; 社会研究; 课程; 教改; 课堂
-translation: 射频指纹 => RF fingerprinting|radio frequency fingerprinting
+translation: 射频指纹 => RF fingerprinting|radio frequency fingerprinting|RFFI
 translation: 辐射源 => emitter|specific emitter
 translation: 识别 => identification|recognition

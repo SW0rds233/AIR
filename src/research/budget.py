@@ -23,7 +23,7 @@ class ResearchBudget:
     max_tool_calls: int = 60
     no_progress_limit: int = 3
     max_routes: int = 3
-    # ---- 资源预算 (计划书 §9.3): 0 表示不限制 ----
+    # ---- 资源预算: 0 表示不限制 ----
     max_tokens: int = 0
     max_cost_usd: float = 0.0
     max_wall_seconds: float = 0.0

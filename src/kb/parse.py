@@ -92,7 +92,7 @@ class ParsedDoc:
     language: str = ""
     references: list[str] = field(default_factory=list)
     parse_quality: str = "ok"
-    # P1-4: 带样式与定位的片段 + 视觉异常清单 (供上层标"需核对")
+    # 带样式与定位的片段 + 视觉异常清单 (供上层标"需核对")
     spans: list[Span] = field(default_factory=list)
     visibility_flags: list[dict] = field(default_factory=list)
 
@@ -162,7 +162,7 @@ def read_pdf_spans(path: Path) -> list[Span]:
 
 @dataclass
 class SourceReading:
-    """`read_source()` 的返回: 文本 + 定位 + 可见性 + 信任标记 (计划书 §3)。"""
+    """`read_source()` 的返回: 文本 + 定位 + 可见性 + 信任标记。"""
 
     text: str = ""
     spans: list[Span] = field(default_factory=list)

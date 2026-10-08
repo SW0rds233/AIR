@@ -93,6 +93,16 @@ def formulate_problem(*, request: str = "", topic: str = "", project_id: str = "
             unknown_fields=list(getattr(design_form, "unknown_fields", []) or []))
         return out
 
+    from src.research.question_planner import requires_intent_clarification
+
+    contract = getattr(spec, "contract", None)
+    if contract is not None and hasattr(contract, "paths") \
+            and requires_intent_clarification(contract):
+        return FormulatedProblem(
+            spec=spec, needs_clarification=True,
+            notes=[contract.clarification],
+            unknown_fields=["research_intent: 形式化证明还是现实对象查询"])
+
     # 2. 通用形式化
     form = formulate(spec, available or {})
     out = FormulatedProblem(

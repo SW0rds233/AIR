@@ -449,7 +449,20 @@ def formulate(request: str, topic: str = "", source_summary: SourceSummary | Non
     summary = source_summary or SourceSummary()
     explicit_formal = bool(parse_questions(text)) and not _has_any(text, _DIRECTION_MARKERS)
     kind, basis = _decide_task_kind(text, summary, explicit_formal)
+    from src.research.classification import possibly_formal_question
+
+    uncertain_formal = possibly_formal_question(text) and not summary.has_observational_data
     effect = parse_effect_direction(text)
+    paths = _build_paths(kind, text, summary)
+    if uncertain_formal:
+        paths = [ResearchPath(
+            task_kind=TaskKind.formal_proof,
+            statement=f"先定义对象和数值约束，再判断「{text}」的存在性",
+            produces="可核验的证明、反例或明确的未决边界",
+            requires=_THEORY_REQUIRES + ["对象定义与量词"],
+        ), *paths]
+        for path in paths:
+            path.recommended = False
     return ProblemContract(
         goal=text,
         task_kind=kind,
@@ -465,10 +478,19 @@ def formulate(request: str, topic: str = "", source_summary: SourceSummary | Non
             "资料覆盖不足或关键全文不可得: 说明覆盖限制, 不把无命中当成不存在",
             "预算耗尽: 输出部分结果与未决项",
         ],
-        paths=_build_paths(kind, text, summary),
-        clarification=_clarification_for(summary, kind),
-        basis=basis,
+        paths=paths,
+        clarification=("这里的‘存在’是要形式化证明满足数值约束的抽象对象存在，"
+                       "还是要查询现实对象或经验效应？请说明对象定义与判定目标。"
+                       if uncertain_formal else _clarification_for(summary, kind)),
+        basis=("单个数值约束不足以区分形式化存在性与现实存在性，等待澄清"
+               if uncertain_formal else basis),
     )
+
+
+def requires_intent_clarification(contract: ProblemContract) -> bool:
+    """A route cannot start while the contract recommends no interpretation."""
+    return bool(contract.clarification and contract.paths
+                and not any(path.recommended for path in contract.paths))
 
 
 def build_spec_from_input(request: str, topic: str = "", project_id: str = "",

@@ -5,7 +5,7 @@
  * (多声明一个字段就等于多一处会漂移的假设)。
  */
 
-/** 问题契约 (P0-2): 研究类型决定允许的方法与结论强度。 */
+/** 问题契约: 研究类型决定允许的方法与结论强度。 */
 export type TaskKind = 'mechanism' | 'formal_proof' | 'empirical_causal' | 'scenario';
 export type SourcePolicy = 'user_kb' | 'autonomous' | 'both';
 

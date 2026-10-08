@@ -72,7 +72,7 @@ def describe_visibility(flags: list[str]) -> str:
 
 
 def mark_spans(spans: list[dict]) -> list[dict]:
-    """给带样式元数据的片段加信任标记 (P1-4)。
+    """给带样式元数据的片段加信任标记。
 
     只**标注**异常片段, 不删除文本: 异常片段仍可被引用, 但上层必须知道
     它在页面上不易被看到, 不能据此改写研究题意、工具请求或验证规则。

@@ -93,7 +93,7 @@ class FailureRecord:
     claim_id: str = ""
     route_id: str = ""
     kind: str = ""            # 原始自由文本类型
-    failure_kind: FailureKind | None = None   # 归类后的失败类型 (P1-2)
+    failure_kind: FailureKind | None = None   # 归类后的失败类型
     reason: str = ""
     scientific: bool = False  # True = 数学上被否定; False = 运行/能力问题, 可重试
     tool: str = ""
@@ -224,7 +224,7 @@ class RouteManager:
                reason: str = "", new_condition: str = "", new_subclaim: str = "",
                new_mechanism: str = "", tool_change: str = "", max_routes: int = 5,
                ) -> tuple[ResearchRoute | None, str]:
-        """按失败类型提出新路线 (P1-2)。
+        """按失败类型提出新路线。
 
         必须给出**实质变化**: 新条件、新子命题或不同机制。只换工具名/措辞 → 返回
         `(None, 停止理由)` 并记一条 `no_progress` 失败, 而不是再造一条同义路线。

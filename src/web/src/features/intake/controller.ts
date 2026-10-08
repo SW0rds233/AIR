@@ -371,6 +371,9 @@ export function createIntakeController(deps: IntakeDeps): IntakeController {
         deps.refreshHistorySelect();
         deps.switchTab('workbench');
         deps.refreshWorkbench();
+      } else if (status === 422 && data.detail?.needs_clarification) {
+        deps.addMsg('请先澄清研究目标：' + data.detail.question, 'msg-error');
+        deps.setMode('idle');
       } else if (status === 409 && data.detail && data.detail.options) {
         // F0-4 / F1: 同一问题已在研究另一个请求 → 让用户明确选择, 不静默改题
         showProblemConflict(data.detail);
@@ -429,7 +432,7 @@ export function createIntakeController(deps: IntakeDeps): IntakeController {
     start(requestText);
   }
 
-  // 显式续研: 与 start 分开语义 (计划书 §9.1), 复用已落盘规格
+  // 显式续研: 与 start 分开语义, 复用已落盘规格
   function startWithResume(requestText: any) {
     const request = (requestText || '').trim();
     if (!request) { alert('请输入研究请求'); return; }
@@ -450,6 +453,11 @@ export function createIntakeController(deps: IntakeDeps): IntakeController {
     };
     startSession(api, payload).then(({status, body}) => {
         if (!body.thread_id) {
+          if (status === 422 && body.detail?.needs_clarification) {
+            deps.addMsg('请先澄清研究目标：' + body.detail.question, 'msg-error');
+            deps.setMode('idle');
+            return;
+          }
           deps.addMsg('续研失败 (HTTP ' + status + '): ' +
                       JSON.stringify(body.detail || body), 'msg-error');
           deps.setMode('idle');

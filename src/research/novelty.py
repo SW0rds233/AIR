@@ -135,7 +135,7 @@ def render_novelty(record: NoveltyRecord) -> str:
     lines.append(f"- 检索日期: {record.search_date}")
     if record.queries:
         lines.append("- 查询: " + "; ".join(record.queries))
-    # P1-1: 授权证据库与新颖性检索范围分开写, 不许用前者冒充后者
+    # 授权证据库与新颖性检索范围分开写, 不许用前者冒充后者
     if record.evidence_scope:
         lines.append("- 授权研究证据库: " + ", ".join(record.evidence_scope))
     if record.retrieval_scope:

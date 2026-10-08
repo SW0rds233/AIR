@@ -75,7 +75,7 @@ class TaskCancelled(RuntimeError):
 # ----------------------------------------------------------------------
 @dataclass
 class CancelToken:
-    """协作式取消信号 (合并计划 §5.3)。
+    """协作式取消信号。
 
     停止 run 时: 未派发的任务直接取消, 运行中的任务通过这个令牌收到通知。
     不把线程强杀 —— 否则已发生的费用与半成品产物就无法如实记账。
@@ -462,7 +462,7 @@ class AgentRuntime:
         self.events: list[dict[str, Any]] = []
         #: 本运行的研究存储 (由装配层注入; 团队里就是 `TeamRun.task_store.store`)。
         #: 角色**不直接**读写它 —— 核验服务用它记账与算输入闭包, 对象写入只走
-        #: 唯一提交口 (合并计划 §6.2)。
+        #: 唯一提交口。
         self.research_store: Any = None
 
     # ---- 核验服务 (合并计划 §4: "VerificationService 类型化请求与结果提交") ----

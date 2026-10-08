@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.agents.reasoning import ReasoningAgent, classify_strategy, _formal_subject
-from src.agents.protocol import AgentTask, AgentResult, ChangeProposal, ContextPack, ObjectRef, UsageRecord
+from src.agents.protocol import AgentTask, AgentResult, ContextPack, ObjectRef, UsageRecord
 from src.agents.runtime import AgentRuntime
 from src.publication.render_latex import escape_latex, escape_math, render_latex
 from src.publication.schemas import Block, Manuscript, Section

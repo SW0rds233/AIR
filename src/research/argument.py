@@ -274,13 +274,13 @@ def build_argument(snapshot: ResearchSnapshot, claim: Claim) -> Argument:
         argument.caveats.append("该结论标记为 supported, 但快照中没有可用的验证记录")
     if argument.has_chain and not records:
         argument.caveats.append("步骤仅为推导计划, 尚未获得工具核验")
-    # P0-4: 有义务却对不上验证输入的步骤必须点出来, 不能被"链看起来完整"掩盖
+    # 有义务却对不上验证输入的步骤必须点出来, 不能被"链看起来完整"掩盖
     unlinked = [s.index for s in argument.steps if s.obligation_id and not s.verification_id]
     if unlinked:
         argument.caveats.append(
             "步骤 " + ", ".join(str(i) for i in unlinked)
             + " 对不上可用的验证输入: 只算推导计划, 不构成核验")
-    # P0-4: 旧数据的隐式验证关联一律标"待确认", 不当作已验证
+    # 旧数据的隐式验证关联一律标"待确认", 不当作已验证
     argument.caveats.extend(unconfirmed)
     if unconfirmed:
         argument.caveats.append(
@@ -318,7 +318,7 @@ def _record_is_for(record: VerificationRecord, obligation_id: str) -> bool:
 
 def _match_record(obligation, records: list[VerificationRecord],
                   claim: Claim | None = None) -> tuple[object | None, str]:
-    """把义务对应到验证记录, 并说明关联是否**已确认** (P0-4)。
+    """把义务对应到验证记录, 并说明关联是否**已确认**。
 
     1. 记录带 `obligation_ref` 且 id/版本一致 → confirmed;
     2. 旧数据里证书出现义务 ID → 记录为 `unconfirmed` (供人工确认, 不暗中补边);

@@ -87,14 +87,14 @@ def review_attempt(attempt: ProofAttempt) -> list[str]:
 
 def issues_to_obligations(attempt: ProofAttempt, claim: Claim,
                           existing_statements: set[str] | None = None):
-    """把审查意见转为**新的证明义务** (计划书 §5.5)。
+    """把审查意见转为**新的证明义务**。
 
     计划书要求反方审查的每条意见"指向具体对象/步骤并产生新的义务,
     而不是只输出一个总分"。生成的义务仍需通过工具核验才能关闭,
     因此审查意见不会直接改变任何命题状态。
 
     这些义务是 `required=False`: 它们是**已知的实践性保留意见**, 会随交付物
-    一起呈现 (计划书 §9.5), 但不会把已经满足既有门槛的结论重新判为不可交付。
+    一起呈现, 但不会把已经满足既有门槛的结论重新判为不可交付。
     """
     from src.research.schemas import Coverage, ProofObligation
 

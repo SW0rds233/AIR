@@ -112,7 +112,7 @@ class StoreInspection:
         return self._load("model", ResearchModel)
 
     def routes(self) -> list[Any]:
-        """研究路线 (计划书 §4.1)。
+        """研究路线。
 
         与引擎同一来源: 运行记录里的 `route_state`(引擎每次落盘都会写)。
         **读不出运行记录时返回空列表而不是去猜** —— 路线状态带分支身份, 从
@@ -294,7 +294,7 @@ class StoreInspection:
     # ------------------------------------------------------------------
     def model_selection(self, claims: list[Claim],
                         available: dict[str, bool] | None = None) -> dict[str, Any]:
-        """当前选中的模型与"需不需要模型"的判定 (计划书 §9.5 / §5.2)。"""
+        """当前选中的模型与"需不需要模型"的判定。"""
         from src.research.capability import candidate_scheme, declare_capability
         from src.research.reasoning_kernel import _claim_category
         from src.research.schemas import ClaimType
@@ -345,7 +345,7 @@ class StoreInspection:
 
     def gaps(self, claims: list[Claim],
              obligations: list[ProofObligation]) -> list[ResearchGap]:
-        """把"当前缺什么"显式化为缺口对象 (计划书 §4.1), 控制器据此推进。
+        """把"当前缺什么"显式化为缺口对象, 控制器据此推进。
 
         出场顺序即优先级: **证据缺口 > 未关闭义务 > 其他**。
         证据缺口优先是因为它的补全 (检索→原文→支持关系判定) 会改变后续义务的
@@ -396,7 +396,7 @@ class StoreInspection:
             claim_obligations = [o for o in obligations if o.claim_id == claim.id]
             unjudged = [e for e in own_evidence
                         if e.support == SupportKindOfEvidence.insufficient]
-            # 计划书 §6.1: 研究一开始就应先掌握已有定义/条件, 不应等到缺条件才检索。
+            # 研究一开始就应先掌握已有定义/条件, 不应等到缺条件才检索。
             # 因此只要**检索能力可用**且尚无"已判定支持"的证据, 就存在证据缺口。
             # 这里同样不能用 `knowledge_available`: 本地库为空但授权自主检索时, 外部
             # 检索仍可用 —— 否则缺口不产生, 检索请求也就无从生成 (计划书 P0-1 的第二处

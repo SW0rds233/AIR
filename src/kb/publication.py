@@ -1,6 +1,8 @@
 """Resolve publication versions and rank retrieval candidates before ingestion."""
 import re
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from math import isfinite, log1p
 from urllib.parse import quote
 from src.publication.references import normalize_doi, citation_eligible
 
@@ -24,6 +26,30 @@ def relevance_score(paper, query):
     title = tokens(paper.get("title"))
     body = tokens(paper.get("abstract"))
     return (2 * len(terms & title) + len(terms & body)) / (3 * len(terms))
+
+
+def candidate_priority(paper, query, *, current_year=None):
+    """Rank topical candidates by bounded recency and citation signals.
+
+    Topic relevance remains the primary gate. Citation counts are discovery
+    metadata, never evidence that a paper supports a research claim.
+    """
+    relevance = relevance_score(paper, query)
+    year_now = current_year or datetime.now(timezone.utc).year
+    try:
+        year = int(paper.get("year") or 0)
+    except (TypeError, ValueError):
+        year = 0
+    try:
+        citations = max(float(paper.get("citations") or 0), 0.0)
+    except (TypeError, ValueError):
+        citations = 0.0
+    if not isfinite(citations):
+        citations = 0.0
+    freshness = max(0.0, 1.0 - max(year_now - year, 0) / 15) if 1900 <= year <= year_now + 1 else 0.0
+    citation_signal = min(log1p(citations) / log1p(1000), 1.0)
+    quality = 0.55 * freshness + 0.45 * citation_signal
+    return (int(relevance > 0), min(int(relevance * 4), 4), quality, relevance)
 
 
 def _fetch(url, params=None):

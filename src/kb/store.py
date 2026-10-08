@@ -322,7 +322,7 @@ class KBStore:
     def locate(self, doc_id: str, needle: str, start_at: int = 0) -> dict:
         """在原文中定位一个片段, 返回 {page, section_index, heading, char_start, char_end}。
 
-        计划书 §6.1-3: 片段必须记录实际起止页/字符范围, 不能沿用整节首个页码。
+        片段必须记录实际起止页/字符范围, 不能沿用整节首个页码。
         """
         needle = (needle or "").strip()
         if not needle:
@@ -373,7 +373,7 @@ class KBStore:
         """关键词检索。
 
         `manual_only` / `language` / `year_range` 都在这里生效: 范围与权限约束
-        必须覆盖每条召回路径, 不能在向量或卡片分支上被绕过 (计划书 §9.4)。
+        必须覆盖每条召回路径, 不能在向量或卡片分支上被绕过。
         """
         terms = _tokenize(query)
         with self._lock:

@@ -15,7 +15,7 @@
  * - `library-controller.ts::createLibrarySection` —— 本机路径资料接入;
  * - `team-controller.ts::createTeamMount` —— 团队区块挂载。
  *
- * G19: 状态只有一份, 在 `state/research-store.ts`。本文件**不**再定义
+ * 状态只有一份, 在 `state/research-store.ts`。本文件**不**再定义
  * `currentResearch` 对象, 也**不**再维护 `currentProjectId` / `currentProblemId` /
  * `currentThreadId` / `currentSessionId` / `currentContext` / `mode` 这一组 ID 镜像
  * (它们曾经与 `window.AIR.research` 并行存在, 于是必须靠 `syncResearchGlobals()`
@@ -71,7 +71,7 @@ import { escapeHtml as overviewEsc } from './views/research-workbench';
 import { pickManifestEntry, readManifestBody } from './contracts/publication';
 import { buildInterruptCard } from './views/interrupt-cards';
 import { stageLabel as stageLabelOf } from './views/project-navigation';
-// G19: 唯一状态 (§8.1)。这里只 import **动作与 selector**, 不再 import 任何可写镜像。
+// 唯一状态。这里只 import **动作与 selector**, 不再 import 任何可写镜像。
 import {
   contextTopic as contextTopicOf,
   dispatch,
@@ -115,7 +115,7 @@ function pageApi(): ResearchClient {
 }
 import type { LibraryDetail } from './contracts/library';
 
-/* ---------------- 唯一状态的只读取用 (G19) ----------------
+/* ---------------- 唯一状态的只读取用 ----------------
  * 迁移前这里有一组镜像变量 (`currentProjectId`/`currentProblemId`/`currentThreadId`/
  * `currentSessionId`/`currentContext`/`mode`) 和一个 `currentResearch` 对象, 它们必须与
  * `window.AIR.research` 来回同步。现在这类取值一律走 selector —— 没有第二份可写副本。
@@ -750,7 +750,7 @@ const stream: SessionStream = createSessionStream({
   maxReconnectAttempts: 6,
 });
 
-/** 团队区块挂载 (合并计划 §9.2)。 */
+/** 团队区块挂载。 */
 let teamCache: TeamMount | null = null;
 function team(): TeamMount {
   if (teamCache) return teamCache;

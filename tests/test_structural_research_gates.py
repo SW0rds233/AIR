@@ -3,7 +3,10 @@
 from src.research.adversarial import _is_applied, review_claim
 from src.research.classification import is_formal_question
 from src.research.constraint_fidelity import conflicting_code_parameters
+from src.research.formulation import formulate_problem
 from src.research.problem_formulator import _obligations_for
+from src.research.question_planner import (build_spec_from_input, formulate,
+                                           requires_intent_clarification)
 from src.research.schemas import Claim, ProofObligation
 from src.research.verification_service import _rule_verdict
 
@@ -19,6 +22,37 @@ def test_formal_intent_is_stable_under_domain_and_wording_changes():
     assert not is_formal_question("证明湿度导致性能下降")
     assert not is_formal_question("211 名患者每人服用 15 毫克，是否存在副作用？")
     assert not is_formal_question("RH=40、t=24 时是否存在性能下降？")
+
+
+def test_compact_constrained_existence_is_not_silently_routed_as_scenario():
+    questions = (
+        "是否存在一个 668 阶 Hadamard 矩阵？",
+        "是否存在一条长度 333 的 Legendre 对？",
+        "是否存在一个有限射影平面，其每条线上有 15 个点？",
+        "does there exist a regular graph on 100 vertices where every two vertices "
+        "have exactly one common neighbour?",
+    )
+    for question in questions:
+        contract = formulate(question)
+        assert requires_intent_clarification(contract) or contract.task_kind.value == "formal_proof"
+        assert "形式化" in contract.clarification or contract.task_kind.value == "formal_proof"
+        if contract.clarification:
+            assert any(path.task_kind.value == "formal_proof" for path in contract.paths)
+            assert not any(path.recommended for path in contract.paths)
+    physical = formulate("是否存在一条长度 333 的金属导线？")
+    assert physical.task_kind.value != "formal_proof"
+    assert requires_intent_clarification(physical)
+    assert requires_intent_clarification(formulate("请证明是否存在一条长度 333 的金属导线？"))
+    explicit = formulate("请形式化证明是否存在一个 668 阶 Hadamard 矩阵？")
+    assert explicit.task_kind.value == "formal_proof"
+    assert not requires_intent_clarification(explicit)
+    clarified = formulate("是否存在一个 668 阶 Hadamard 矩阵？补充说明：这是抽象数学对象。")
+    assert clarified.task_kind.value == "formal_proof"
+    assert not requires_intent_clarification(clarified)
+    unresolved = build_spec_from_input("是否存在一个 668 阶 Hadamard 矩阵？")
+    result = formulate_problem(spec=unresolved)
+    assert result.needs_clarification
+    assert not result.claims
 
 
 def test_named_parameter_conflicts_do_not_require_code_vocabulary():
@@ -66,3 +100,16 @@ def test_scope_and_predictive_validation_have_distinct_obligations():
     assert not _rule_verdict(predictive, validation, [])[0]
     predictive.study.predictive_validation = "按时间划分训练/测试；MAE；与常数基线比较"
     assert _rule_verdict(predictive, validation, [])[0]
+
+
+def test_scenario_parameters_do_not_reuse_causal_design_feasibility():
+    scenario = Claim(statement="在给定条件下分析输出", claim_type="scenario")
+    obligations = _obligations_for(scenario, False, {})
+    parameter_check = next(item for item in obligations if "情景参数" in item.statement)
+    assert parameter_check.kind == "scenario_parameters"
+    scenario.study.design_feasibility = "已有样本可供回归"
+    assert not _rule_verdict(scenario, parameter_check, [])[0]
+    scenario.study.scenario_parameters = "温度 20–40°C，湿度 30–70%，暴露 24 小时"
+    assert _rule_verdict(scenario, parameter_check, [])[0]
+    old = ProofObligation(statement="旧版情景参数", kind="design_feasibility")
+    assert _rule_verdict(scenario, old, [])[0]

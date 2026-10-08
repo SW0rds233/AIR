@@ -1,21 +1,18 @@
 from __future__ import annotations
 
-"""KB → 研究引擎的桥接: 把主题文献底座变成可调用的证据与新颖性对照。
+"""把知识库召回结果转为候选证据与新颖性对照。
 
-计划书 §2/P0 修复点 (A01):
-- 旧实现直接设置 `content_supports=True`, 并把高可信来源映射为 `converging` ——
-  命中一篇材料可能被误当作"已支持命题"或"多源汇合证据"。
-- 现在: 召回只产生**候选证据** (`support=insufficient`), 支持/反对关系由
-  独立的判定步骤 (规则或带条件的语义抽取) 写入 `EvidenceLink`;
-  `converging` 只在存在 ≥2 个**独立**支持来源时由 `grade_evidence` 给出。
+召回只产生候选证据；支持关系由独立判定步骤写入。`converging` 需要至少
+两个独立的支持来源。
 """
 
 from collections.abc import Callable
+import re
 
 from src.kb.schema import CardType, DocType
 from src.kb.service import KnowledgeService, RetrievalRequest, SourceRef
 from src.research.evidence import assess_support, detect_contradictions
-from src.research.query_planner import plan_queries
+from src.research.query_planner import choose_queries, plan_queries
 from src.research.schemas import (
     Claim,
     Credibility,
@@ -69,7 +66,7 @@ def ref_to_evidence(service: KnowledgeService, ref: SourceRef,
     except ValueError:
         source_kind = SourceKind.other
 
-    # 回到原文取完整上下文 (计划书 §6.1-4): 摘要不能替代完整条件
+    # 回到原文取完整上下文: 摘要不能替代完整条件
     read = service.read(ref) if service.available else {}
     excerpt = (read.get("text") or ref.excerpt or "")[:2000]
     locator = read.get("locator") or ref.locator
@@ -95,7 +92,7 @@ def ref_to_evidence(service: KnowledgeService, ref: SourceRef,
         year=str(resolved.get("year") or ref.year or ""),
         excerpt=excerpt,
         file_hash=str(resolved.get("file_hash", "")),
-        # 定位与版本 (计划书 §6.1): 检索结果必须可回到原文
+        # 定位与版本: 检索结果必须可回到原文
         source_id=ref.source_id,
         chunk_id=ref.chunk_id,
         location=locator,
@@ -110,7 +107,7 @@ def ref_to_evidence(service: KnowledgeService, ref: SourceRef,
         support_reason="知识底座召回候选材料, 支持关系尚未判定",
         reviewer="rule",
         reference_status=ReferenceStatus.unchecked,
-        # P1-4: 该来源含视觉异常片段时, 证据必须带上"需核对"标记
+        # 该来源含视觉异常片段时, 证据必须带上"需核对"标记
         notes=("该来源含视觉异常片段 (需核对, 不作为强证据): " + "; ".join(
             str(f.get("locator", "")) for f in (resolved.get("visibility_flags") or [])[:3])
             if resolved.get("visibility_flags") else ""),
@@ -141,7 +138,7 @@ def _record_key(ref: SourceRef, resolved: dict) -> str:
 
 def build_retrieval_request(claim: Claim, gap_type: str = "",
                             category: str = "", max_results: int = 5) -> RetrievalRequest:
-    """按命题构造定向检索请求 (计划书 §6.4): 检索请求绑定缺口而不是裸字符串。"""
+    """按命题构造定向检索请求: 检索请求绑定缺口而不是裸字符串。"""
     query = claim.statement or ""
     if claim.study.treatment:
         query = f"{claim.study.treatment} {claim.study.outcome or claim.statement}"
@@ -196,7 +193,7 @@ def retrieve_evidence_detailed(service: KnowledgeService, claim: Claim, gap_type
         "failures": list(outcome.failures),
         "searched": outcome.searched,
         "covered_sources": list(outcome.covered),
-        # 可观测性 (计划书 §9.3): 哪条召回通道真的跑了、多少条被范围挡掉
+        # 可观测性: 哪条召回通道真的跑了、多少条被范围挡掉
         "recall_channels": list(outcome.recall_channels),
         "channel_counts": dict(outcome.channel_counts),
         "dropped_out_of_scope": outcome.dropped_out_of_scope,
@@ -283,22 +280,25 @@ def _harvest_external(queries: list[str], policy: SourcePolicy, coverage: Retrie
             coverage.uncovered.append(f"查询「{query}」复用同领域已入库结果；7 天后可刷新外检")
             continue
         try:
-            papers = fn(query, per_query) or []
+            # Fetch a wider candidate pool, then rank locally before the
+            # per-query ingestion and full-text budget is applied.
+            papers = fn(query, min(max(int(per_query) * 3, int(per_query)), 30)) or []
         except Exception as e:  # noqa: BLE001 - 单条检索式失败不影响其余
             coverage.failures.append(f"检索式「{query}」失败: {type(e).__name__}: {e}")
             continue
         # 只要有一条检索式跑完, 就算"检索执行过": 之后的零命中是"无命中"而不是"失败"
         coverage.executed = True
-        from src.kb.publication import relevance_score
+        from src.kb.publication import candidate_priority, relevance_score
         # The semantic selector returns rejected rows for audit; they must never
         # proceed to PDF download or ingestion.
         usable = [paper for paper in papers if isinstance(paper, dict)
-                  and paper.get("title") and not paper.get("_semantic_rejected")]
+                  and paper.get("title") and not paper.get("_semantic_rejected")
+                  and not paper.get("retracted")]
         successful_queries[query] = len(usable)
         coverage.failures.extend(str(paper.get("error")) for paper in papers
                                  if isinstance(paper, dict) and paper.get("error"))
         coverage.hits += len(usable)
-        ranked = sorted(usable, key=lambda paper: relevance_score(paper, query), reverse=True)
+        ranked = sorted(usable, key=lambda paper: candidate_priority(paper, query), reverse=True)
         papers = [paper for paper in ranked if relevance_score(paper, query) >= .1][:per_query]
         if len(papers) < len(usable):
             coverage.uncovered.append(f"查询 {query}: {len(usable) - len(papers)} 条低相关候选未纳入研究材料")
@@ -458,7 +458,7 @@ def gather_sources(
     search_fn: Callable[[str, int], list[dict]] | None = None,
     ingest: bool = True,
 ) -> tuple[list[SourceEvidence], RetrievalCoverage]:
-    """按授权策略采集研究资料, 并留下可审查的覆盖记录 (P0-1 场景 A/B)。
+    """按授权策略采集研究资料，并留下可审查的覆盖记录。
 
     - `user_kb`: 只在用户授权的资料库内检索 (不越权外搜);
     - `autonomous`: 自主设计检索式外搜并入库 (允许没有预建资料库);
@@ -475,8 +475,12 @@ def gather_sources(
     # 不另起一套"模型搜到了但结果没登记"的隐形检索。
     from src.research.query_planner import research_question_text
     selected = [research_question_text(str(q))[:300] for q in (extra_queries or []) if str(q).strip()]
-    queries = list(dict.fromkeys([*selected, *(q.text for q in planned)]))[:query_limit]
+    queries = choose_queries(planned, selected, query_limit)
     coverage.queries = list(queries)
+    if any(re.search(r"[\u4e00-\u9fff]", query) for query in queries) and not any(
+            re.search(r"[A-Za-z]{3}", query)
+            and not re.search(r"[\u4e00-\u9fff]", query) for query in queries):
+        coverage.uncovered.append("未取得可信的英文术语对照；英文文献检索覆盖不足")
     external_items: list[SourceEvidence] = []
     if policy in (SourcePolicy.autonomous, SourcePolicy.both):
         topic = topic or stable_id("research-kb", _claim_goal(claim), contract.goal if contract else "")

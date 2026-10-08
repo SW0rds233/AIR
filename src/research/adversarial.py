@@ -145,7 +145,8 @@ def _text_of(claim: Claim) -> str:
         claim.scope_period, study.population, study.region, study.period,
         study.counterfactual, study.confounder_handling,
         " ".join(study.identification_assumptions or []),
-        study.design_feasibility, study.measurement_notes, study.missing_data_handling,
+        study.design_feasibility, study.scenario_parameters,
+        study.measurement_notes, study.missing_data_handling,
         study.error_structure, study.treatment, study.notes,
     ]
     return " ".join(p for p in parts if p)
@@ -422,13 +423,13 @@ def _check_conclusion_strength(claim: Claim, text: str,
 # ----------------------------------------------------------------------
 def findings_to_obligations(review: AdversarialReview, claim: Claim,
                             existing_statements: set[str] | None = None) -> list:
-    """把命中的检查项转成 `informal_review` 义务 (计划书 §5.5)。
+    """把命中的检查项转成 `informal_review` 义务。
 
     仍未绕开核验: 这些义务在 `loop._act_check_step` 里保持 blocked,
     直到人工/独立审查确认, 因此审查意见不会自动改变任何命题状态。
 
     这些义务是 `required=False`: 它们表达"已知的实践性保留意见", 会随交付物
-    一起呈现 (计划书 §9.5), 但**不再额外阻断**已经满足既有门槛的结论 ——
+    一起呈现, 但**不再额外阻断**已经满足既有门槛的结论 ——
     否则任何结论都会因为"补一条样本说明"而永远无法交付。
     """
     from src.research.schemas import Coverage, ProofObligation

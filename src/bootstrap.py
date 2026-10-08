@@ -62,7 +62,7 @@ def metered_llm(model: Any, usage_record: Any, *, stage: str = "supervisor") -> 
 
     为什么需要它: 主控的模型调用不发生在任何 `AgentTask` 里, 因此运行时的任务级记账
     看不到它们 —— 结果是"这次运行有没有真的调用模型"在用量里显示为 0, 而审计正是用
-    `llm_calls` 判断这一点的 (G02/G04)。
+    `llm_calls` 判断这一点的。
 
     网关不返回 usage 时如实记 `unknown_parts`, 不用 0 冒充"没花 token"。
     """

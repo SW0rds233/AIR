@@ -99,15 +99,15 @@ def export_package(
         **gate_manifest_fields(gate, delivery, publication),
         "delivery_level": delivery_level or ("论文草稿" if gate and gate.passed else "研究备忘录"),
         "writing_map": snapshot.writing_map,
-        # P1-3: 正文每条核心论断能否回到冻结快照 (只查可反查性, 不判断论证正确性)
+        # 正文每条核心论断能否回到冻结快照 (只查可反查性, 不判断论证正确性)
         "manuscript_traceability": _traceability(snapshot, manuscript_md, manuscript),
         "limitation": _limitation(snapshot),
         "tool_versions": _tool_versions(snapshot),
-        # P1-3: 审阅者要能凭交付包复核"用了哪版资料、哪组假设、哪次验证"
+        # 审阅者要能凭交付包复核"用了哪版资料、哪组假设、哪次验证"
         "source_set": _source_set(spec, snapshot),
         "model_config": _model_config(),
         "budget_limits": _budget_limits(),
-        # 计划书 §9.3: 实际花费与预估分开记录
+        # 实际花费与预估分开记录
         "usage": dict(usage or {}),
         # R6: 不可变启动输入 (问题附件/资料集/策略/预算) —— 与"证据文献"分开记录,
         # 附件不得冒充证据

@@ -22,7 +22,7 @@ from src.utils.file_utils import sanitize_filename
 
 @dataclass
 class SourceRef:
-    """可定位的来源引用 (计划书 §6.1-2): 所有检索分支统一返回该结构。"""
+    """可定位的来源引用: 所有检索分支统一返回该结构。"""
 
     source_id: str = ""          # KB doc_id
     chunk_id: str = ""           # 段落/分块稳定 ID
@@ -60,7 +60,7 @@ class SourceRef:
 
 @dataclass
 class RetrievalRequest:
-    """定向检索请求规格 (计划书 §6.4): 不只传字符串 query。
+    """定向检索请求规格: 不只传字符串 query。
 
     字段的生效情况 (避免"看起来支持但实际被忽略"):
     - `query` / `card_types` / `manual_only` / `language` / `time_range` /
@@ -288,7 +288,7 @@ class KnowledgeService:
             return doc_cache.get(doc_id, {})
 
         def _allowed(doc: dict) -> bool:
-            # 范围/权限/语言/年份过滤: **每条召回路径**都必须经过这里 (计划书 §9.4)
+            # 范围/权限/语言/年份过滤: **每条召回路径**都必须经过这里
             return self._in_scope(doc, manual_only, language=request.language,
                                  year_range=request.time_range)
 
@@ -336,7 +336,7 @@ class KnowledgeService:
 
     def _in_scope(self, doc: dict, manual_only: bool,
                   language: str = "", year_range: str = "") -> bool:
-        """范围/权限过滤: 所有召回分支都必须经过这里 (计划书 §9.4)。
+        """范围/权限过滤: 所有召回分支都必须经过这里。
 
         - `manual_only`: 只允许人工确认存在的资料 (最严格的权限约束);
         - `language` / `year_range`: 请求里声明的资料范围;
@@ -494,7 +494,7 @@ class KnowledgeService:
                 "truncated": len(window) > context_chars, "failure": ""}
 
     def read(self, ref: SourceRef, context_chars: int = 1200) -> dict:
-        """回到原文读取完整上下文 (计划书 §6.1-4)。
+        """回到原文读取完整上下文。
 
         返回 {text, page, locator, source_id, section_heading, truncated, failure}。
         取不到原文时显式返回 failure, 不得用摘要冒充完整条件。
@@ -511,7 +511,7 @@ class KnowledgeService:
             located = {"char_start": ref.char_start, "char_end": ref.char_end, "page": ref.page}
 
         # 已知入库片段编号时, 直接用该片段的**精确字符范围与起止页**回原文:
-        # 这是最可靠的一级定位 (计划书 §6.1-3), 优于按节/按标题猜位置。
+        # 这是最可靠的一级定位, 优于按节/按标题猜位置。
         exact = self._locate_by_chunk(doc_id, ref, context_chars)
         if exact is not None:
             return exact
@@ -607,7 +607,7 @@ class KnowledgeService:
             "file_hash": (doc.get("identity") or {}).get("file_hash", ""),
             "parse_quality": doc.get("parse_quality", ""),
             "has_fulltext": bool(doc.get("has_fulltext")),
-            # P1-4: 该文档里"人阅读时不易察觉"的片段 (保留原文但需核对)
+            # 该文档里"人阅读时不易察觉"的片段 (保留原文但需核对)
             "visibility_flags": list(doc.get("visibility_flags") or []),
             "version": doc.get("updated_at", ""),
             # 存在性 ≠ 内容支持 ≠ 当前适用性

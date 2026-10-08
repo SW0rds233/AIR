@@ -423,7 +423,7 @@ def candidate_mechanisms(claim: Claim, evidence: list[SourceEvidence] | None = N
 def synthesize_models(contract=None, anchored_results: list[AnchoredResult] | None = None,
                       *, claim: Claim | None = None,
                       evidence: list[SourceEvidence] | None = None) -> ModelComparison:
-    """问题契约 + 有定位的原文结果 → 候选模型、条件映射与可区分预测 (P0-3)。
+    """问题契约 + 有定位的原文结果 → 候选模型、条件映射与可区分预测。
 
     - 没有可靠来源 → 只输出待检假设, **不选中**任何"最佳模型";
     - 只有一个结构 → 如实报告"无法形成竞争模型", 不硬凑第二个候选;

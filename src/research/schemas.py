@@ -55,7 +55,7 @@ class ClaimStatus(str, Enum):
 class Assurance(str, Enum):
     """验证等级 (兼容字段)。
 
-    计划书 §4.2: 把 informal/empirical/symbolic/solver/formal 排成一条等级链
+    把 informal/empirical/symbolic/solver/formal 排成一条等级链
     不宜继续用于跨类型比较 —— 数学证明、经验支持与因果识别不是同一量尺。
     因此本枚举保留用于旧输出兼容, 但不再承担"谁更强"的判定职责:
     跨类型比较一律改用 support_kind + coverage + validation_status。
@@ -82,7 +82,7 @@ ASSURANCE_RANK = {
 
 
 class SupportKind(str, Enum):
-    """支持方式 (计划书 §4.2): 描述"结论靠什么被支持", 不是一条等级链。"""
+    """支持方式: 描述"结论靠什么被支持", 不是一条等级链。"""
 
     none = "none"
     textual_support = "textual_support"        # 原文支持
@@ -110,7 +110,7 @@ SUPPORT_KIND_RANK = {
 
 
 class Coverage(str, Enum):
-    """覆盖范围 (计划书 §4.2): 该支持覆盖到哪一层。"""
+    """覆盖范围: 该支持覆盖到哪一层。"""
 
     step = "step"
     subgoal = "subgoal"
@@ -147,7 +147,7 @@ NON_SCIENTIFIC_STATUSES = {
 
 
 class SupportKindOfEvidence(str, Enum):
-    """证据与命题的关系 (计划书 §6.2): 支持 / 反对 / 部分 / 背景 / 不足。
+    """证据与命题的关系: 支持 / 反对 / 部分 / 背景 / 不足。
 
     初始必须是 `insufficient` —— 检索命中不构成支持关系。
     """
@@ -200,7 +200,7 @@ class ReferenceStatus(str, Enum):
 
 
 class ObjectRef(BaseModel):
-    """统一对象引用 (计划书 §4.1)。"""
+    """统一对象引用。"""
 
     id: str
     version: int = 1
@@ -311,6 +311,7 @@ class StudyPlan(BaseModel):
     identification_assumptions: list[str] = Field(default_factory=list)  # 识别假设
     design_feasibility: str = ""          # 设计可行性 (为何该设计在本数据上可用)
     predictive_validation: str = ""       # 样本外划分、指标与基线比较方案
+    scenario_parameters: str = ""         # 情景参数、取值范围及依据
     measurement_notes: str = ""           # 测量方案
     missing_data_handling: str = ""       # 缺失机制与处理
     error_structure: str = ""             # 误差结构 (聚类/异方差/自相关等)
@@ -326,7 +327,7 @@ class StudyPlan(BaseModel):
     pre_label: str = ""
     post_label: str = ""
     data_ref: str = ""
-    # 结构化数据源 (计划书 §6.3): data_ref 指向 CSV/SQLite 时的表名与过滤条件。
+    # 结构化数据源: data_ref 指向 CSV/SQLite 时的表名与过滤条件。
     # 这些字段只是**查询意图**, 实际读取仍由只读适配器做授权与上限校验。
     data_table: str = ""
     data_where: str = ""
@@ -554,7 +555,7 @@ class ResearchSpec(BaseModel):
     dependent: str = ""
     independent: list[str] = Field(default_factory=list)
     research_type: str = ""  # monotonicity / bound / extremum / threshold / general
-    contract: ProblemContract | None = None  # 用户确认后冻结的问题契约 (P0-2)
+    contract: ProblemContract | None = None  # 用户确认后冻结的问题契约
     source_policy: SourcePolicy = SourcePolicy.user_kb
     coverage: RetrievalCoverage | None = None  # 检索覆盖记录 (P0-1/§1 契约第 2 行)
     candidates: list[ClaimQuestion] = Field(default_factory=list)
@@ -616,7 +617,7 @@ class SourceEvidence(PublicationMetadata):
     effect_size: str = ""
     peer_reviewed: bool = False
     existence_verified: bool = False
-    # ---- 三件事分开记录 (计划书 §6.2) ----
+    # ---- 三件事分开记录 ----
     # 1. 来源真实性 existence_verified / credibility / file_hash
     # 2. 内容支持关系: 默认 insufficient, 必须显式判定
     support: SupportKindOfEvidence = SupportKindOfEvidence.insufficient
@@ -626,7 +627,7 @@ class SourceEvidence(PublicationMetadata):
     # 3. 当前适用性
     reference_status: ReferenceStatus = ReferenceStatus.unchecked
     applicability_conditions: list[str] = Field(default_factory=list)
-    # 定位与版本 (计划书 §6.1): 检索结果必须可回到原文
+    # 定位与版本: 检索结果必须可回到原文
     source_id: str = ""         # KB doc_id 等权威来源 ID
     # 命题归属 (计划书 §3 R3): 该证据是为哪条命题召回的。
     # 逐命题缺口统计只读这个字段 + 版本化的 EvidenceLink, 不从全局证据列表推断。
@@ -636,7 +637,7 @@ class SourceEvidence(PublicationMetadata):
     char_start: int = -1        # 片段在原文中的字符范围
     char_end: int = -1
     text_hash: str = ""         # 原文片段内容 hash
-    # 原始记录 hash: 保证多篇转引同一来源不被算成独立支持 (计划书 §6.2)
+    # 原始记录 hash: 保证多篇转引同一来源不被算成独立支持
     original_record_hash: str = ""
     retrieved_at: str = ""
     contradicts: list[str] = Field(default_factory=list)  # 与之矛盾的证据 id
@@ -681,7 +682,7 @@ class EvidenceLink(BaseModel):
 
 
 class ResearchGap(BaseModel):
-    """研究缺口 (计划书 §4.1): 让控制器基于缺口而不是阶段名推进。"""
+    """研究缺口: 让控制器基于缺口而不是阶段名推进。"""
 
     id: str = Field(default_factory=lambda: new_id("gap"))
     gap_type: GapType
@@ -694,7 +695,7 @@ class ResearchGap(BaseModel):
 
 
 class FailureKind(str, Enum):
-    """失败类型 (P1-2): 不同失败必须引向不同下一动作, 而不是笼统一句"失败"。"""
+    """失败类型: 不同失败必须引向不同下一动作, 而不是笼统一句"失败"。"""
 
     source_missing = "source_missing"              # 资料没找到 / 读取失败 / 缺全文
     model_refuted = "model_refuted"                # 候选模型被反例否定
@@ -704,7 +705,7 @@ class FailureKind(str, Enum):
 
 
 class ResearchRoute(BaseModel):
-    """研究路线 (计划书 §4.1 / §5.4): 能真正换路, 不重复尝试同一失败方法。"""
+    """研究路线: 能真正换路, 不重复尝试同一失败方法。"""
 
     id: str = Field(default_factory=lambda: new_id("rte"))
     version: int = 1
@@ -755,7 +756,7 @@ class ModelAssumption(BaseModel):
 
 
 class ResearchModel(BaseModel):
-    """候选领域模型 (计划书 §4.1 / §5.2): 系统必须能够建模。
+    """候选领域模型: 系统必须能够建模。
 
     natural_language 与 formal_encoding 必须对应; 任一变化都使相关验证过期。
     """
@@ -831,7 +832,7 @@ class ResearchModel(BaseModel):
 
 
 class ActionExecution(BaseModel):
-    """动作执行账本记录 (计划书 §4.1 / §9.2): 分开"研究对象是什么"和"哪次执行做了什么"。"""
+    """动作执行账本记录: 分开"研究对象是什么"和"哪次执行做了什么"。"""
 
     action_id: str
     run_id: str = ""
@@ -859,7 +860,7 @@ class ProofStep(BaseModel):
     rule: str = ""
     uses_assumptions: list[str] = Field(default_factory=list)
     requires_conditions: list[str] = Field(default_factory=list)
-    # P0-4: 步骤显式指向它服务的证明义务 (含版本); 不再靠"同一命题"猜归属
+    # 步骤显式指向它服务的证明义务 (含版本); 不再靠"同一命题"猜归属
     obligation_ref: ObjectRef | None = None
 
 
@@ -890,7 +891,7 @@ class ProofObligation(BaseModel):
     required: bool = True   # 非必要义务不阻塞目标结论
     step_id: str = ""
     detail: str = ""
-    # 计划书 §7.3: 统一验证结果语义 (不再只有 passed/failed 两种解释)
+    # 统一验证结果语义 (不再只有 passed/failed 两种解释)
     validation_status: ValidationStatus = ValidationStatus.unchecked
     support_kind: SupportKind = SupportKind.none
     counterexample: dict[str, Any] = Field(default_factory=dict)
@@ -1002,7 +1003,7 @@ class VerificationRecord(BaseModel):
     input_hash: str = ""
     claim_id: str = ""
     claim_version: int = 1
-    # P0-4: 显式指向被验证的义务 (含版本), 取代"证书里出现义务 ID"的隐式关联
+    # 显式指向被验证的义务 (含版本), 取代"证书里出现义务 ID"的隐式关联
     obligation_ref: ObjectRef | None = None
     link_status: str = ""   # confirmed / unconfirmed (旧数据隐式关联, 需人工确认)
     assumption_ids: list[str] = Field(default_factory=list)
@@ -1016,7 +1017,7 @@ class VerificationRecord(BaseModel):
     status: str = ""  # 见 src.verification.schemas.VerificationStatus
     validation_status: ValidationStatus = ValidationStatus.unchecked
     support_kind: SupportKind = SupportKind.none
-    # 验证绑定的是具体陈述与依赖版本闭包 (计划书 §4.1): {object_id: version}
+    # 验证绑定的是具体陈述与依赖版本闭包: {object_id: version}
     verification_closure: dict[str, int] = Field(default_factory=dict)
     certificate: str = ""
     counterexample: dict[str, Any] = Field(default_factory=dict)
@@ -1045,7 +1046,7 @@ class NoveltyComparisonRow(BaseModel):
     equality_conditions: str = ""
     method: str = ""
     difference: str = ""
-    # P1-1: 先前结果的**定位** (页/节), 让"可比/不可比"能回到原文核对
+    # 先前结果的**定位** (页/节), 让"可比/不可比"能回到原文核对
     locator: str = ""
 
 
@@ -1058,7 +1059,7 @@ class NoveltyRecord(BaseModel):
     search_date: str = ""
     queries: list[str] = Field(default_factory=list)
     covered_sources: list[str] = Field(default_factory=list)
-    # P1-1: 两类范围必须分开记录 —— 用户授权的**研究证据库** vs 新颖性**检索范围**,
+    # 两类范围必须分开记录 —— 用户授权的**研究证据库** vs 新颖性**检索范围**,
     # 否则会把"我只查了这个库"说成"整个领域没有先例"。
     evidence_scope: list[str] = Field(default_factory=list)
     retrieval_scope: dict[str, Any] = Field(default_factory=dict)
@@ -1110,7 +1111,7 @@ def hash_payload(payload: Any) -> str:
 
 
 
-# 工具 -> 支持方式 (计划书 §4.2): 描述"靠什么被支持", 不做跨类型强弱比较。
+# 工具 -> 支持方式: 描述"靠什么被支持", 不做跨类型强弱比较。
 TOOL_SUPPORT_KIND = {
     "sympy": SupportKind.symbolic_check,
     "z3": SupportKind.constraint_solve,

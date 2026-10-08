@@ -84,6 +84,11 @@ def merge_papers(existing: list[dict], found: list[dict]) -> list[dict]:
                           and not doi.startswith("10.48550/arxiv"))
             if "arxiv" in str(duplicate.get("url", "")):
                 duplicate.setdefault("preprint_url", duplicate["url"])
+            try:
+                duplicate["citations"] = max(int(duplicate.get("citations") or 0),
+                                             int(p.get("citations") or 0))
+            except (TypeError, ValueError):
+                pass
             for key, value in p.items():
                 if value and (not duplicate.get(key) or (formal and key in {
                         "doi", "url", "venue", "year", "authors", "published", "publication_type",
@@ -317,6 +322,7 @@ def openalex_search(query: str, max_results: int = 20) -> list[dict]:
             "api_source": "OpenAlex",
             "abstract": _openalex_abstract(item.get("abstract_inverted_index")),
             "citations": item.get("cited_by_count", 0),
+            "retracted": bool(item.get("is_retracted")),
             "url": item.get("doi", "") or f"https://openalex.org/works/{openalex_id}",
             "arxiv_id": arxiv_id,  # 独立保存, 供 PDF 下载节点构造 arXiv 链接
             "doi": item.get("doi", "") or "",

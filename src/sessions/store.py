@@ -56,10 +56,10 @@ def final_summary(final: dict) -> dict:
         "project_id": final.get("project_id", ""),
         "problem_id": final.get("problem_id", ""),
         "needs_clarification": final.get("needs_clarification", False),
-        # 资源用量与停止原因 (计划书 §9.3)
+        # 资源用量与停止原因
         "usage": final.get("usage", {}),
         "stopped_reason": final.get("stopped_reason", ""),
-        # 团队会话引擎 (合并计划 §15.3): 摘要与交付包由团队侧给出, 这里如实透传 ——
+        # 团队会话引擎: 摘要与交付包由团队侧给出, 这里如实透传 ——
         # 界面才能按同一套字段显示"跑了几轮 / 派了哪些任务 / 包在哪里"。
         "engine": final.get("engine", ""),
         "summary": final.get("summary", {}),

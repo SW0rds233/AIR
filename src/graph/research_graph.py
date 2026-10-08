@@ -607,7 +607,7 @@ class TeamRun:
     # ---- 单任务执行 ----
     def _execute_one(self, task: AgentTask, results: dict[str, AgentResult],
                      ) -> AgentResult:
-        # **把运行身份钉在任务上** (G03): 计划任务与需求任务走的是同一个执行口, 但
+        # **把运行身份钉在任务上**: 计划任务与需求任务走的是同一个执行口, 但
         # `needs_to_tasks` 生成的补派任务没有 run_id —— 它提交的对象 `_scope.run_id`
         # 因此为空, 而按运行裁剪的视图 (交付摘要的登记对象、run 过滤的产物清单) 会
         # 把它们算成"不是这次运行产出的" (实测: 工作台有命题, 摘要里 claim 计数为 0)。
@@ -850,7 +850,7 @@ class TeamRun:
                         kind: Any = None, max_rounds: int | None = None,
                         feedback_id: str = "",
                         hints: dict[str, Any] | None = None) -> dict[str, Any]:
-        """把一条用户意见变成**需求**交回主控, 然后继续推进 (合并计划 §5.1)。
+        """把一条用户意见变成**需求**交回主控, 然后继续推进。
 
         为什么走需求而不是直接改对象: 子智能体之间不互相派工, 人类意见同样必须由
         主控转成任务 —— 否则"谁改了这条结论"就没有单一入口可查。需求进 `open_needs`

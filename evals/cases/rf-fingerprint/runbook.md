@@ -115,6 +115,12 @@ Web：
 必须留痕：检索覆盖记录（查询式、引擎、时间窗、命中、入库、全文可得性、未覆盖范围、
 失败原因）。无命中不等于不存在，只能作有界表述。
 
+双语检索核对：运行时词表是 `src/rag/domain_terms/rf-fingerprint.md`。
+`RetrievalCoverage.queries` 应包含中文专名、独立的 `RF fingerprinting` 与
+`radio frequency fingerprinting` 查询，以及带领域上下文的 `RFFI` 查询；
+不得把两个英文同义名称堆成一个必须同时匹配的查询。检查实际入选文献的主题相关性、
+出版年份、被引数及可读深度；较新或高被引不代表结论已被证实。
+
 依赖标注：本场景的 `source_policy` 与 `RetrievalCoverage` 字段随 I-3 落实。I-1 期间该
 路径只在契约与归档口径上成立，**不得**据此宣称已通过盲测。
 

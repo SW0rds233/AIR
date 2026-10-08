@@ -341,7 +341,7 @@ evals/cases/combinatorial-design/runs/<YYYY-MM-DD>/
 | 维度判定 | `evals/rubric.md` §2.1–§2.8（逐项写理由与文件位置） |
 | 失败登记 | `evals/cases/combinatorial-design/failures.md`（`rubric.md` §3 表结构） |
 | 封存答案 | `evals/cases/combinatorial-design/expected_notes.md`（评审后对照） |
-| 离线自动化回归 | 当前可运行 `tests/test_latest_run.py`、`tests/test_current_run_integrity.py`；旧版 `test_design_feasibility.py`、`test_delivery_level.py`、`test_theory_mode.py` 不在当前仓库，相关端到端覆盖需补齐 |
+| 离线自动化回归 | 当前可运行 `tests/test_latest_run.py`、`tests/test_current_run_integrity.py`；`test_theory_mode.py` 已按现行服务恢复三项并通过。已重建 `test_e2e_http.py`、`test_unified_entry_http.py` 和浏览器冒烟测试 `test_browser_web_flow.py`，但本机依赖不匹配或缺 Chromium，尚未运行通过。旧 `test_design_feasibility.py`、`test_delivery_level.py` 不在当前仓库；新冒烟测试不能替代全部理论与浏览器场景验收 |
 
 ---
 

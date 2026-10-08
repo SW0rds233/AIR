@@ -70,7 +70,7 @@ def extract_usage_metadata(result) -> dict | None:
 class UsageTracker:
     """简单的进程内用量累计器
 
-    **归属** (合并计划 §7.4 / M4): 这是一个"归属可绑定"的累计器 —— 模块级单例
+    **归属**: 这是一个"归属可绑定"的累计器 —— 模块级单例
     (`tracker`) 只是没有绑定会话时的默认出口。一个会话启动时用
     `bind_session_tracker()` 在本线程 (及其派生线程, ContextVar 会继承) 上绑定
     自己的实例, 于是"两会话同时研究"不会互相把用量算进对方的成本报告。
@@ -243,7 +243,7 @@ def usage_metadata_of(result) -> dict | None:
 
 
 class MeteredLLM:
-    """包一层 LLM, 把每次调用的用量报给回调 (计划书 §9.3)。
+    """包一层 LLM, 把每次调用的用量报给回调。
 
     只做记账: 不改提示词、不改返回值; 取不到用量时静默放行。
     """

@@ -36,9 +36,9 @@ OBLIGATION_PRIORITY: dict[str, int] = {
     "control_confound": 2, "scope_check": 3, "evidence_support": 4,
     # 设计/计数类存在性判定: 与计数关系同层, 先于一般规则型义务
     "design_necessity": 2,
-    # 因果识别类声明必须在效应估计之后再评估 (计划书 §7.4)
+    # 因果识别类声明必须在效应估计之后再评估
     "identification_assumptions": 4, "design_feasibility": 4,
-    "predictive_validation": 4,
+    "predictive_validation": 4, "scenario_parameters": 4,
     "measurement_and_missing": 4, "error_structure": 4,
 }
 

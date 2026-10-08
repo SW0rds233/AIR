@@ -75,7 +75,7 @@ def design_experiment(claim: Claim,
                       evidence: list[SourceEvidence] | None = None,
                       distinguishing=None,
                       model: dict | None = None) -> ExperimentSpec:
-    """为一个具体未决命题生成实验/仿真规格 (P1-3)。
+    """为一个具体未决命题生成实验/仿真规格。
 
     - `distinguishing` 为 `research.modeling.DistinguishingTest` 时, 目标是"区分两个候选机制";
     - `model` 为**被选模型** (Mechanism/ResearchModel 的 dict): 变量、量纲、方程/边界、
@@ -93,7 +93,7 @@ def design_experiment(claim: Claim,
         variables.append(VariableSpec(name=var, role="manipulated",
                                       unit=_unit_for(claim, var), range=str(domain),
                                       basis="由命题声明的变量域确定"))
-    # P1-3: 被选模型的变量与单位优先 (模型说了算, 而不是命题文本)
+    # 被选模型的变量与单位优先 (模型说了算, 而不是命题文本)
     model_units = {str(k): str(v) for k, v in dict(model.get("units") or {}).items()}
     for variable in (model.get("variables") or []):
         declaration = variable if isinstance(variable, dict) else {"symbol": str(variable)}
@@ -137,7 +137,7 @@ def design_experiment(claim: Claim,
         # 建议的目标是区分两个候选解释
         hypothesis = distinguishing.statement
         alternatives = list(getattr(distinguishing, "discriminates", []) or [])
-    # P1-3: 被选模型的边界/预测进入假设与替代解释 (建议继承真实模型)
+    # 被选模型的边界/预测进入假设与替代解释 (建议继承真实模型)
     if model.get("boundaries"):
         hypothesis = f"{hypothesis} [模型边界: {str(model['boundaries'])[:80]}]"
     if model.get("relation"):

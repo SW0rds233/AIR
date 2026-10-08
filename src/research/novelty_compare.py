@@ -292,7 +292,7 @@ def _sentences(text: str) -> list[str]:
 
 def _fill_from_evidence(row: NoveltyComparisonRow,
                         evidence: SourceEvidence) -> NoveltyComparisonRow:
-    """从**已读原文**抽取结构化前提/结论/方法/适用域/定位 (P1-1)。
+    """从**已读原文**抽取结构化前提/结论/方法/适用域/定位。
 
     只在原文确实给出对应信息时填写; 抽不到就留空并由比较环节判 `not_comparable`,
     不用标题或摘要相似度凑数。
@@ -328,7 +328,7 @@ def _as_row_and_evidence(source_result) -> tuple[NoveltyComparisonRow, SourceEvi
 
 
 def _formal_implication(claim: Claim, row: NoveltyComparisonRow) -> tuple[str, str]:
-    """可形式化的子命题: 用符号计算辅助判断蕴含方向 (P1-1)。
+    """可形式化的子命题: 用符号计算辅助判断蕴含方向。
 
     Returns: (dimension, relation); 判不出来返回 ("", "") —— 不猜。
     只在两边都给出**同一比较符**的闭式表达式时尝试; 工具不可用或无法证明则放弃。

@@ -281,7 +281,7 @@ def _split_relation(expression: str, relation: str) -> tuple[str, str, str]:
 
     适配器读的是 `lhs` / `rhs` 两个字段 (见 `sympy_adapter.op_prove_identity`), 而模型
     自然会说"证明 (x+1)^2 = x^2+2x+1"。工具层负责这层翻译, 否则传 `expression` 进去
-    会得到 `KeyError: 'lhs'` —— 实测就是这条 (G10)。
+    会得到 `KeyError: 'lhs'` —— 实测就是这条。
     """
     text = str(expression or "").strip()
     wanted = str(relation or "").strip() or "=="

@@ -151,7 +151,7 @@ def bind_stdout_bridge(session: Any) -> StdoutBridge:
 
     同时绑定**会话级用量累计器**与**运行身份作用域**: 日志归属、用量归属与会话记忆/
     缓存的归属在这里一起确定, 都按"哪个线程在跑这个会话"判定, 不再共用进程级资源
-    (合并计划 §7.4 / M4)。
+。
     """
     true_stdout = _install_stdout_dispatcher()
     bridge = StdoutBridge(session, true_stdout)

@@ -154,7 +154,7 @@ def _make_checkpointer(session_id: str):
 
 
 def _resolve_engine() -> str:
-    """**没有选择**了: 所有研究请求都进团队会话引擎 (合并计划 §3 / M5 / G01)。
+    """**没有选择**了: 所有研究请求都进团队会话引擎。
 
     这里保留一个返回常量的函数, 只是为了让调用点读起来仍然明确"当前由谁服务",
     它不接收 `mode` —— 一旦接收, 就等于承认"可以按 mode 分流", 而分流的另一条路
@@ -222,7 +222,7 @@ def _build_team_app(session):
         source_policy=str(request.get("source_policy", "user_kb") or "user_kb"),
         max_rounds=int(request.get("max_rounds", 24) or 24),
         review_threshold=int(request.get("review_threshold", 80)),
-        # 角色模型接线 (G02): 不注入的话整个团队只会跑规则模板
+        # 角色模型接线: 不注入的话整个团队只会跑规则模板
         llm_factory=_team_llm_factory,
     )
     return TeamApp(TeamSession(team, emit=session.emit))
@@ -267,7 +267,7 @@ class StartRequest(BaseModel):
     subtopics: list[str] = []
     time_range: str = ""
     # 遗留兼容字段 (合并计划 §3 / M5: 统一入口不要求用户选模式)。
-    # 统一入口 (合并计划 §3 / M5 / G01): **没有模式选择**。旧客户端可能仍带 `mode`
+    # 统一入口: **没有模式选择**。旧客户端可能仍带 `mode`
     # 字段, 它会被 Pydantic 忽略 —— 所有研究请求都进同一张团队图。
     # 旧的 `mode` 参数保留在建会话签名里只为兼容既有调用点, 不再参与分流。
     project_id: str = ""
@@ -276,13 +276,13 @@ class StartRequest(BaseModel):
     # `max_actions`/`max_tool_calls` 已删除: 那是**旧理论引擎**的动作预算旋钮, 团队运行
     # 的预算是轮次与任务额度 (由 `TeamRun` 决定)。旧客户端仍可传这两个键 —— Pydantic
     # 忽略未声明字段, 因此不会报错, 但也不会再影响任何东西 (而不是"看起来设置了").
-    # 显式续研同一问题: 与 start 分开语义 (计划书 §9.1)。
+    # 显式续研同一问题: 与 start 分开语义。
     # resume=true 时复用已落盘规格, 即使本次请求文本不同也不报冲突。
     resume: bool = False
     # 资料源绑定 (计划书 §3 R0): 用户显式选择的资料库; 为空时按主题名匹配
     source_set_id: str = ""
     source_set_kind: str = "kb"
-    # 资料授权策略 (P0-1): user_kb=只用授权资料库; autonomous=只给方向自主检索; both=两者合并
+    # 资料授权策略: user_kb=只用授权资料库; autonomous=只给方向自主检索; both=两者合并
     source_policy: str = "both"
     review_threshold: int = 80
     # 上传的"问题说明"附件 (id 来自 POST /api/uploads kind=problem): 文本并入问题陈述
@@ -484,7 +484,7 @@ def _research_state(project_id: str, problem_id: str = "") -> dict:
     # 实验中引用**别的问题**命题的建议不得出现在本问题的工作台 (R6)
     foreign_claim_ids = known_claim_ids - scoped_ids
 
-    # 组装交给深模块 reporting (计划书 §4): 服务端只负责取数、解析问题与过滤,
+    # 组装交给深模块 reporting: 服务端只负责取数、解析问题与过滤,
     # 字段契约与计数口径集中在那一处, 便于单独测试。
     from src.research import reporting
 
@@ -647,7 +647,7 @@ def _session_request(snapshot: dict) -> dict:
     字段集合必须能被 `StartRequest(**request)` 还原 (`resume_session` 依赖这一点),
     因此这里只加键, 不改既有键的含义。
 
-    **不再写入 `mode`**: 引擎选择已删除 (G01)。旧会话记录里可能仍有 `mode`, 它既不被
+    **不再写入 `mode`**: 引擎选择已删除。旧会话记录里可能仍有 `mode`, 它既不被
     `StartRequest` 接受 (字段已删除, Pydantic 忽略), 也不影响续跑走哪张图 —— 只有一张。
     """
     return {
@@ -771,7 +771,7 @@ def build_initial_state(req: StartRequest, snapshot: dict | None = None) -> dict
         "run_id": snap["run_id"],
         "project_id": snap["project_id"],
         "problem_id": snap["problem_id"],
-        # G03: 附件与资料范围随初始状态一起进入团队 (此前它们不进团队)
+        # 附件与资料范围随初始状态一起进入团队 (此前它们不进团队)
         "attachment_ids": list(snap["attachment_ids"]),
         "attachment_candidates": snap["attachment_text"],
         "attachment_rejected": list(snap["attachment_rejected"]),
@@ -870,7 +870,7 @@ def _run_session(session: Session, initial_state: dict | None = None):
                             # 研究进度已由团队事件 (`team_event` → SSE) 携带: 每个角色
                             # 的派工/成果/缺口都从图里发出。此前这里另外建一个研究引擎
                             # 去"补一份进度摘要"—— 那是**第二个读模型的入口**, 也是
-                            # 只读接口依赖引擎的又一处 (G01)。
+                            # 只读接口依赖引擎的又一处。
                         })
             if session.stop_flag.is_set():
                 session.emit({"type": "stopped"})
@@ -899,7 +899,7 @@ def _run_session(session: Session, initial_state: dict | None = None):
 
 app = FastAPI(title="AIR智能体研究系统")
 
-# 团队与资料库接口 (合并计划 §9.4 / §13.4): 独立路由模块, 避免 server.py 继续膨胀。
+# 团队与资料库接口: 独立路由模块, 避免 server.py 继续膨胀。
 # 导入放在 app 构造之后是为了保持既有的导入顺序 (该模块会 import ResearchStore)。
 from src.team_api import router as team_router  # noqa: E402
 
@@ -1020,11 +1020,27 @@ def start_session(req: StartRequest):
     snapshot = _normalized_input(req)
     thread_id = sanitize_filename((req.topic or req.request).strip()) + "_" + uuid.uuid4().hex[:6]
     session_id = uuid.uuid4().hex
-    # 统一入口 (合并计划 §3 / M5 / G01): **用户不选引擎**。旧客户端若仍带 `mode`,
+    # 统一入口: **用户不选引擎**。旧客户端若仍带 `mode`,
     # 它会被 Pydantic 忽略 (字段已从 `StartRequest` 删除); 所有研究请求都进同一张团队图。
     mode = _resolve_engine()
     # ③ 校验资料授权 (在创建 run 之前): 绑定不可用就明确拒绝, 不让研究静默退回"无资料"
     source_warnings = _validate_source_binding(snapshot)
+    # 数值限定的存在性题可能同时指向抽象证明和现实查询。先让用户明确意图，
+    # 避免暂定的 scenario 类型被当成已确认的研究路线执行。
+    from src.kb.sources import build_source_summary
+    from src.research.question_planner import formulate, requires_intent_clarification
+
+    preflight_sources = build_source_summary(
+        source_set_id=snapshot["source_set_id"],
+        source_set_kind=snapshot["source_set_kind"] or "kb",
+        request=str(snapshot["request"] or snapshot["topic"] or ""))
+    preflight = formulate(str(snapshot["request"] or snapshot["topic"] or ""),
+                          source_summary=preflight_sources)
+    if requires_intent_clarification(preflight):
+        raise HTTPException(422, {"needs_clarification": True,
+                                  "question": preflight.clarification,
+                                  "paths": [path.model_dump(mode="json")
+                                            for path in preflight.paths]})
     # ③b 规格与冲突判定也必须在**创建运行之前**: 身份相同但问题不同时直接 409, 不留下
     # 一个"建了会话却立刻失败"的悬挂记录, 也不让用户看到"我改了问题但结果没变"。
     conflict, spec_reused, contract = _ensure_problem_spec(snapshot,
@@ -1267,7 +1283,7 @@ def resume_session(session_id: str):
         checkpoint_conn=conn,
         run_id=record.get("run_id", ""),
         mode=_resolve_engine(),
-        # G03: 续跑也必须**先**把落盘请求快照交给会话, 再建图 —— 团队装配从
+        # 续跑也必须**先**把落盘请求快照交给会话, 再建图 —— 团队装配从
         # `session.request` 读身份与资料, 先建图会让续跑的团队拿到空身份。
         request=stored_request,
     )
@@ -1431,7 +1447,7 @@ def research_problems(project_id: str):
 
 @app.post("/api/research/{project_id}/feedback")
 def research_feedback(project_id: str, req: RespondRequest, problem_id: str = ""):
-    """把自然语言研究意见转成**对象级动作**并施加 (计划书 §5.1)。
+    """把自然语言研究意见转成**对象级动作**并施加。
 
     反馈必须落到具体 assumption_id / claim_id / step_id; 无法确定对象时不猜,
     返回 `needs_clarification` 与澄清问题, 研究状态保持不变。
@@ -1666,7 +1682,7 @@ def _cleanup_shared_retrieval_resources(session_id: str, project_id: str,
     只删除**属于该会话且无其他会话引用**的资源; 有共享引用时明确记入"保留", 让调用方
     (与人) 看到"这次没有删掉共享库", 而不是静默清空。
 
-    两条依据 (合并计划 §7.4 / M4):
+    两条依据:
     - `project_id`: 同一项目还有别的会话;
     - `topic`: Chroma collection 按主题命名, 与 project_id 无关 —— 跨项目同主题也共享。
     """

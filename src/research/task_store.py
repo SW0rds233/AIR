@@ -199,7 +199,7 @@ class TaskStore:
 
     # ---- 恢复 ----
     def recoverable(self) -> dict[str, list[dict[str, Any]]]:
-        """恢复视图: 已提交(跳过)/运行中/待派/受阻失败 (合并计划 §5.3)。
+        """恢复视图: 已提交(跳过)/运行中/待派/受阻失败。
 
         - `done`: 已提交, 恢复时**跳过** (幂等);
         - `running`: 上次中断时仍在跑, 需要识别未完成的工具调用;
@@ -329,7 +329,7 @@ def new_agent_run(task: AgentTask, *, attempt: int | None = None,
     """构造一次执行记录 (重试复用 task_id, 换新的 agent_run_id)。
 
     执行身份是**确定性**的 `(task_id, attempt, prompt_version)`: 断线重连或超时重试
-    时用同一个 id 去重, 避免同一 attempt 被登记两次并重复计费 (合并计划 §5.3)。
+    时用同一个 id 去重, 避免同一 attempt 被登记两次并重复计费。
     """
     run_id = agent_run_id or stable_id("agentrun", task.task_id,
                                        attempt or task.attempt, prompt_version or "")

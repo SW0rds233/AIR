@@ -91,7 +91,7 @@ class LitRecord(PublicationMetadata):
     peer_reviewed: bool = False
     credibility: str = "low"  # high / medium / low
     parse_quality: str = ""   # ok / short / ocr / failed
-    # P1-4: 视觉异常片段 (接近背景色/极小字/页外/被覆盖), 含页码与定位
+    # 视觉异常片段 (接近背景色/极小字/页外/被覆盖), 含页码与定位
     visibility_flags: list[dict] = Field(default_factory=list)
     num_pages: int = 0
     has_fulltext: bool = False

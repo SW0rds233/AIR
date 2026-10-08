@@ -228,7 +228,7 @@ def plan_proof(claim: Claim, obligations: list[ProofObligation],
 def plan_proof_deep(claim: Claim, obligations: list[ProofObligation],
                     available: dict[str, bool] | None = None, llm=None,
                     *, budget_exhausted=None) -> Plan:
-    """带 LLM 结构化推导的证明规划 (计划书 §7.1)。
+    """带 LLM 结构化推导的证明规划。
 
     规则: LLM 只能**增加**待核验内容, 不能替代规则路径。
     - 规则路径始终计算, 因此工具可用性判断 (哪些后端能承接哪些义务) 不受模型影响;
