@@ -221,6 +221,7 @@ def _build_team_app(session):
         source_set_ids=[str(request.get("source_set_id", "") or "")],
         source_policy=str(request.get("source_policy", "user_kb") or "user_kb"),
         max_rounds=int(request.get("max_rounds", 24) or 24),
+        review_threshold=int(request.get("review_threshold", 80)),
         # 角色模型接线 (G02): 不注入的话整个团队只会跑规则模板
         llm_factory=_team_llm_factory,
     )
@@ -283,6 +284,7 @@ class StartRequest(BaseModel):
     source_set_kind: str = "kb"
     # 资料授权策略 (P0-1): user_kb=只用授权资料库; autonomous=只给方向自主检索; both=两者合并
     source_policy: str = "both"
+    review_threshold: int = 80
     # 上传的"问题说明"附件 (id 来自 POST /api/uploads kind=problem): 文本并入问题陈述
     attachment_ids: list[str] = []
 
@@ -590,6 +592,8 @@ def _normalized_input(req: StartRequest) -> dict:
     allowed_policies = {p.value for p in SourcePolicy}
     if policy not in allowed_policies:
         raise HTTPException(400, f"未知的资料授权策略: {policy} (可选: {sorted(allowed_policies)})")
+    if not 0 <= req.review_threshold <= 100:
+        raise HTTPException(400, "审阅通过分数须在 0–100 之间")
 
     # 附件: 只认属于本项目/本问题的问题说明附件 (A 的附件不得挂到 B), 文本按有界
     # 长度传入并显式标注为外部资料 (其中的指令不得执行)。
@@ -633,6 +637,7 @@ def _normalized_input(req: StartRequest) -> dict:
         "source_set_id": str(getattr(req, "source_set_id", "") or ""),
         "source_set_kind": str(getattr(req, "source_set_kind", "") or "kb"),
         "source_policy": policy,
+        "review_threshold": req.review_threshold,
     }
 
 
@@ -657,6 +662,7 @@ def _session_request(snapshot: dict) -> dict:
         "source_set_id": snapshot["source_set_id"],
         "source_set_kind": snapshot["source_set_kind"],
         "source_policy": snapshot["source_policy"],
+        "review_threshold": snapshot.get("review_threshold", 80),
         # 只读的规范化结果 (团队装配读它们; `StartRequest` 会忽略未声明字段)
         "run_id": snapshot["run_id"],
         "attachments": list(snapshot["attachments"]),
@@ -1808,6 +1814,15 @@ def _artifact_metadata(root: Path) -> dict:
             meta.setdefault("project_id", data.get("project_id", ""))
             meta["problem_id"] = data.get("problem_id", "")
         except Exception:  # noqa: BLE001
+            pass
+    progress = root / "progress" / "progress.json"
+    if progress.is_file() and not meta.get("problem_id"):
+        try:
+            data = json.loads(progress.read_text(encoding="utf-8"))
+            meta["project_id"] = data.get("project_id", "")
+            meta["problem_id"] = data.get("problem_id", "")
+            meta["run_id"] = data.get("run_id", root.name)
+        except (OSError, ValueError):
             pass
     meta.setdefault("project_id", "")
     meta.setdefault("problem_id", "")

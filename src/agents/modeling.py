@@ -239,15 +239,22 @@ class ModelingAgent(AgentBase):
             return None
         from src.research.classification import is_theoretical_claim, is_formal_question, has_empirical_context
         question = str((context.objects.get("brief") or [{}])[0].get("main_question") or context.request)
+        from src.rag.relevance_filter import mentions, resolve_domain
+
+        domain_terms = resolve_domain(question)
+        if not domain_terms.is_empty():
+            anchors = domain_terms.strong_in_domain or domain_terms.in_domain
+            evidence = [item for item in evidence
+                        if mentions(anchors, f"{item.title} {item.excerpt}")]
         if is_theoretical_claim(claim) or (is_formal_question(question) and not has_empirical_context(claim)):
             return None  # Mathematical encoding must not be selected by an empirical mechanism template.
         if not evidence:
             # 有命题但没读到原文: 内核会拒绝, 这里如实提出需求 (不调 LLM 编模型)
             needs = [ResearchNeed(
-                kind=NeedKind.model_condition,
-                statement="缺少可用于建模的已读原文",
-                why="没有可定位原文就无法给出有来源的候选机制",
-                acceptance=["先定向检索并读取原文, 或明确说明该问题不需要建模"],
+                kind=NeedKind.more_sources,
+                statement="缺少与原题同领域且可用于建模的已读原文",
+                why="跨领域文献不得充当当前问题的机理模型锚点",
+                acceptance=["按原始问题的领域专名重新检索并读取原文"],
                 blocking=False)]
             return self.blocked(task, "缺少可用于建模的已读原文", needs=needs,
                                 usage=usage)

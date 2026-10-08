@@ -130,7 +130,7 @@ def _causal_candidate(analysis: EffectDirection, statement: str) -> ClaimQuestio
         treatment=analysis.treatment,
         outcome=analysis.outcome,
         counterfactual=f"未引入{analysis.treatment}的情形",
-        notes="需补充人群/地区/时期与公开数据来源后才能估计",
+        notes="需补充研究对象、适用条件与公开数据来源后才能估计",
     )
     return ClaimQuestion(
         statement=statement or f"{analysis.treatment}对{analysis.outcome}的影响",
@@ -378,6 +378,10 @@ def _decide_task_kind(text: str, summary: SourceSummary,
         return TaskKind.mechanism, f"有理论模型/机理描述, 不做经验估计{note}"
     if _has_any(text, _MECHANISM_MARKERS):
         return TaskKind.mechanism, "题目要求机理说明, 且没有观测数据"
+    # "如何导致/为何导致"询问作用链，而不是要求估计一个经验处理效应。
+    if re.search(r"(?:如何|怎样|为何|为什么|how|why).{0,35}(?:导致|引起|造成|使|lead|cause)",
+                 text, re.IGNORECASE):
+        return TaskKind.mechanism, "题目询问导致结果的作用链，先建立机理模型并核对文献"
     if influence:
         return TaskKind.scenario, "只给文献/无数据: 不做经验因果估计, 只给条件性情景结论"
     return TaskKind.scenario, "缺少可判定的问题类型信号"
@@ -490,13 +494,16 @@ def build_spec_from_input(request: str, topic: str = "", project_id: str = "",
 
         project_id = sanitize_filename(topic or text)[:30].strip("_") or "research"
     contract = formulate(request=request, topic=topic, source_summary=source_summary)
+    from src.rag.relevance_filter import resolve_domain
+
+    field = resolve_domain(text)
     return ResearchSpec(
         project_id=project_id,
         problem_id=problem_id,
         original_request=request or topic,
         problem_statement=text if explicit else "",
         direction="" if explicit else text,
-        domain="",
+        domain=field.domain,
         research_type=contract.task_kind.value,
         contract=contract,
     )

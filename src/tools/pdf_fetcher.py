@@ -43,8 +43,20 @@ def academic_filename(paper: dict, max_len: int = 100) -> str:
     title = (paper.get("title", "") or "").strip()
     parts = [_clean_name_part(p) for p in (year, first_author, title)]
     name = "_".join(p for p in parts if p)
-    name = name[:max_len].rstrip("_.")
-    return (name or "paper") + ".pdf"
+    # The readable prefix is not an identity: two editions may share author,
+    # year and truncated title. Keep a stable strong-key suffix before reuse.
+    import hashlib
+
+    from src.kb.identity import normalize_doi
+
+    identity = (normalize_doi(paper.get("doi") or "")
+                or str(paper.get("openalex_id") or "").strip().lower()
+                or str(paper.get("arxiv_id") or "").strip().lower()
+                or str(paper.get("url") or "").strip().lower()
+                or "|".join((title.casefold(), authors.casefold(), year)))
+    suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+    name = name[:max(1, max_len - 13)].rstrip("_.")
+    return f"{name or 'paper'}_{suffix}.pdf"
 
 
 def extract_arxiv_id(url: str) -> Optional[str]:
@@ -202,7 +214,9 @@ def _resolve_pdf_from_doi(doi: str, save_dir: Path, nice_name: Optional[str] = N
     if not doi:
         return None
     doi_clean = doi.replace("https://doi.org/", "").replace("http://doi.org/", "")
-    safe = doi_clean.replace("/", "_")
+    import hashlib
+
+    safe = hashlib.sha256(doi_clean.casefold().encode("utf-8")).hexdigest()[:20]
     id_path = save_dir / f"oa_{safe}.pdf"
     nice_path = save_dir / nice_name if nice_name else None
 

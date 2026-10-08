@@ -15,6 +15,13 @@ def normalize_title(title: str) -> str:
     return re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", (title or "").lower())
 
 
+def normalize_doi(value: str) -> str:
+    """Collapse common DOI URL and prefix forms to one paper identity."""
+    text = str(value or "").strip().casefold()
+    text = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", text)
+    return text.split("?", 1)[0].split("#", 1)[0].rstrip(".,; ")
+
+
 def first_author(authors: str) -> str:
     if not authors:
         return ""
@@ -24,7 +31,7 @@ def first_author(authors: str) -> str:
 
 def build_identity(item: dict, file_hash: str = "") -> IdentityKeys:
     return IdentityKeys(
-        doi=(item.get("doi") or "").strip().lower(),
+        doi=normalize_doi(item.get("doi") or ""),
         title_norm=normalize_title(item.get("title", "")),
         first_author_norm=first_author(item.get("authors", "")),
         year=str(item.get("year", "") or ""),

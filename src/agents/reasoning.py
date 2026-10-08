@@ -112,6 +112,8 @@ class ReasoningAgent(AgentBase):
 1. 形式化可核验的部分 (等式/不等式/约束): 写成可交给符号或约束求解器检查的形式;
 2. 只能非形式化论证的部分: 明确标注为非形式化, 并给出前提;
 3. 引用了他人定理的部分: 写清定理名称、条件与出处; 条件不满足就**不要**使用该定理。
+对机制或跨学科问题，要写清“条件/作用链/可观测后果”，区分文献实测、模型假说
+与本研究推论；没有实验数据时不得把建议验证的机理写成已证实因果结论。
 
 纪律:
 - 你只提出候选命题与推导; 结论是否成立由判定层按证书链判定, 你不宣布"已证明";
@@ -119,10 +121,15 @@ class ReasoningAgent(AgentBase):
 - 不得为了凑出完整证明而编造中间步骤或引用不存在的定理;
 - 若文献证据互相冲突, 如实写出冲突并说明哪种解释更可能, 而不是只挑支持自己的一方;
 - 没有足够依据时如实给出"未决"与理由。
+- 推导中若需要新的定理出处、机制研究或数据，提出带具体关键词与核查目标的
+  more_sources 需求；外部检索与入库由检索角色统一执行，不把未经登记的摘要当作依据。
 - strategy 表示研究方法；claim_type 表示命题语义类型，不能填 derivation 等策略名。
   纯数学/形式化命题应明确标注 study.design="theory"，同时交代变量域与证明义务。
   不得把本轮检索不足表述成“学术界未决”；文献事实需要原文核查，形式化子结论需要实际核验。
   数学推导所得的候选断言通常归 descriptive，而不是凭此宣称已证明。
+  非人群研究用 scope_conditions 记录对象、环境及适用条件；有样本范围的研究才填
+  scope_population/scope_region/scope_period。预测命题的 study.predictive_validation
+  应记录样本外划分、评价指标和基线比较，不能用 design_feasibility 代替。
   数学等价、概率公式和矩阵恒等式不是实证因果/关联命题；研究建议不是数学命题。
   每次只提交解决当前子问题所必需的少量命题（建议最多8条），复用已有命题 id，
   修正旧命题时提供其 id 和修正条件，避免重新生成整套文献摘要命题。
@@ -143,10 +150,9 @@ class ReasoningAgent(AgentBase):
 
     def tools(self, task: AgentTask, context: ContextPack,
               runtime: AgentRuntime) -> list[ToolSpec]:
-        # 推理能请求补检索 (合并计划 §4.3 的"推导中能请求文献"), 也能请求符号核验
+        # 推理可核读已登记来源并提出定向补检索需求；外检统一由证据角色入库。
         return [*math_tools(), *[t for t in evidence_tools()
-                                 if t.name in ("search_local_kb", "search_all_sources",
-                                               "read_source")]]
+                                 if t.name in ("search_local_kb", "read_source")]]
 
     def _run(self, task: AgentTask, context: ContextPack, runtime: AgentRuntime,
              usage: UsageRecord, tools: list[ToolSpec]) -> AgentResult:
@@ -248,15 +254,28 @@ class ReasoningAgent(AgentBase):
                 blocking=False))
 
         from src.research.classification import is_formal_question, has_empirical_context
+        from src.research.constraint_fidelity import conflicting_code_parameters
         from src.research.schemas import stable_id
-        theory_context = is_formal_question(_research_text(context))
+        research_text = _research_text(context)
+        theory_context = is_formal_question(research_text)
         changes = []
+        fidelity_issues: list[str] = []
         seen_statements: set[str] = set()
         known = {str(row.get("id")): row for row in context.objects.get("claim", [])}
         for candidate in claims:
             claim = dict(candidate)
             statement = str(claim.get("statement") or "").strip()
             if not statement or statement in seen_statements:
+                continue
+            conflicts = conflicting_code_parameters(research_text, statement)
+            if conflicts:
+                fidelity_issues.extend(conflicts)
+                needs.append(ResearchNeed(
+                    kind=NeedKind.model_condition,
+                    statement="核对候选命题与原题的显式参数",
+                    why="；".join(conflicts),
+                    acceptance=["以原题参数重写候选，并逐项核对模型与结论的变量含义"],
+                    blocking=True))
                 continue
             seen_statements.add(statement)
             if theory_context and not has_empirical_context(claim):
@@ -317,7 +336,13 @@ class ReasoningAgent(AgentBase):
             "counterexamples": counterexamples,
             "missing_conditions": missing,
             "limitations": limitations,
+            "fidelity_issues": fidelity_issues,
         }
+        if fidelity_issues and not changes and not counterexamples:
+            return self.partial(
+                task, "候选命题与题面参数冲突，未提交研究结论",
+                needs=needs, unresolved=fidelity_issues,
+                usage=usage, payload=payload_out)
         outcome = TaskOutcome.completed if (claims or counterexamples) \
             else TaskOutcome.blocked
         if outcome == TaskOutcome.blocked:
@@ -329,7 +354,7 @@ class ReasoningAgent(AgentBase):
                 usage=usage, payload=payload_out)
         replan = bool(counterexamples)
         return self.completed(task, summary, changes=changes, needs=needs,
-                              unresolved=[*missing[:4], *limitations[:4]],
+                              unresolved=[*fidelity_issues[:4], *missing[:4], *limitations[:4]],
                               usage=usage, payload=payload_out, replan=replan)
 
     # ---- 形式化推导: 团队闭环 (合并计划 §3.1 G06) ----

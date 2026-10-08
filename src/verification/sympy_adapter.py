@@ -11,16 +11,18 @@ from __future__ import annotations
 """
 
 import ast
+import re
 
 from src.verification.schemas import VerificationResult, VerificationStatus
 
 MAX_LEN = 2000
 MAX_DEPTH = 50
+MAX_VECTOR_DIM = 4096
 
 _FUNCS = {
     "sqrt", "exp", "log", "Abs", "sin", "cos", "tan", "asin", "acos", "atan",
     "sinh", "cosh", "tanh", "Max", "Min", "Rational", "sign", "floor", "ceiling",
-    "factorial", "binomial",
+    "factorial", "binomial", "dot",
 }
 
 _ALLOWED_NODES = (
@@ -110,10 +112,25 @@ def _parse(text: str, symbols: dict):
     for fn in _FUNCS:
         if hasattr(sympy, fn):
             local[fn] = getattr(sympy, fn)
+    local["dot"] = _finite_dot
     try:
         return sympy.sympify(text, locals=local, evaluate=True)
     except Exception as e:
         raise _UnsafeExpression(f"表达式解析失败: {e}") from e
+
+
+def _finite_dot(left, right):
+    """只核验给出全部坐标的有限向量，不把抽象向量当作数值证书。"""
+    import sympy
+
+    if not isinstance(left, (tuple, sympy.Tuple)) or not isinstance(right, (tuple, sympy.Tuple)):
+        raise _UnsafeExpression("dot 需要两条已给出坐标的有限向量")
+    if not left or len(left) != len(right) or len(left) > MAX_VECTOR_DIM:
+        raise _UnsafeExpression("dot 向量维数必须相同且处于限制内")
+    if not all(getattr(value, "is_number", False) and value.is_finite is True
+               for value in (*left, *right)):
+        raise _UnsafeExpression("dot 的坐标必须是有限的精确数值")
+    return sympy.Add(*(a * b for a, b in zip(left, right)))
 
 
 def _ok(op: str, certificate: str = "", raw: str = "", counterexample: dict | None = None,
@@ -239,7 +256,7 @@ def _real_counterexample_from_solution(sol, variables) -> dict | None:
             return None
         if val.is_real is False:
             return None
-        witness[name] = int(val) if getattr(val, "is_integer", False) else float(val)
+        witness[name] = _exact_witness(val)
     return witness
 
 
@@ -305,7 +322,8 @@ def op_prove_identity(arguments: dict) -> VerificationResult:
     if diff == 0 or diff.is_zero:
         return _ok("prove_identity", certificate=f"{lhs} - ({rhs}) = 0", raw=str(diff))
     # 数值探测: 若给出精确反例则判定失败 (精确有理点, 非随机采样)
-    sample = _probe_counterexample(lhs - rhs, variables)
+    sample = _probe_counterexample(lhs - rhs, variables,
+                                   assumptions=arguments.get("assumptions"))
     if sample is not None:
         return _fail("prove_identity", counterexample=sample,
                      detail="存在赋值使两边不等")
@@ -339,8 +357,9 @@ def op_prove_inequality(arguments: dict) -> VerificationResult:
             return _unknown("已证非负, 但无法判定是否存在取等点 (保持未决)")
         witness = None
         for sol in sols:
-            witness = _real_counterexample_from_solution(sol, variables)
-            if witness is not None:
+            candidate = _real_counterexample_from_solution(sol, variables)
+            if candidate is not None and _witness_in_domain(candidate, arguments.get("assumptions")):
+                witness = candidate
                 break
         if witness is not None:
             return _fail("prove_inequality", counterexample=witness,
@@ -381,18 +400,17 @@ def op_prove_monotonicity(arguments: dict) -> VerificationResult:
         sols = _solve_zero(signed, variables)
         if sols is None:
             return _unknown(f"{proof}; 已证非负但无法判定取零 (保持未决)", str(deriv))
-        witness = None
-        for sol in sols:
-            witness = _real_counterexample_from_solution(sol, variables)
-            if witness is not None:
-                break
-        if witness is not None:
-            return _fail("prove_monotonicity", counterexample=witness,
-                         raw=str(deriv), detail=f"{proof}; 导数为 0, 严格单调不成立")
         if sols == []:
             res.certificate = f"{proof}; 导数不可为 0 => 严格成立"
             return res
-        return _unknown(f"{proof}; 存在驻点但无法确认为实数 (保持未决)", str(deriv))
+        witness = _find_monotonicity_witness(
+            expr, symbols[wrt], variables, increasing, strict,
+            dict(arguments.get("assumptions") or {}), symbols)
+        if witness is not None:
+            return _fail("prove_monotonicity", counterexample=witness,
+                         raw=str(deriv), detail=f"{proof}; 存在域内点对违反严格单调")
+        return _unknown(f"{proof}; 导数可能取零，未找到违反严格单调的点对；仅凭驻点不能反驳严格单调",
+                        str(deriv))
     if res.status != VerificationStatus.passed:
         # 未能证明方向成立: 只有给出**域内可回代的反例**才算数学反驳;
         # 否则保持未决 (计划书 §4.3-3: 不用普通执行错误冒充反驳)。
@@ -424,6 +442,8 @@ def op_equality_condition(arguments: dict) -> VerificationResult:
     import sympy
 
     diff = sympy.expand(lhs - rhs)
+    if diff == 0 or diff.is_zero:
+        return _ok("equality_condition", certificate="恒成立（声明域内所有赋值均取等）")
     sols = _solve_zero(diff, variables)
     if sols is None:
         return _unknown("无法求解等号条件")
@@ -446,6 +466,7 @@ def op_find_counterexample(arguments: dict) -> VerificationResult:
     rhs_s = arguments["rhs"]
     relation = arguments.get("relation", ">")
     variables = arguments.get("variables", [])
+    assumptions = arguments.get("assumptions") or {}
     symbols, _ = _to_symbols(variables, arguments.get("assumptions"))
     try:
         lhs = _parse(lhs_s, symbols)
@@ -459,19 +480,26 @@ def op_find_counterexample(arguments: dict) -> VerificationResult:
     else:
         diff = lhs - rhs
     if relation in (">", "<"):
-        # 严格不等式: 找等号点即为反例
+        # 严格不等式: 差式小于或等于零都构成反例；仅查等号会漏掉
+        # 处处为负而没有等号点的假命题。
+        sample = _probe_counterexample(diff, variables, want_negative=True,
+                                       assumptions=assumptions)
+        if sample is not None:
+            return _fail("find_counterexample", counterexample=sample,
+                         detail="存在使严格不等式反向的域内赋值")
         sols = _solve_zero(diff, variables)
         if sols:
             for sol in sols:
                 witness = _real_counterexample_from_solution(sol, variables)
-                if witness is not None:
+                if witness is not None and _witness_in_domain(witness, assumptions):
                     return _fail("find_counterexample", counterexample=witness,
                                  detail="等号可达, 严格不等式被精确反例反驳")
-        if sols == []:
-            return _ok("find_counterexample", certificate="等号不可达, 未找到反例")
-        return _unknown("无法确认等号解的实数性")
-    # 非严格: 精确有理点采样找违例
-    sample = _probe_counterexample(diff if relation in (">=",) else -diff, variables, want_negative=True)
+        return _unknown("有界精确采样与等号求解未发现域内反例 (不构成证明)")
+    if relation not in (">=", "<=", "=="):
+        return _unsupported(f"不支持的反例关系 {relation}")
+    # >=: lhs-rhs 应非负；<=: rhs-lhs 应非负。采样只在差式为负时构成反例。
+    sample = _probe_counterexample(
+        diff, variables, want_negative=relation != "==", assumptions=assumptions)
     if sample is not None:
         return _fail("find_counterexample", counterexample=sample, detail="存在违反不等式的赋值")
     return _unknown("有界精确采样未发现反例 (不构成证明)")
@@ -499,16 +527,6 @@ def _find_monotonicity_counterexample(arguments: dict) -> VerificationResult:
     signed = deriv if increasing else -deriv
     proof = f"d/d{wrt} ({expr}) = {deriv}"
 
-    # 严格单调: 驻点即为反例 (等号可达 => 严格性不成立)
-    if strict:
-        sols = _solve_zero(signed, variables)
-        if sols:
-            for sol in sols:
-                witness = _real_counterexample_from_solution(sol, variables)
-                if witness is not None:
-                    return _fail("find_counterexample", counterexample=witness, raw=str(deriv),
-                                 detail=f"{proof}; 导数为 0, 严格单调被精确反例反驳")
-
     # 单调性反例必须是**可回代的见证**, 且必须落在声明的变量域内:
     # 域外见证不构成反驳 (计划书 §13.2 "域外伪反例必须拒绝")。
     witness = _find_monotonicity_witness(
@@ -517,7 +535,7 @@ def _find_monotonicity_counterexample(arguments: dict) -> VerificationResult:
     if witness is not None:
         return _fail("find_counterexample", counterexample=witness, raw=str(deriv),
                      detail=f"{proof}; 存在 x1 < x2 使 {expr} 反向变化, 单调性被精确反例反驳")
-    if signed.is_nonnegative:
+    if signed.is_nonnegative and not strict:
         return _ok("find_counterexample", certificate=f"{proof}; 导数非负, 未找到反例",
                    raw=str(deriv))
     if signed.is_negative:
@@ -532,13 +550,20 @@ def _domain_grid(domain: str, strict_positive: bool = False):
     import sympy
 
     low = str(domain or "real").lower()
+    singleton = re.fullmatch(r"\{\s*([+-]?\d+(?:/\d+)?)\s*\}", low)
+    if singleton:
+        return [sympy.Rational(singleton.group(1))]
+    if low in ("integer", "int", "integers", "z"):
+        return [sympy.Integer(v) for v in (-2, -1, 0, 1, 2)]
     if low in ("positive", "pos", "positive_real", "positivereal", "r+", "r_+"):
         return [sympy.Rational(v, 2) for v in (1, 2, 3, 4, 5, 6, 8, 10)]
     if low in ("nonnegative", "nonneg", "nonnegative_real", "nonneg_real", "r>=0"):
         return [sympy.Rational(v, 2) for v in (0, 1, 2, 3, 4, 5, 6, 8, 10)]
     if low in ("nonzero", "non_zero", "nonzero_real"):
         return [sympy.Rational(v, 2) for v in (-4, -3, -2, -1, 1, 2, 3, 4)]
-    return [sympy.Rational(v, 2) for v in (-4, -3, -2, -1, 0, 1, 2, 3, 4)]
+    if low in ("real", "reals", "r", "rational", "rationals", "q", ""):
+        return [sympy.Rational(v, 2) for v in (-4, -3, -2, -1, 0, 1, 2, 3, 4)]
+    return []
 
 
 def _in_domain(value, domain: str) -> bool:
@@ -550,13 +575,23 @@ def _in_domain(value, domain: str) -> bool:
         v = sympy.Rational(value)
     except Exception:  # noqa: BLE001
         return False
+    singleton = re.fullmatch(r"\{\s*([+-]?\d+(?:/\d+)?)\s*\}", low)
+    if singleton:
+        return bool(v == sympy.Rational(singleton.group(1)))
+    if low in ("integer", "int", "integers", "z"):
+        return bool(v.is_integer)
     if low in ("positive", "pos", "positive_real", "positivereal", "r+", "r_+"):
         return bool(v > 0)
     if low in ("nonnegative", "nonneg", "nonnegative_real", "nonneg_real", "r>=0"):
         return bool(v >= 0)
     if low in ("nonzero", "non_zero", "nonzero_real"):
         return bool(v != 0)
-    return True
+    return low in ("real", "reals", "r", "rational", "rationals", "q", "")
+
+
+def _witness_in_domain(witness: dict, assumptions: dict | None) -> bool:
+    return all(_in_domain(value, str((assumptions or {}).get(name, "real")))
+               for name, value in witness.items())
 
 
 def _find_monotonicity_witness(expr, symbol, variables, increasing: bool, strict: bool,
@@ -621,7 +656,8 @@ def op_prove_nonnegative(arguments: dict) -> VerificationResult:
     return _prove_nonnegative_expr(expr, symbols)
 
 
-def _probe_counterexample(diff, variables, want_negative: bool = False) -> dict | None:
+def _probe_counterexample(diff, variables, want_negative: bool = False,
+                          assumptions: dict | None = None) -> dict | None:
     """在小的精确有理网格上探测反例 (有界, 仅用于构造反例; 非证明手段)。
 
     见证按**符号名**构造: 不能假定 variables 的顺序与 diff.free_symbols 或网格
@@ -638,15 +674,10 @@ def _probe_counterexample(diff, variables, want_negative: bool = False) -> dict 
     pairs = [(name, by_name[name]) for name in variables if name in by_name]
     if not pairs:
         pairs = [(name, sympy.Symbol(name)) for name in variables]
-    grid = [sympy.Integer(v) for v in (-2, -1, 0, 1, 2)]
-    # 网格必须是**有理数**而不只是整数: `x**2 >= x` 的反例是 x=1/2, 而整数网格上
-    # 该命题处处成立 —— 只用整数采样会把一个假命题报成"未发现反例", 于是"可反驳"
-    # 这条路径在实践中永远走不到 (验收矩阵明确要求"可证明/可反驳各一例")。
-    # 仍是有界采样: 只用来构造反例, 不作为证明手段 (找不到反例不构成证明)。
-    grid += [sympy.Rational(1, 2), sympy.Rational(-1, 2),
-             sympy.Rational(3, 2), sympy.Rational(-3, 2),
-             sympy.Rational(1, 3)]
-    for combo in itertools.product(grid, repeat=len(pairs)):
+    grids = [_domain_grid((assumptions or {}).get(name, "real")) for name, _ in pairs]
+    if any(not grid for grid in grids):
+        return None
+    for combo in itertools.product(*grids):
         sub = {sym: val for (_, sym), val in zip(pairs, combo)}
         try:
             val = sympy.simplify(diff.subs(sub))
@@ -655,10 +686,11 @@ def _probe_counterexample(diff, variables, want_negative: bool = False) -> dict 
         if not val.is_number:
             continue
         hit = val.is_negative if want_negative else (val.is_zero is False)
-        if hit:
+        if hit and all(_in_domain(value, (assumptions or {}).get(name, "real"))
+                       for (name, _), value in zip(pairs, combo)):
             # 见证必须按符号名映射, 且保留**精确值** (写成 `1/2` 而不是取整):
             # 取整会把反例替换成另一个点, 回代时可能根本不违反命题。
-            return {str(sym): _exact_witness(val) for (_, sym), val in zip(pairs, combo)}
+            return {str(sym): _exact_witness(point) for (_, sym), point in zip(pairs, combo)}
     return None
 
 

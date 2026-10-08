@@ -71,6 +71,8 @@ class WritingAgent(AgentBase):
    正式参考文献只允许已核查出版的条目；预印本及出版状态未知的资料不得引用。
    文献表由系统按 GB/T 7714 顺序编码生成，不自行编写。引用应嵌入所支持的论述，
    不写“依据: [n]”，不笼统堆砌多篇引用。公式中的长度、阶数、维度、下标必须逐步一致。
+   精确存在性问题可接受完整对象或能无歧义重建对象的紧凑构造；不能把“必须列出全部元素”
+   写成唯一证书格式。数值式的机器核验只支持被编码的原子断言，不能自动证明同段的其他断言。
 4. 对象 id 只通过 `ref_ids` 建立追溯关系; 正文面向读者, 不得出现内部 id;
 5. 未决项与局限必须如实写出来, 不得用模糊措辞掩盖;
    结论块必须引用具体命题 id；proposed/unknown 不得写成已成立的定理或已确证事实。
@@ -99,6 +101,15 @@ class WritingAgent(AgentBase):
     def _run(self, task: AgentTask, context: ContextPack, runtime: AgentRuntime,
              usage: UsageRecord, tools: list[ToolSpec]) -> AgentResult:
         packet = build_packet_from_context(task, context)
+        if (task.hints or {}).get("review_cycle"):
+            scores = (task.hints or {}).get("review_category_scores") or {}
+            notes = (task.hints or {}).get("review_category_notes") or {}
+            packet.review_issues.append({
+                "summary": "独立审阅分项评分: " + "; ".join(
+                    f"{category} {score}/100" for category, score in scores.items()),
+                "acceptance": list(task.acceptance_criteria),
+                "detail": notes,
+            })
         if packet.is_revision() or _is_revision_task(task):
             packet.revision_of = packet.revision_of or str(
                 (task.hints or {}).get("revision_of", "") or "")
@@ -119,6 +130,10 @@ class WritingAgent(AgentBase):
                     "kind": "deterministic_draft", "detail": fallback_note,
                     "blocking": False,
                 })
+
+        if packet.is_revision():
+            manuscript.manuscript_id = packet.revision_of
+            manuscript.version = int(packet.prior_manuscript.get("version") or 1) + 1
 
         # 出版必需结构在**稿件 IR 层**统一补齐, 而不是各起草路径各写一遍 (合并计划
         # §3.3 G17): 模型起草的稿件与确定性起草的稿件必须在同一套结构契约下,
@@ -141,6 +156,14 @@ class WritingAgent(AgentBase):
             elif repair_note:
                 problems.append("章节修订失败: " + repair_note)
         needs = self._needs_from(manuscript, packet, problems)
+        if (task.hints or {}).get("review_cycle"):
+            needs.insert(0, ResearchNeed(
+                kind=NeedKind.review,
+                statement=f"复审稿件 v{manuscript.version} 与上一轮审阅意见的解决情况",
+                why="修订稿不得沿用旧版评分和引用核对结论",
+                acceptance=["重新核对科学逻辑、引用、可读性和未决项并按门槛判定"],
+                hints={"trigger_id": f"review-version:{manuscript.manuscript_id}:{manuscript.version}"},
+                blocking=True))
         changes = [ChangeProposal(
             kind="manuscript",
             object_id=packet.revision_of,
@@ -484,6 +507,10 @@ class WritingAgent(AgentBase):
         if missing_sections:
             problems.append(f"正文引用了不存在的章节: {', '.join(missing_sections)}")
         for block in manuscript.all_blocks():
+            from src.research.constraint_fidelity import conflicting_code_parameters
+            for conflict in conflicting_code_parameters(
+                    packet.main_question or packet.original_request, block.text or ""):
+                problems.append(f"块 {block.block_id} 与题面参数不一致: {conflict}")
             for kind, ref in zip(block.ref_kinds, block.refs):
                 if kind == RefKind.source.value and ref.id and ref.id not in known_sources:
                     problems.append(f"块 {block.block_id} 引用了不在来源清单里的 {ref.id}")
@@ -935,6 +962,12 @@ def build_packet_from_context(task: AgentTask, context: ContextPack) -> WritingP
     ]
     for row in context.objects.get("gap") or []:
         unresolved.append(clip(str(row.get("statement", "")), 300))
+    review_issues = [*context.objects.get("review_issue", []),
+                     *[i for r in context.upstream for i in (r.get("issues") or [])]]
+    selected = set((task.hints or {}).get("review_issue_ids") or [])
+    if (task.hints or {}).get("review_cycle"):
+        review_issues = [issue for issue in review_issues
+                         if str(issue.get("issue_id") or issue.get("id") or "") in selected]
     return WritingPacket(
         project_id=task.project_id, problem_id=task.problem_id, run_id=task.run_id,
         original_request=context.request,
@@ -947,8 +980,7 @@ def build_packet_from_context(task: AgentTask, context: ContextPack) -> WritingP
         validations=validations, verifications=verification,
         sources=evidence,
         figures=context.objects.get("figure") or [],
-        review_issues=[*context.objects.get("review_issue", []),
-                       *[i for r in context.upstream for i in (r.get("issues") or [])]],
+        review_issues=review_issues,
         prior_manuscript=(context.objects.get("manuscript") or [{}])[-1],
         unresolved=[u for u in unresolved if u],
         snapshot_id=str(brief.get("snapshot_id") or ""),

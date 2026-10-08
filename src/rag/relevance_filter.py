@@ -41,6 +41,8 @@ class DomainTerms:
     strong_in_domain: tuple[str, ...] = ()
     off_domain_confusables: tuple[str, ...] = ()
     non_technical_venues: tuple[str, ...] = ()
+    query_core: tuple[str, ...] = ()
+    translations: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     def is_empty(self) -> bool:
         return not (self.in_domain or self.strong_in_domain)
@@ -50,7 +52,9 @@ class DomainTerms:
                 "in_domain": list(self.in_domain),
                 "strong_in_domain": list(self.strong_in_domain),
                 "off_domain_confusables": list(self.off_domain_confusables),
-                "non_technical_venues": list(self.non_technical_venues)}
+                "non_technical_venues": list(self.non_technical_venues),
+                "query_core": list(self.query_core),
+                "translations": {key: list(values) for key, values in self.translations}}
 
 
 def _split_list(value: str) -> tuple[str, ...]:
@@ -61,6 +65,7 @@ def _split_list(value: str) -> tuple[str, ...]:
 def parse_terms(text: str, domain: str = "") -> DomainTerms:
     """解析词表文件: `键: 词; 词; …`, 小节标题只用于人类可读。"""
     fields: dict[str, str] = {}
+    translations: dict[str, tuple[str, ...]] = {}
     for raw in (text or "").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or line.startswith(">"):
@@ -69,8 +74,14 @@ def parse_terms(text: str, domain: str = "") -> DomainTerms:
             continue
         key, _, value = line.partition(":")
         key = key.strip().lower()
+        if key == "translation":
+            term, separator, variants = value.partition("=>")
+            if separator and term.strip():
+                translations[term.strip()] = tuple(dict.fromkeys(
+                    item.strip() for item in variants.split("|") if item.strip()))
+            continue
         if key not in ("domain", "aliases", "in_domain", "strong_in_domain",
-                       "off_domain_confusables", "non_technical_venues"):
+                       "off_domain_confusables", "non_technical_venues", "query_core"):
             continue
         # 同一键出现多次时合并 (便于把长词表拆成多行)
         fields[key] = (fields.get(key, "") + ";" + value).strip(";")
@@ -81,6 +92,8 @@ def parse_terms(text: str, domain: str = "") -> DomainTerms:
         strong_in_domain=_split_list(fields.get("strong_in_domain", "")),
         off_domain_confusables=_split_list(fields.get("off_domain_confusables", "")),
         non_technical_venues=_split_list(fields.get("non_technical_venues", "")),
+        query_core=_split_list(fields.get("query_core", "")),
+        translations=tuple(translations.items()),
     )
 
 
@@ -140,70 +153,8 @@ def resolve_domain(topic: str) -> DomainTerms:
     return DomainTerms()
 
 
-# 语料抽样上限: 领域识别只需"哪些词在其中出现", 不必读全部文献
-_CORPUS_SAMPLE_FILES = 60
-# 非文献文件 (元数据/索引) 不参与领域识别
-_CORPUS_SKIP_STEMS = {"meta", "attachments", "registry"}
-
-
-def repo_root() -> Path:
-    """仓库根目录 (资料目录被重定向时的兜底语料位置)。"""
-    return Path(__file__).resolve().parents[2]
-
-
-@lru_cache(maxsize=8)
-def _corpus_samples_by_root(root: str) -> tuple[str, ...]:
-    """某个资料根下的文献标题样本 (只读文件名, 不解析内容)。"""
-    base_root = Path(root)
-    samples: list[str] = []
-    for name in ("kb", "pdfs", "manual_pdfs"):
-        base = base_root / name
-        if not base.is_dir():
-            continue
-        for index, path in enumerate(sorted(p for p in base.rglob("*") if p.is_file())):
-            if index >= _CORPUS_SAMPLE_FILES:
-                break
-            if path.suffix.lower() not in (".pdf", ".md", ".txt"):
-                continue
-            if path.stem.lower() in _CORPUS_SKIP_STEMS:
-                continue
-            samples.append(path.stem.replace("_", " "))
-    return tuple(samples)
-
-
-def resolve_domain_for_corpus() -> DomainTerms:
-    """按**当前资料库语料**识别领域 (主题名匹配不上时的兜底)。
-
-    调用方 (缓存兜底、引用扩充) 常常只拿到一个与词表别名对不上的主题名,
-    但资料库/PDF 目录本身就说明了在做什么方向。做法: 用每个候选领域词表的
-    `in_domain` 词去数"有多少份资料命中", 命中最多且过半的领域胜出。
-
-    语料读不到 (例如资料目录被重定向到临时目录) 时退回仓库自带资料目录再试一次;
-    仍然读不到就不猜: 返回空词表, 调用方据此不做任何领域假设。
-    """
-    from src.config import DATA_DIR
-
-    for root in dict.fromkeys([str(DATA_DIR), str(repo_root() / "data")]):
-        samples = _corpus_samples_by_root(root)
-        if not samples:
-            continue
-        best, best_hits = DomainTerms(), 0
-        for path in discovered_domains():
-            terms = _load_terms_file(path)
-            if terms.is_empty():
-                continue
-            hits = sum(1 for sample in samples if mentions(terms.in_domain, sample))
-            if hits > best_hits:
-                best, best_hits = terms, hits
-        if best_hits * 2 < len(samples):
-            return DomainTerms()     # 语料存在但判不出领域: 不做假设
-        logger.info(f"领域词表按语料识别: {best.domain} ({best_hits}/{len(samples)} 份资料命中)")
-        return best
-    return DomainTerms()
-
-
 def domain_terms(topic: str = "", domain: str = "") -> DomainTerms:
-    """取该研究应使用的领域词表 (显式 > 主题 > 语料; 都判不出为空词表)。"""
+    """仅按本研究的显式领域或问题识别，不从别的项目语料猜领域。"""
     if domain:
         explicit = load_terms(domain)
         if not explicit.is_empty():
@@ -211,7 +162,7 @@ def domain_terms(topic: str = "", domain: str = "") -> DomainTerms:
     by_topic = resolve_domain(topic)
     if not by_topic.is_empty():
         return by_topic
-    return resolve_domain_for_corpus()
+    return DomainTerms()
 
 
 # ---------------------------------------------------------------------------
@@ -280,11 +231,11 @@ def _has_nearby(text: str, anchors, terms) -> bool:
 def is_off_domain(title: str, domain: str | DomainTerms | None = None) -> bool:
     """标题是否属于**与本领域同词异域**的其它领域。
 
-    `domain` 可以是词表里的领域标识、词表对象, 或留空 (此时按当前语料识别领域)。
+    `domain` 可以是词表里的领域标识、词表对象, 或留空 (此时不猜领域)。
     判不出领域 → 返回 False: 没有该领域的词表时不得凭代码里的假设剔除论文。
     """
     terms = domain if isinstance(domain, DomainTerms) else (
-        load_terms(domain) if domain else resolve_domain_for_corpus())
+        load_terms(domain) if domain else DomainTerms())
     if terms.is_empty() or not terms.off_domain_confusables:
         return False
     if not mentions(terms.off_domain_confusables, title):
@@ -302,7 +253,7 @@ def has_off_domain_signal(title: str, domain: str | DomainTerms | None = None) -
 def has_domain_signal(text: str, domain: str | DomainTerms | None = None) -> bool:
     """文本是否含该领域的特征词 (用于剔除"同词异域"论文)。"""
     terms = domain if isinstance(domain, DomainTerms) else (
-        load_terms(domain) if domain else resolve_domain_for_corpus())
+        load_terms(domain) if domain else DomainTerms())
     if terms.is_empty():
         return False
     return mentions(terms.in_domain, text)
@@ -390,7 +341,6 @@ __all__ = [
     "parse_terms",
     "rank_papers_by_priority",
     "resolve_domain",
-    "resolve_domain_for_corpus",
     "rule_filter",
 ]
 

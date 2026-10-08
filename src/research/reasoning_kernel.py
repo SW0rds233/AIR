@@ -764,8 +764,12 @@ def claim_state_for(claim: Any, obligations: list[Any], records: list[Any],
     def _is_aligned(record: Any) -> bool:
         return True if aligned is None else bool(aligned(record, claim))
 
-    obligations = list(obligations)
-    records = [r for r in records if not getattr(r, "stale", False)]
+    claim_version = int(getattr(claim, "version", 1) or 1)
+    obligations = [o for o in obligations
+                   if int(getattr(o, "claim_version", 1) or 1) == claim_version]
+    records = [r for r in records
+               if not getattr(r, "stale", False)
+               and int(getattr(r, "claim_version", 1) or 1) == claim_version]
     required = [o for o in obligations if getattr(o, "required", True)]
     open_required = [o for o in required
                      if getattr(o, "status", None) == ObligationStatus.open]

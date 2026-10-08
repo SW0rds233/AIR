@@ -146,11 +146,12 @@ Web 等价入口（产物落在同一身份与同一交付包目录下）：
 
 ### 1.3 泛化回归（同一次跑批必做，防止把结论写死在某组参数上）
 
-在同一个离线环境下（直接跑已有测试即可，不需要新写代码）：
+当前仓库没有旧版 `tests/test_design_feasibility.py`。先运行现有组件级回归，
+再按下表逐组检查真实输出；此步骤尚无端到端自动化替代：
 
 ```powershell
 $env:THEORY_LLM="0"; $env:THEORY_PROPOSER="0"
-.venv\Scripts\python.exe -m pytest tests/test_design_feasibility.py -q
+.venv\Scripts\python.exe -m pytest tests/test_latest_run.py tests/test_current_run_integrity.py -q
 ```
 
 | 参数 | 期望结论 | 理由 |
@@ -299,8 +300,8 @@ evals/cases/combinatorial-design/runs/<YYYY-MM-DD>/
 | 计划书发布门槛 | 本用例怎么检验 | 判定依据 |
 |---|---|---|
 | 1. 三种入口可从 Web 发起同一流程；资料权限与附件身份在恢复/导出后不变 | Web 与 CLI 用同一身份跑同一输入，产物落在同一交付包目录；`manifest.json` 的 `input_snapshot` 与恢复后的规格一致 | `manifest.json`、`research_spec.json`、§3 身份表 |
-| 2. 核心变量/假设/模型关系/推导/反例/引用由独立人员逐项审过 | 由组合设计方向独立人员核对：BRC 的余数类与两平方和判定、$v=k(k-1)+1\Rightarrow$ 射影平面、计数关系；并在 `expected_notes.md` §5 签字 | `evals/rubric.md` §2.4 + §4 签字栏；本文件 §1.2 判据 2–4 |
-| 3. 至少一条路线能因证据或反例改变模型/命题；否则诚实给出未决原因 | §1.3 泛化回归：Fano 参数下必须**不**输出"不存在"且保持未决；2-(43,7,1) 必须输出"不存在" | `tests/test_design_feasibility.py` 的端到端用例 + `claims.json` |
+| 2. 核心变量/假设/模型关系/推导/反例/引用由独立人员逐项审过 | 由组合设计方向独立人员核对：BRC 的余数类与两平方和判定、$v=k(k-1)+1\Rightarrow$ 射影平面、计数关系；并记录核对理由与位置 | `evals/rubric.md` §2.4；本文件 §1.2 判据 2–4 |
+| 3. 至少一条路线能因证据或反例改变模型/命题；否则诚实给出未决原因 | §1.3 泛化回归：Fano 参数下必须**不**输出"不存在"且保持未决；2-(43,7,1) 必须输出"不存在" | 逐组运行的 `claims.json`；当前缺端到端自动化用例 |
 | 4. 已知等价已有工作不称原创；缺全文不称无先例；求解器 `unknown` 不称已证；建议不称结果 | 结论只声明"存在性判定"，不宣称原创；未判定项（非对称设计的 BRC 不适用）如实列出；无"已知结果"检索时正文显示"尚未进行已有工作比较" | `manuscript.md`（已有工作/适用范围与局限段）+ `novelty_review.md` |
 | 5. 第二个不同任务类型的题目暴露的失败被记录并回归 | 本题结论**不得**被推广到所有 $(v,k,\lambda)$；用第二个领域/任务类型的题目（见 `evals/cases/transfer/`）跑同一套流程并登记失败 | `evals/cases/transfer/` + `failures.md` |
 
@@ -316,7 +317,7 @@ evals/cases/combinatorial-design/runs/<YYYY-MM-DD>/
    "可选结论之一"处理：Fano 参数下如实未决、义务保持未关闭、交付等级不升级；
    本题（211/15/1）不涉及该分支。
 
-两项裁决都必须写进签字栏；裁决前本用例的结论只能作为"待裁决"归档。
+两项裁决都必须写进复核记录；裁决前本用例的结论只能作为"待裁决"归档。
 
 ### 6.2 失败记录
 
@@ -340,7 +341,7 @@ evals/cases/combinatorial-design/runs/<YYYY-MM-DD>/
 | 维度判定 | `evals/rubric.md` §2.1–§2.8（逐项写理由与文件位置） |
 | 失败登记 | `evals/cases/combinatorial-design/failures.md`（`rubric.md` §3 表结构） |
 | 封存答案 | `evals/cases/combinatorial-design/expected_notes.md`（评审后对照） |
-| 离线自动化回归 | `tests/test_design_feasibility.py`、`tests/test_delivery_level.py`、`tests/test_theory_mode.py` |
+| 离线自动化回归 | 当前可运行 `tests/test_latest_run.py`、`tests/test_current_run_integrity.py`；旧版 `test_design_feasibility.py`、`test_delivery_level.py`、`test_theory_mode.py` 不在当前仓库，相关端到端覆盖需补齐 |
 
 ---
 
@@ -362,4 +363,3 @@ evals/cases/combinatorial-design/runs/<YYYY-MM-DD>/
 | 附件 / 可复现性 | 无附件；`input_snapshot.reproducible = true`（校验结论） |
 | 结论可复现性 | 与离线运行**同一证书 sha256**（离线为 `22135c2b…` 且当时缺"射影平面等价"这一步；加入该步后两次真实运行均为 `9089eb5c…`），说明真实模型未改变判定结果 |
 | 失败记录 | 本次无结论性失败；提议被拒 2 次（`on_failure` 里写了结论性断言）已按规则记入事件流，不构成失败样例 |
-

@@ -47,6 +47,7 @@ class TeamRunRequest(BaseModel):
     source_policy: str = "user_kb"
     autonomous_retrieval: bool = False
     max_rounds: int = 24
+    review_threshold: int = Field(default=80, ge=0, le=100)
     attachment_ids: list[str] = Field(default_factory=list)
 
 
@@ -127,7 +128,8 @@ def run_team(req: TeamRunRequest) -> dict[str, Any]:
                    source_set_ids=req.source_set_ids,
                    source_policy=req.source_policy,
                    autonomous_retrieval=req.autonomous_retrieval,
-                   max_rounds=max(1, req.max_rounds), cancel=cancel)
+                   max_rounds=max(1, req.max_rounds),
+                   review_threshold=req.review_threshold, cancel=cancel)
     source_sets = _source_rows(req.source_set_ids)
     try:
         team.set_source_sets(source_sets)

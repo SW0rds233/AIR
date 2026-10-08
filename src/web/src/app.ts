@@ -770,6 +770,10 @@ function handleEvent(ev: any) {
       if (ev.name === 'research_team' && ev.team_event) {
         const source = ev.team_event;
         const type = String(source.event || source.node || '');
+        if (type === 'progress_saved') refreshArtifacts();
+        if (type === 'progress_export_failed') {
+          addMsg('中间成果写盘失败: ' + String(source.reason || '未知错误'), 'msg-error');
+        }
         const visible = new Set([
           'brief_ready', 'plan_ready', 'supervisor_decision', 'task_started',
           'task_result', 'task_finished', 'commit_failed', 'change_proposed',

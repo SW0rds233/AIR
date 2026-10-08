@@ -141,7 +141,7 @@ def _text_of(claim: Claim) -> str:
     """
     study = claim.study
     parts = [
-        claim.statement, claim.notes, claim.scope_population, claim.scope_region,
+        claim.statement, claim.notes, claim.scope_population, claim.scope_conditions, claim.scope_region,
         claim.scope_period, study.population, study.region, study.period,
         study.counterfactual, study.confounder_handling,
         " ".join(study.identification_assumptions or []),
@@ -162,19 +162,12 @@ def _supporting(evidence: list[SourceEvidence]) -> list[SourceEvidence]:
 
 def _is_applied(claim: Claim) -> bool:
     """是否需要应用/因果类审查 (形式化命题不涉及这些失效方式)。"""
-    from src.research.classification import is_theoretical_claim
+    from src.research.classification import has_empirical_context, is_theoretical_claim
     if is_theoretical_claim(claim):
         return False
     # Descriptive is a semantic type, not evidence that a claim has samples.
     if claim.claim_type == ClaimType.descriptive:
-        study = claim.study
-        empirical = (study.design not in (StudyDesign.none, StudyDesign.theory)
-                     or bool(study.rows or study.data_ref or study.population or study.region
-                             or study.period or study.treatment or study.measurement_notes))
-        mathematical = claim.strategy in {"derivation", "proof"} or _hits(claim.statement, (
-            "矩阵", "定理", "子群", "等距码", "代数", "内积", "恒等式", "不等式",
-            "matrix", "matrices", "theorem", "subgroup", "inner product", "algebraic identity", "inequality"))
-        if not empirical and (study.design == StudyDesign.theory or mathematical):
+        if not has_empirical_context(claim) and claim.strategy in {"derivation", "proof"}:
             return False
     return claim.claim_type in (ClaimType.causal, ClaimType.associational,
                                 ClaimType.descriptive, ClaimType.predictive,
@@ -232,6 +225,17 @@ def _check_external_validity(claim: Claim, text: str) -> Finding:
     if not _is_applied(claim):
         return Finding("external_validity", CHECK_TITLES["external_validity"],
                        NOT_APPLICABLE, "形式化命题不涉及外推")
+    from src.research.classification import uses_population_scope
+
+    if not uses_population_scope(claim):
+        if claim.scope_conditions.strip():
+            return Finding("external_validity", CHECK_TITLES["external_validity"],
+                           CLEAR, "已登记研究对象与适用条件")
+        return Finding(
+            "external_validity", CHECK_TITLES["external_validity"], HIT,
+            "未限定研究对象、环境与适用条件，结论可能被外推到未研究范围",
+            obligation_statement="限定研究对象、环境与适用条件，并说明不可外推的部分",
+        )
     if _hits(text, _EXTERNAL_HINTS):
         return Finding("external_validity", CHECK_TITLES["external_validity"],
                        CLEAR, "已声明适用范围或外推限制")

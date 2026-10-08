@@ -243,7 +243,12 @@ def object_rows(store: ResearchStore, kind: str, *, limit: int = 40,
             row.update(Claim.model_validate(row).model_dump(mode="json"))
         object_id = str(row.get("id", ""))
         if object_id:
-            row["version"] = store.latest_version(stored, object_id)
+            revision = store.latest_version(stored, object_id)
+            row["_storage_revision"] = revision
+            # 命题的 version 表示陈述/编码版本；仅证明状态变化也会追加
+            # 存储修订，不能让后者冒充新的科学命题版本。
+            if stored != "claim":
+                row["version"] = revision
     return rows
 
 

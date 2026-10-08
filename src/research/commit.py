@@ -40,6 +40,7 @@ from src.agents.protocol import (
     writable_kinds,
 )
 from src.research.projection import KIND_MAP, object_payload_for
+from src.research.constraint_fidelity import conflicting_code_parameters
 from src.research.reasoning_kernel import claim_state_for
 from src.research.schemas import (
     Claim,
@@ -91,6 +92,7 @@ class CommitOutcome:
     read_set_checked: bool = False
     idempotent: bool = False
     stale: dict[str, tuple[int, int]] = field(default_factory=dict)
+    task_saved: bool = False
 
     @property
     def committed(self) -> bool:
@@ -123,6 +125,8 @@ class ResearchCommitService:
         #         这里再查一遍是因为提交口是**最后**一道门) ----
         allowed = writable_kinds(task.agent)
         accepted: list[ChangeProposal] = []
+        spec = self.store.get("spec", task.problem_id) if task.problem_id else None
+        problem_statement = str((spec or {}).get("problem_statement") or "")
         for proposal in result.proposed_changes:
             kind = KIND_MAP.get(proposal.kind)
             if kind is None:
@@ -153,6 +157,13 @@ class ResearchCommitService:
                         "proposal_id": proposal.proposal_id, "kind": proposal.kind,
                         "reason": f"命题字段不符合契约: {e}"})
                     continue
+                conflicts = conflicting_code_parameters(
+                    problem_statement, str(proposal.payload.get("statement") or ""))
+                if conflicts:
+                    outcome.rejected.append({
+                        "proposal_id": proposal.proposal_id, "kind": proposal.kind,
+                        "reason": "候选命题与题面冲突: " + "；".join(conflicts)})
+                    continue
             if kind == "attempt":
                 try:
                     ProofAttempt.model_validate(proposal.payload)
@@ -163,6 +174,29 @@ class ResearchCommitService:
             accepted.append(proposal)
         outcome.accepted = [p.proposal_id for p in accepted]
         if not accepted:
+            # A clean review (or a blocked evidence task) has no object proposal,
+            # but its task result is still an authoritative, resumable outcome.
+            if current_versions is not None:
+                outcome.read_set_checked = True
+                stale = check_read_set(dict(result.input_versions or {}), current_versions)
+                if stale:
+                    outcome.stale = stale
+                    return outcome
+            key = stable_id("commit", task.project_id, task.problem_id, task.run_id,
+                            task.task_id, task.idempotency_key,
+                            result.agent_run_id or "no-run")
+            try:
+                self.store.submit_step(
+                    [(KIND_TASK, task.task_id, _task_payload(task, result))],
+                    list(events or []) + [("commit_result", {
+                        "task_id": task.task_id, "agent": task.agent,
+                        "run_id": task.run_id, "outcome": result.outcome.value,
+                        "accepted": 0, "rejected": len(outcome.rejected),
+                        "read_set_checked": outcome.read_set_checked})],
+                    idempotency_key=key)
+                outcome.task_saved = True
+            except StepAlreadyApplied:
+                outcome.idempotent = True
             return outcome
 
         # ---- 2. read-set: 依据的版本过期就不合入 ----
@@ -208,6 +242,7 @@ class ResearchCommitService:
             return outcome
         outcome.versions = versions
         outcome.claims = plan["claims"]
+        outcome.task_saved = True
         return outcome
 
     # ------------------------------------------------------------------
@@ -308,6 +343,7 @@ class ResearchCommitService:
             writes[("claim", claim_id)] = updated
             claims[claim_id] = {
                 "status": str(updated.get("status", "")),
+                "version": int(updated.get("version") or 1),
                 "validation_status": str(updated.get("validation_status", "")),
                 "support_kind": str(updated.get("support_kind", "")),
             }
@@ -654,7 +690,8 @@ def _apply_claim_disposition(payload: dict[str, Any], disposition) -> dict[str, 
                                             str(disposition.verification_scope))
     if disposition.note:
         out["notes"] = (str(out.get("notes") or "") + " " + disposition.note).strip()
-    out.pop("version", None)
+    # `version` 是科学陈述/编码的版本，不是对象存储的修订号。状态归并只改变
+    # 证明状态，不能把 v2 命题重置为默认 v1；存储修订号由 ResearchStore 单独管理。
     return out
 
 

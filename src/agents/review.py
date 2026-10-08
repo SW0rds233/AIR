@@ -30,7 +30,7 @@ from src.agents.runtime import AgentRuntime, ToolSpec
 
 __all__ = ["REVIEW_CATEGORIES", "ReviewAgent", "deterministic_issues"]
 
-#: 检查项分类 (分项检查, 不给单一总分)。
+#: Categories are scored separately before applying the hard scientific gate.
 REVIEW_CATEGORIES: tuple[str, ...] = (
     "science",       # 科学逻辑: 推论是否成立、前提是否交代
     "fidelity",      # 问题忠实度: 是否偷换题意/域/量词
@@ -47,12 +47,45 @@ _SEVERITY_ORDER = {
     IssueSeverity.advisory.value: 3,
 }
 
+_CATEGORY_WEIGHTS = {"science": 25, "fidelity": 20, "citation": 20,
+                     "readability": 15, "figure": 10, "completeness": 10}
+
+
+def judge_review(issues: list[ReviewIssueRef], *, threshold: int = 80,
+                 semantic_reviewed: bool = True,
+                 category_scores: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Hard scientific violations cannot be averaged away by presentation scores."""
+    if not 0 <= threshold <= 100:
+        raise ValueError("review threshold must be between 0 and 100")
+    fatal = [i for i in issues if i.severity == IssueSeverity.blocking or
+             (i.severity == IssueSeverity.major and i.category not in
+              {"readability", "figure", "completeness"})]
+    scores: dict[str, int] = {}
+    for category, weight in _CATEGORY_WEIGHTS.items():
+        points = 100 - sum({IssueSeverity.major: 30, IssueSeverity.minor: 10,
+                            IssueSeverity.advisory: 3,
+                            IssueSeverity.blocking: 100}[issue.severity]
+                           for issue in issues if issue.category == category)
+        proposed = (category_scores or {}).get(category)
+        if isinstance(proposed, (int, float)) and not isinstance(proposed, bool) \
+                and 0 <= proposed <= 100:
+            points = min(points, int(proposed))
+        scores[category] = max(0, points)
+    score = round(sum(scores[k] * weight for k, weight in _CATEGORY_WEIGHTS.items()) / 100)
+    decision = ("major_revision" if fatal else
+                "unreviewed" if not semantic_reviewed else
+                "accepted" if score >= threshold else "revision")
+    return {"score": score, "threshold": threshold, "decision": decision,
+            "accepted": decision == "accepted", "category_scores": scores,
+            "fatal_issue_ids": [issue.issue_id for issue in fatal],
+            "semantic_reviewed": semantic_reviewed}
+
 
 class ReviewAgent(AgentBase):
     """独立审阅角色。"""
 
     role = "review"
-    prompt_version = "review/v1"
+    prompt_version = "review/v2"
     kinds = ("review_issue", "revision_task")
 
     SYSTEM = """你是"独立审阅"智能体, 一名严格但公正的学术审阅人。
@@ -80,13 +113,18 @@ class ReviewAgent(AgentBase):
 - **引用编号每轮重新排序**: 上一轮台账里对 `[n]` 的主题描述不得沿用 —— 重排之后
   `[34]` 已经是另一篇文献, 沿用旧描述会把同一个问题反复报成"未解决"
   (实测: 连续 4 轮误判 Critical 未解决)。判断"是否已解决"必须回到**本轮正文与文献表**;
-- 不要用总分代替分项判断; 不要为了显得严格而编造问题。
+- 原则性科学逻辑、题意忠实度或引用错误必须列为 major/blocking，直接打回大修；
+  非原则性问题按六项分别给 0–100 分。没有核对过的项目不得伪称已核对。
+- 打分不能代替列出具体问题、定位与验收标准；不得为了显得严格而编造问题。
 
 最终输出 JSON:
 {"issues": [{"severity": "blocking|major|minor|advisory", "category": "science|fidelity|citation|readability|figure|completeness",
              "summary": "", "detail": "", "locator": "", "affected_ids": [""],
              "suggested_owner": "evidence|modeling|reasoning|validation|writing|figures",
              "acceptance": [""]}],
+ "category_scores": {"science": 0, "fidelity": 0, "citation": 0,
+   "readability": 0, "figure": 0, "completeness": 0},
+ "category_notes": {"science": "给出扣分依据及可核验改进建议"},
  "resolved": [""], "unresolved": [""],
  "needs": [{"kind": "more_sources|derivation|model_condition|manuscript_revision", "statement": "", "why": ""}]}
 """
@@ -105,6 +143,8 @@ class ReviewAgent(AgentBase):
         parse_note = ""
         unresolved: list[str] = []
         semantic_reviewed = False
+        llm_scores: dict[str, Any] = {}
+        category_notes: dict[str, str] = {}
 
         if runtime.llm_available("review") and not task.budget.exceeded_by(usage):
             from langchain_core.messages import HumanMessage, SystemMessage
@@ -124,34 +164,68 @@ class ReviewAgent(AgentBase):
             except Exception as e:  # noqa: BLE001
                 payload, parse_note = None, f"审阅调用失败: {e}"
             if isinstance(payload, dict):
-                semantic_reviewed = isinstance(payload.get("issues"), list)
                 issues = _issues_from_payload(payload.get("issues"))
+                llm_scores = (payload.get("category_scores")
+                              if isinstance(payload.get("category_scores"), dict) else {})
+                raw_notes = payload.get("category_notes")
+                if isinstance(raw_notes, dict):
+                    category_notes = {str(key): clip(str(value), 500)
+                                      for key, value in raw_notes.items()
+                                      if key in _CATEGORY_WEIGHTS and value}
                 unresolved.extend(as_list_of_str(payload.get("unresolved")))
+                complete_scores = all(
+                    isinstance(llm_scores.get(category), (int, float))
+                    and not isinstance(llm_scores.get(category), bool)
+                    and 0 <= llm_scores[category] <= 100
+                    for category in REVIEW_CATEGORIES)
+                explained_low_scores = complete_scores and all(
+                    llm_scores[category] >= int((task.hints or {}).get("review_threshold", 80))
+                    or category_notes.get(category)
+                    for category in REVIEW_CATEGORIES)
+                semantic_reviewed = (isinstance(payload.get("issues"), list)
+                                     and complete_scores and explained_low_scores)
+                if not semantic_reviewed:
+                    unresolved.append("独立审阅未给出完整分项评分或低分理由，不能视为通过")
 
         deterministic = deterministic_issues(context)
         issues = _merge_issues(issues, deterministic)
         if parse_note:
             unresolved.append(parse_note)
 
+        threshold = int((task.hints or {}).get("review_threshold", 80))
+        judgement = judge_review(issues, threshold=threshold,
+                                 semantic_reviewed=semantic_reviewed,
+                                 category_scores=llm_scores)
+        judgement["category_notes"] = category_notes
+
         if not issues:
             if not semantic_reviewed:
+                manuscript = (context.objects.get("manuscript") or [{}])[-1]
                 return self.partial(task, "规则检查未发现问题，但独立语义审阅尚未完成",
                     unresolved=unresolved or ["审阅模型不可用或审阅输出无效，不能视为学术审阅通过"],
                     needs=[ResearchNeed(kind=NeedKind.review, statement="补齐独立语义审阅",
-                                        why="不能仅凭规则检查批准科研稿件", blocking=True)],
+                                        why="不能仅凭规则检查批准科研稿件", blocking=True,
+                                        hints={"trigger_id": "review-unavailable:" +
+                                               str(manuscript.get("manuscript_id") or manuscript.get("id") or "") +
+                                               ":" + str(manuscript.get("version") or 1)})],
                     usage=usage, payload={"schema": "ReviewReport/v1", "issues": [],
-                                          "semantic_reviewed": False})
+                                          **judgement})
+            needs = ([] if judgement["accepted"] else
+                     [_revision_need(context, [], judgement)])
             return self.completed(
-                task, "未发现可报告的问题 (逐项检查通过)",
-                unresolved=unresolved, usage=usage,
-                payload={"schema": "ReviewReport/v1", "issues": [],
-                         "by_severity": {}, "by_category": {}})
+                task, ("未发现原则性问题，评分达到门槛" if judgement["accepted"]
+                       else "未发现原则性问题，但分项评分未达到门槛"),
+                needs=needs, replan=bool(needs), unresolved=unresolved, usage=usage,
+                payload={"schema": "ReviewReport/v2", "issues": [],
+                         "by_severity": {}, "by_category": {}, **judgement})
 
         blocking = [i for i in issues if i.blocking]
         summary = (f"发现 {len(issues)} 个问题 "
                    f"(阻断 {len(blocking)}); 分项: "
                    + ", ".join(f"{k} {v}" for k, v in _tally(issues).items()))
         needs = _needs_from(issues)
+        if not judgement["accepted"]:
+            needs.insert(0, _revision_need(context, issues, judgement))
         changes = [ChangeProposal(
             kind="review_issue",
             payload=issue.to_dict(),
@@ -163,11 +237,11 @@ class ReviewAgent(AgentBase):
             task, summary, changes=changes, needs=needs,
             unresolved=unresolved[:6], usage=usage,
             issues=issues, replan=bool(needs),
-            payload={"schema": "ReviewReport/v1",
+            payload={"schema": "ReviewReport/v2",
                      "issues": [i.to_dict() for i in issues],
                      "by_severity": _tally(issues, "severity"),
                      "by_category": _tally(issues, "category"),
-                     "blocking": len(blocking)})
+                     "blocking": len(blocking), **judgement})
 
 
 # ----------------------------------------------------------------------
@@ -454,3 +528,30 @@ def _needs_from(issues: list[ReviewIssueRef]) -> list[ResearchNeed]:
             blocking=True,
         ))
     return needs
+
+
+def _revision_need(context: ContextPack, issues: list[ReviewIssueRef],
+                   judgement: dict[str, Any]) -> ResearchNeed:
+    manuscript = (context.objects.get("manuscript") or [{}])[-1]
+    manuscript_id = str(manuscript.get("manuscript_id") or manuscript.get("id") or "")
+    version = int(manuscript.get("version") or 1)
+    weak_categories = [
+        f"{category} {score}/100: " +
+        str((judgement.get("category_notes") or {}).get(category)
+            or "逐项核对该类论断并给出可核验的修订")
+        for category, score in (judgement.get("category_scores") or {}).items()
+        if score < judgement["threshold"]]
+    return ResearchNeed(
+        kind=NeedKind.manuscript_revision,
+        statement=f"依据独立审阅意见修订稿件 v{version}，重新提交审阅",
+        why=(f"审阅结果 {judgement['decision']}，得分 "
+             f"{judgement['score']}/{judgement['threshold']}"),
+        acceptance=([i.summary + ": " + "; ".join(i.acceptance)
+                     for i in issues[:12]] + weak_categories)[:18]
+                   or ["按分项评分意见改进并重新审阅"],
+        hints={"trigger_id": f"review-revision:{manuscript_id}:{version}",
+               "review_cycle": True, "revision_of": manuscript_id,
+               "review_issue_ids": [i.issue_id for i in issues],
+               "review_category_scores": judgement.get("category_scores") or {},
+               "review_category_notes": judgement.get("category_notes") or {}},
+        blocking=True)

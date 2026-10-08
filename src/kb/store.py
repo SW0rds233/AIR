@@ -118,6 +118,10 @@ class KBStore:
                 CREATE TABLE IF NOT EXISTS identity (
                     key TEXT PRIMARY KEY, doc_id TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS retrieval_queries (
+                    query TEXT PRIMARY KEY, searched_at TEXT NOT NULL,
+                    results INTEGER NOT NULL DEFAULT 0
+                );
                 CREATE TABLE IF NOT EXISTS provenance (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     doc_id TEXT, origin TEXT, detail TEXT, url TEXT, file TEXT, fetched_at TEXT
@@ -176,6 +180,47 @@ class KBStore:
                 if row:
                     return row["doc_id"]
         return None
+
+    def query_recently_searched(self, query: str, *, days: int = 7) -> bool:
+        """Only successful, nonempty searches are cached; empty coverage is retried."""
+        from datetime import datetime, timedelta, timezone
+
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT searched_at, results FROM retrieval_queries WHERE query=?",
+                (" ".join(query.casefold().split()),)).fetchone()
+        if not row or int(row["results"]) <= 0:
+            return False
+        try:
+            stamp = datetime.fromisoformat(row["searched_at"])
+            return stamp >= datetime.now(timezone.utc) - timedelta(days=days)
+        except ValueError:
+            return False
+
+    def mark_query_searched(self, query: str, results: int) -> None:
+        from datetime import datetime, timezone
+
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO retrieval_queries(query,searched_at,results) VALUES (?,?,?)",
+                (" ".join(query.casefold().split()),
+                 datetime.now(timezone.utc).isoformat(), max(0, int(results))))
+            self._conn.commit()
+
+    def cached_pdf_for(self, keys: list[str]) -> str:
+        """Find an existing PDF by document identity, never by a title-like filename."""
+        doc_id = self.find_by_identity(keys)
+        if not doc_id:
+            return ""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT file FROM provenance WHERE doc_id=? AND file<>'' ORDER BY id DESC",
+                (doc_id,)).fetchall()
+        for row in rows:
+            path = Path(row["file"])
+            if path.suffix.lower() == ".pdf" and path.is_file():
+                return str(path)
+        return ""
 
     def get_document(self, doc_id: str) -> dict | None:
         with self._lock:

@@ -395,6 +395,20 @@ def _sensitive_reason(path: Path) -> str:
     return ""
 
 
+def _generated_source_reason(path: Path) -> str:
+    """System outputs and the PDF download cache are not user literature sources."""
+    from src.config import DATA_DIR, OUTPUT_DIR
+
+    for root, label in ((OUTPUT_DIR, "系统研究产出"),
+                        (DATA_DIR / "pdfs", "自动下载缓存")):
+        try:
+            path.relative_to(root.resolve())
+        except ValueError:
+            continue
+        return f"{label}不得作为外部文献批量导入；下载文献须经身份核验入口入库"
+    return ""
+
+
 def _iter_candidates(raw: str, request: ScanRequest) -> tuple[list[Path], list[str]]:
     """把一条输入展开为候选文件路径; 返回 (文件, 说明)。"""
     notes: list[str] = []
@@ -517,6 +531,10 @@ def _classify(path: Path, roots: list[Path], suffixes: set[str]) -> ScannedFile:
             "显式放行); 需由维护者显式放行"
         )
     entry.authorized_root = str(root)
+
+    generated = _generated_source_reason(resolved)
+    if generated:
+        return deny(generated)
 
     # 符号链接: 解析后的真实路径必须在授权根内 (上面已判), 但它指向敏感目标仍拒绝
     sensitive = _sensitive_reason(resolved)

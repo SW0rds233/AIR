@@ -101,7 +101,8 @@ CAPABILITIES: dict[str, Capability] = {
         backends=("stats",), requires_data=True, requires_design=True,
         min_evidence_grade="single_source",
         description="预测性命题: 需样本外评估方案与基线比较, 缺一不可",
-        obligation_kinds=("estimate_effect", "scope_check", "evidence_support"),
+        obligation_kinds=("estimate_effect", "scope_check", "evidence_support",
+                          "predictive_validation"),
     ),
     "scenario": Capability(
         category="scenario", claim_type=ClaimType.scenario,
@@ -253,7 +254,7 @@ def candidate_scheme(claim) -> tuple[str, str, str]:
     if claim_type == ClaimType.causal:
         return ("因果识别模型",
                 "结果 = 处理效应 + 混淆/趋势项 + 误差; 识别策略决定可估参数",
-                "模型必须写明识别假设与适用人群/时期, 否则结论不得外推")
+                "模型必须写明识别假设与研究对象、适用条件, 否则结论不得外推")
     if claim_type == ClaimType.predictive:
         return ("预测模型",
                 "结果 = 特征函数 + 模型误差; 需样本外评估方案",
@@ -268,8 +269,8 @@ def candidate_scheme(claim) -> tuple[str, str, str]:
                 "关联不得被表述为因果; 混淆未被排除前只能报告关联强度")
     if claim_type == ClaimType.descriptive:
         return ("描述模型",
-                "在声明人群/时期内的分布或水平描述",
-                "描述统计不可外推到未抽样人群")
+                "在声明的研究对象与条件内描述分布或水平",
+                "描述统计不可外推到未研究对象或条件")
     if claim_type == ClaimType.normative:
         return ("规范论证模型",
                 "由价值前提与事实前提共同推出应当如何",

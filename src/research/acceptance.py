@@ -62,6 +62,15 @@ def theory_validity_gate(
 ) -> GateResult:
     reasons: list[str] = []
     unresolved: list[str] = []
+    current_claim_versions = {claim.id: claim.version for claim in claims}
+    obligations = [obligation for obligation in obligations
+                   if current_claim_versions.get(obligation.claim_id,
+                                                  obligation.claim_version)
+                   == obligation.claim_version]
+    verifications = [record for record in verifications
+                     if current_claim_versions.get(record.claim_id,
+                                                    record.claim_version)
+                     == record.claim_version]
 
     graph = DependencyGraph()
     for src, dst in edges:
@@ -174,8 +183,12 @@ def theory_validity_gate(
                 reasons.append(f"因果结论 {claim.id} 缺少不确定性区间 (CI)")
             if claim.study.design == StudyDesign.none:
                 reasons.append(f"因果结论 {claim.id} 未声明研究设计")
-            if not (claim.scope_population and claim.scope_region and claim.scope_period):
-                reasons.append(f"因果结论 {claim.id} 未限定人群/地区/时期")
+            from src.research.classification import uses_population_scope
+            if uses_population_scope(claim):
+                if not (claim.scope_population and claim.scope_region and claim.scope_period):
+                    reasons.append(f"因果结论 {claim.id} 未限定人群/地区/时期")
+            elif not claim.scope_conditions.strip():
+                reasons.append(f"因果结论 {claim.id} 未限定研究对象、环境与适用条件")
             if not claim.study.confounders and not claim.study.confounder_handling:
                 reasons.append(f"因果结论 {claim.id} 未声明混淆处理")
             if claim.evidence_grade == EvidenceGrade.unsupported:
@@ -237,6 +250,8 @@ def _normalize_expr(text: str) -> str:
 
 def _aligned(record: VerificationRecord, claim: Claim) -> bool:
     """核对验证请求编码的变量域/关系/表达式与原命题是否一致 (防止陈述被偷换)。"""
+    if record.claim_version != claim.version:
+        return False
     args = record.arguments or {}
     # 设计/计数类命题: 判定输入 (v,k,λ,b,r) 必须与命题记录的一致, 否则"换一组
     # 参数再引用旧证书"就能伪造结论 (陈述偷换)。**先于**空参数短路检查。

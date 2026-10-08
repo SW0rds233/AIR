@@ -185,6 +185,7 @@ class TeamRun:
                  projection: Any | None = None,
                  llm_factory: Callable[[str], Any] | None = None,
                  max_rounds: int = 24,
+                 review_threshold: int = 80,
                  run_budget: RunBudget | None = None,
                  attachments: list[dict[str, Any]] | None = None,
                  attachment_text: str = "",
@@ -225,6 +226,9 @@ class TeamRun:
             projection = TeamProjection(self.task_store.store, run_id=run_id)
         self.projection = projection
         self.max_rounds = max(1, max_rounds)
+        if not 0 <= int(review_threshold) <= 100:
+            raise ValueError("review_threshold must be between 0 and 100")
+        self.review_threshold = int(review_threshold)
         self.attachments = list(attachments or [])
         self.attachment_text = attachment_text
         self.source_set_ids = [s for s in source_set_ids if s]
@@ -373,6 +377,19 @@ class TeamRun:
         # 运行此前不写规格 —— 于是同一个项目在团队路径下"没有研究问题", 界面读不到
         # 对象、`resolve_problem` 直接 404 (§6.1 一份事实模型)。
         self._persist_spec()
+        try:
+            from src.research.progress import write_plan_progress
+
+            root = write_plan_progress(
+                project_id=self.project_id, problem_id=self.problem_id,
+                run_id=self.run_id, brief=brief.to_dict(), plan=plan.to_dict(),
+                spec=self.task_store.store.get("spec", self.problem_id))
+            self.runtime.emit("progress_saved", {
+                "stage": "planned", "path": str(root),
+                "files": ["brief.json", "plan.json", "research_spec.json"]})
+        except Exception as e:  # noqa: BLE001 - presentation must not block research
+            self.runtime.emit("progress_export_failed", {
+                "stage": "planned", "reason": f"{type(e).__name__}: {e}"})
         # 画像/计划一算出来就落盘: "任务落盘不等于恢复团队" (§3.3 G16) —— 只有画像
         # 与计划也在磁盘上, 续跑才能复用**同一批任务身份与依赖边**, 而不是重新画像。
         self.save_state()
@@ -544,16 +561,37 @@ class TeamRun:
                               {"reason": str(e), "recoverable": True})
             return
         self.outcome.delivery = assessment.to_dict()
-        self.outcome.unresolved_report["delivery"] = assessment.to_dict()
-        if not assessment.accepted:
+        if self.outcome.brief and any(
+                item in {"full_paper", "theoretical_conclusion", "problem_report",
+                         "source_list", "review_report"}
+                for item in self.outcome.brief.deliverables):
+            review_index = next((index for index in range(len(self.outcome.task_order) - 1, -1, -1)
+                                 if (self.loop.results.get(self.outcome.task_order[index])
+                                     and self.loop.results[self.outcome.task_order[index]].agent == "review")), -1)
+            writing_index = next((index for index in range(len(self.outcome.task_order) - 1, -1, -1)
+                                  if (self.loop.results.get(self.outcome.task_order[index])
+                                      and self.loop.results[self.outcome.task_order[index]].agent == "writing")), -1)
+            reviewed = (self.loop.results[self.outcome.task_order[review_index]]
+                        if review_index >= 0 else None)
+            judgement = dict(reviewed.payload or {}) if reviewed else {}
+            self.outcome.delivery["review"] = {
+                "score": judgement.get("score"), "threshold": self.review_threshold,
+                "decision": judgement.get("decision", "unreviewed"),
+                "current": review_index > writing_index}
+            if not judgement.get("accepted") or (writing_index >= 0 and review_index <= writing_index):
+                self.outcome.delivery["accepted"] = False
+                self.outcome.delivery.setdefault("blocking", []).append(
+                    "独立审阅尚未达到通过门槛，或审阅早于最新稿件")
+        self.outcome.unresolved_report["delivery"] = dict(self.outcome.delivery)
+        if not self.outcome.delivery["accepted"]:
             self.outcome.status = TaskStatus.partial.value
             reason = (f"交付门槛未通过 (等级 {assessment.level}): "
-                      + "; ".join((assessment.blocking + assessment.unresolved)[:4]))
+                      + "; ".join((self.outcome.delivery["blocking"] + assessment.unresolved)[:4]))
             self.outcome.stop_reason = (self.outcome.stop_reason + " | " + reason).strip(" |")
             self.outcome.unresolved_report.setdefault("unresolved", [])
             self.outcome.unresolved_report["unresolved"].extend(
-                [*assessment.blocking, *assessment.unresolved])
-        self.runtime.emit("delivery_assessed", assessment.to_dict())
+                [*self.outcome.delivery["blocking"], *assessment.unresolved])
+        self.runtime.emit("delivery_assessed", dict(self.outcome.delivery))
 
     # ---- 主循环 (一次跑完) ----
     def run(self) -> TeamRunOutcome:
@@ -580,6 +618,8 @@ class TeamRun:
             task.project_id = self.project_id
         if not task.problem_id:
             task.problem_id = self.problem_id
+        if task.agent == "review":
+            task.hints["review_threshold"] = self.review_threshold
         context = self._build_context(task, results)
         try:
             self.task_store.create(task, plan_id=self.outcome.plan.plan_id
@@ -590,6 +630,9 @@ class TeamRun:
         run = new_agent_run(task, attempt=self.task_store.next_attempt(task.task_id))
         result = self.executor.execute(task, context)
         result.agent_run_id = result.agent_run_id or run.agent_run_id
+        # 角色读到的是上下文对象快照；用存储修订号形成 read-set，不能用
+        # claim.version（科学陈述版本）替代。后者可能在状态更新时保持不变。
+        result.input_versions.update(context_read_versions(context))
         self._persist_result(task, result)
         return result
 
@@ -651,6 +694,20 @@ class TeamRun:
         for claim_id, state in outcome.claims.items():
             self.runtime.emit("claim_state_reconciled", {
                 "claim_id": claim_id, **state, "source": "commit_service"})
+        if outcome.task_saved:
+            try:
+                from src.research.progress import write_run_progress
+
+                root = write_run_progress(
+                    self.task_store.store, project_id=self.project_id,
+                    problem_id=self.problem_id, run_id=self.run_id,
+                    task=task, result=result)
+                self.runtime.emit("progress_saved", {
+                    "task_id": task.task_id, "agent": task.agent,
+                    "path": str(root), "files": ["progress.json", "manuscript-draft.md"]})
+            except Exception as e:  # noqa: BLE001 - a view failure must not roll back committed science
+                self.runtime.emit("progress_export_failed", {
+                    "task_id": task.task_id, "reason": f"{type(e).__name__}: {e}"})
 
     def _commit_service(self):
         """懒建唯一提交口 (与投影共用同一个研究存储, 不新造第二个库)。"""
@@ -749,6 +806,7 @@ class TeamRun:
             "attachments": list(self.attachments),
             "attachment_text": self.attachment_text,
             "max_rounds": self.max_rounds,
+            "review_threshold": self.review_threshold,
             "rounds": state.rounds,
             "finished": state.finished,
             "stop_reason": state.stop_reason,
@@ -925,6 +983,7 @@ class TeamRun:
         if restored is None:
             return False
         self.loop = restored
+        self.review_threshold = int(payload.get("review_threshold", self.review_threshold))
         self.outcome.brief = restored.brief
         self.outcome.plan = restored.plan
         self.outcome.results = restored.results
@@ -1060,6 +1119,18 @@ def make_context_builder(*, brief_getter: Callable[[], ResearchBrief | None],
 
 #: 进入角色上下文的字段白名单 (其余字段按摘要裁剪, 避免大文本进提示词)。
 _CONTEXT_TEXT_KEYS = ("text", "abstract", "excerpt", "quote", "search_text", "body")
+
+
+def context_read_versions(context: ContextPack) -> dict[str, int]:
+    """记录角色上下文实际包含的对象存储修订，用于提交时的过期检查。"""
+    read: dict[str, int] = {}
+    for rows in context.objects.values():
+        for row in rows:
+            object_id = str(row.get("id") or "")
+            revision = row.get("_storage_revision")
+            if object_id and isinstance(revision, int) and revision > 0:
+                read[object_id] = revision
+    return read
 
 
 def slim_object_rows(rows: list[dict[str, Any]], *, text_limit: int = 600,

@@ -103,5 +103,5 @@
 
 > 说明：本清单是**复核交付物**用的，不是系统里的审批门槛 —— 系统不会因为本表
 > 未勾选而拒绝交付，也不会读取本表内容。仓库里的自动化测试覆盖"不越界"的部分
-> （`tests/test_e2e_http.py`、`tests/test_sources_and_attribution.py`、
-> `tests/test_research_logging.py` 等），它们通过并不等于本清单通过。
+> （如 `tests/test_current_run_integrity.py`、`tests/test_shared_research_quality.py`），
+> 它们通过并不等于本清单通过。

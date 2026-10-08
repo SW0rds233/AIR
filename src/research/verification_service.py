@@ -540,10 +540,21 @@ def _rule_verdict(claim: Any, obligation: ProofObligation,
         return False, "", {"detail": "未列出混淆因素或识别策略 (不得默认无混淆)"}
 
     if kind == "scope_check":
+        from src.research.classification import uses_population_scope
+
+        if not uses_population_scope(claim):
+            if claim.scope_conditions.strip():
+                return True, claim.scope_conditions.strip(), extra
+            return False, "", {"detail": "缺少研究对象、环境与适用条件"}
         if claim.scope_population and claim.scope_region and claim.scope_period:
             return True, (f"{claim.scope_population} / {claim.scope_region} / "
                           f"{claim.scope_period}"), extra
         return False, "", {"detail": "缺少人群/地区/时期范围"}
+
+    if kind == "predictive_validation":
+        if study.predictive_validation.strip():
+            return True, study.predictive_validation.strip(), extra
+        return False, "", {"detail": "缺少样本外划分、评价指标与基线比较方案"}
 
     if kind == "evidence_support":
         supporters = [e for e in evidence

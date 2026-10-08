@@ -239,18 +239,31 @@ def ingest_machine(topic: str, papers: list[dict], embed: bool = False,
     store = store or KBStore(topic)
     report = {"topic": topic, "ingested": [], "merged": [], "errors": []}
     from src.publication.references import BIBLIO_FIELDS
+    from src.kb.identity import normalize_doi
     for paper in papers:
         title = (paper.get("title") or "").strip()
         if not title:
             continue
         doc_id, is_new = _merge_or_create(store, paper)
+        prior = store.get_document(doc_id) if not is_new else None
+        pdf_path = paper.get("pdf_path")
+        if prior and (prior.get("has_fulltext") or not (pdf_path and Path(pdf_path).is_file())) and all(
+            str(prior.get(field) or "").strip().casefold()
+            == (normalize_doi(paper.get(field) or "") if field == "doi" else
+                str(paper.get(field) or "").strip().casefold())
+            for field in ("title", "authors", "year", "venue", "doi", "abstract",
+                          "publication_status", "publication_type", "publication_verified_by")
+        ):
+            report["merged"].append({"doc_id": doc_id, "title": title,
+                                     "reused_existing": True})
+            continue
         doc_type = _doc_type_from(paper)
         peer, credibility = _credibility(doc_type, manual=False)
         record = LitRecord(
             doc_id=doc_id, title=title, authors=paper.get("authors", ""),
             year=str(paper.get("year", "") or ""), venue=paper.get("venue", ""),
             doc_type=doc_type, language=paper.get("language", ""),
-            abstract=paper.get("abstract", ""), doi=(paper.get("doi") or "").lower(),
+            abstract=paper.get("abstract", ""), doi=normalize_doi(paper.get("doi") or ""),
             url=paper.get("url", ""), keywords=list(paper.get("keywords", []) or []),
             manual_asserted=False, existence_verified=bool(paper.get("doi") or paper.get("url")),
             peer_reviewed=peer, credibility=credibility,
@@ -258,7 +271,6 @@ def ingest_machine(topic: str, papers: list[dict], embed: bool = False,
             **{key: str(paper.get(key) or "") for key in BIBLIO_FIELDS},
         )
         parsed = None
-        pdf_path = paper.get("pdf_path")
         if pdf_path and Path(pdf_path).exists():
             parsed = parse_document(pdf_path, doc_id=doc_id)
             record.has_fulltext = bool(parsed.full_text)

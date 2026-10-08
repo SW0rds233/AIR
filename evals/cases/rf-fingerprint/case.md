@@ -63,9 +63,8 @@
 
 ## 4. 判定方式
 
-- 自动化部分（可回归）：
-  - `tests/test_sources_and_attribution.py::test_two_problems_in_one_project_do_not_share_sources_or_facts`
-  - `tests/test_e2e_http.py::test_full_research_path_over_http`
-  - `tests/test_research_logging.py`（指标与日志异常）
-- 人工部分：按 `evals/rubric.md` 的 §2.1–§2.8 逐项判定并签字。
+- 自动化部分（组件级回归）：`tests/test_retrieval_flow.py`、
+  `tests/test_shared_research_quality.py`、`tests/test_run_quality.py`。
+  同项目多问题的来源隔离与完整 HTTP 研究链路尚无对应的端到端测试。
+- 人工部分：按 `evals/rubric.md` 的 §2.1–§2.8 逐项判定并记录理由。
 - 判定记录写入 `evals/cases/rf-fingerprint/reviews/<YYYY-MM-DD>.md`。

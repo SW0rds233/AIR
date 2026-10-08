@@ -332,10 +332,13 @@ def classify_request(text: str) -> tuple[list[str], list[str], str]:
     if not deliverables:
         deliverables = ["problem_report"]
 
+    from src.rag.relevance_filter import resolve_domain
+
+    field = resolve_domain(body)
     basis = ("规则识别: 匹配到的子问题类型 " + "/".join(kinds)
              + "; 交付形态 " + "/".join(deliverables)
-             + ("; 未匹配到领域词, 不做领域假设" if not (
-                 hit(_CASE_MARKERS) or hit(_DATA_MARKERS)) else ""))
+             + (f"; 术语表领域 {field.domain}" if field.domain else
+                "; 未识别学科领域, 不做领域假设"))
     return kinds, deliverables, basis
 
 
@@ -386,9 +389,9 @@ _DEFAULT_ROLE_SUBQUESTION: dict[str, tuple[str, str, tuple[str, ...]]] = {
 }
 
 _DELIVERABLE_ROLES: dict[str, tuple[str, ...]] = {
-    "source_list": ("evidence", "writing"),
-    "problem_report": ("reasoning", "writing"),
-    "theoretical_conclusion": ("reasoning", "writing"),
+    "source_list": ("evidence", "writing", "review"),
+    "problem_report": ("reasoning", "writing", "review"),
+    "theoretical_conclusion": ("reasoning", "writing", "review"),
     "full_paper": ("reasoning", "writing", "review"),
     "figures": ("figures",),
     "review_report": ("review",),
@@ -468,6 +471,12 @@ class SupervisorAgent:
             request,
             wrap_external(attachment_question, max_chars=2000) if attachment_question else "",
             kinds, owner_map=owner_map)
+        intent = getattr(self, "_last_intent", {})
+        if intent:
+            brief.objects = list(intent.get("objects") or [])
+            brief.variables = list(intent.get("variables") or [])
+            brief.constraints = list(intent.get("constraints") or [])
+            brief.success_conditions = list(intent.get("success_conditions") or [])
         if model_proposed:
             for index, item in enumerate(model_proposed):
                 brief.add_subquestion(
@@ -515,7 +524,7 @@ class SupervisorAgent:
             brief.add_subquestion(
                 statement="把结论与依据写成连贯稿件", kind="mechanism", owner="writing",
                 priority=20, needs=["段落可回溯到来源或推导"])
-        if "full_paper" in deliverables or "theoretical_conclusion" in deliverables:
+        if needs_writing:
             # 独立审阅 (§3.1): 论文类交付必须过一遍独立检查, 而不是作者自评
             brief.add_subquestion(
                 statement="从原始任务与证据独立审阅稿件与图表",
@@ -567,8 +576,12 @@ class SupervisorAgent:
 4. 需要已有定理、数据或案例支撑的子问题, 不得标成 existence_proof (那是给自足证明用的);
 5. 不要臆造用户没说过的约束、数据或结论。
 
+先从题面**原文**提取对象、变量、约束和成功条件；只能给出题面出现的短语，
+不得把常见但题面没说的参数当成用户给定。未知的保持空列表。
 只输出 JSON:
-{"subquestions": [{"statement": "要回答什么", "kind": "mechanism",
+{"objects": ["题面原词"], "variables": ["题面原词"],
+ "constraints": ["题面原词"], "success_conditions": ["题面原词"],
+ "subquestions": [{"statement": "要回答什么", "kind": "mechanism",
   "owner": "modeling", "needs": ["什么算完成"]}]}"""
 
     def _propose_subquestions(self, request: str, attachment_text: str,
@@ -582,12 +595,16 @@ class SupervisorAgent:
         """
         if self.llm is None:
             return []
+        self._last_intent = {}
         prompt = (f"研究请求:\n{request}\n\n"
                   f"附件文本节选:\n{(attachment_text or '')[:2000]}\n\n"
                   f"规则层初判的类型: {', '.join(kinds) or '(未判定)'}\n"
                   f"请给出子问题清单。")
         try:
-            response = self.llm.invoke(prompt)
+            from langchain_core.messages import HumanMessage, SystemMessage
+
+            response = self.llm.invoke([SystemMessage(content=self.BRIEF_SYSTEM),
+                                        HumanMessage(content=prompt)])
         except Exception:  # noqa: BLE001 - 模型不可用不能拖垮主控
             return []
         from src.agents.base import extract_json
@@ -595,6 +612,14 @@ class SupervisorAgent:
         payload, _reason = extract_json(getattr(response, "content", response))
         if not isinstance(payload, dict):
             return []
+        source_text = f"{request}\n{attachment_text}"
+        self._last_intent = {
+            key: [str(value).strip() for value in payload.get(key, [])
+                  if isinstance(value, str) and str(value).strip()
+                  and str(value).strip() in source_text][:16]
+            for key in ("objects", "variables", "constraints", "success_conditions")
+            if isinstance(payload.get(key), list)
+        }
         raw = payload.get("subquestions")
         if not isinstance(raw, list):
             return []

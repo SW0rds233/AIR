@@ -206,11 +206,16 @@ def retrieve_evidence_detailed(service: KnowledgeService, claim: Claim, gap_type
 
 def _paper_key(paper: dict) -> str:
     """外部检索命中的同一原始记录键 (与 KB 侧的记录键保持同一口径)。"""
-    doi = str(paper.get("doi") or "").strip().lower()
+    from src.kb.identity import build_identity, normalize_doi
+
+    doi = normalize_doi(paper.get("doi") or "")
     if doi:
         return f"doi:{doi}"
-    title = " ".join(str(paper.get("title") or "").lower().split())
-    return f"title:{title}" if title else ""
+    identity = build_identity(paper)
+    if identity.title_norm:
+        return (f"title:{identity.title_norm}|{identity.first_author_norm}|"
+                f"{identity.year}")
+    return ""
 
 
 def _default_search_fn() -> Callable[[str, int], list[dict]] | None:
@@ -267,7 +272,16 @@ def _harvest_external(queries: list[str], policy: SourcePolicy, coverage: Retrie
         return []
     coverage.engines = list(_EXTERNAL_ENGINES)
     fetched: dict[str, dict] = {}
+    from src.kb.store import KBStore, default_db_path
+
+    cached_store = KBStore(topic, create_if_missing=False) if default_db_path(topic).exists() else None
+    successful_queries: dict[str, int] = {}
     for query in queries:
+        if cached_store is not None and cached_store.query_recently_searched(query) \
+                and cached_store.search_keyword(query, limit=1):
+            coverage.executed = True
+            coverage.uncovered.append(f"查询「{query}」复用同领域已入库结果；7 天后可刷新外检")
+            continue
         try:
             papers = fn(query, per_query) or []
         except Exception as e:  # noqa: BLE001 - 单条检索式失败不影响其余
@@ -276,7 +290,11 @@ def _harvest_external(queries: list[str], policy: SourcePolicy, coverage: Retrie
         # 只要有一条检索式跑完, 就算"检索执行过": 之后的零命中是"无命中"而不是"失败"
         coverage.executed = True
         from src.kb.publication import relevance_score
-        usable = [paper for paper in papers if isinstance(paper, dict) and paper.get("title")]
+        # The semantic selector returns rejected rows for audit; they must never
+        # proceed to PDF download or ingestion.
+        usable = [paper for paper in papers if isinstance(paper, dict)
+                  and paper.get("title") and not paper.get("_semantic_rejected")]
+        successful_queries[query] = len(usable)
         coverage.failures.extend(str(paper.get("error")) for paper in papers
                                  if isinstance(paper, dict) and paper.get("error"))
         coverage.hits += len(usable)
@@ -287,13 +305,22 @@ def _harvest_external(queries: list[str], policy: SourcePolicy, coverage: Retrie
         for paper in papers:
             key = _paper_key(paper)
             if key:
-                record = fetched.setdefault(key, {**paper, "_retrieval_queries": []})
+                # Search-result metadata is untrusted: only our PDF cache/downloader
+                # may introduce a local file path for full-text parsing.
+                metadata = {field: value for field, value in paper.items()
+                            if field not in {"pdf_path", "_semantic_rejected"}}
+                record = fetched.setdefault(key, {**metadata, "_retrieval_queries": []})
                 if query not in record["_retrieval_queries"]:
                     record["_retrieval_queries"].append(query)
     if not fetched:
-        coverage.uncovered.append("自主检索未返回任何可用记录")
+        if cached_store is not None:
+            cached_store.close()
+        if successful_queries:
+            coverage.uncovered.append("本次外检无新增可用记录；继续检查已入库资料")
         return []
     if not ingest:
+        if cached_store is not None:
+            cached_store.close()
         coverage.uncovered.append(f"{len(fetched)} 条命中未入库 (调用方关闭入库)，保留摘要候选")
         return [_paper_evidence(paper) for paper in fetched.values()]
     # 先取全文并落盘, 再入库 —— 顺序不能反: 入库时 `pdf_path` 必须已存在, 否则只会写入
@@ -315,6 +342,8 @@ def _harvest_external(queries: list[str], policy: SourcePolicy, coverage: Retrie
     try:
         store = KBStore(topic)
         report = ingest_machine(topic, papers, embed=_embedding_enabled(), store=store)
+        for query, count in successful_queries.items():
+            store.mark_query_searched(query, count)
         coverage.ingested += len(report["ingested"])
         coverage.duplicates += len(report["merged"])
         coverage.failures.extend(str(e) for e in report.get("errors", []))
@@ -332,6 +361,8 @@ def _harvest_external(queries: list[str], policy: SourcePolicy, coverage: Retrie
         coverage.uncovered.append("已保留外部命中的摘要/元数据，入库与全文核对尚未完成")
         return [_paper_evidence(paper) for paper in papers]
     finally:
+        if cached_store is not None:
+            cached_store.close()
         if store is not None:
             store.close()
 
@@ -359,13 +390,27 @@ def _download_fulltext_for(papers, *, topic: str, per_query: int,
         return candidates
 
     limit = max(1, min(int(per_query or 1), int(PDF_DOWNLOAD_LIMIT)))
+    from src.kb.identity import build_identity, candidate_keys
+    from src.kb.store import KBStore, default_db_path
+
+    existing_store = KBStore(topic, create_if_missing=False) if default_db_path(topic).exists() else None
+    missing: list[dict] = []
+    for paper in candidates:
+        if existing_store is not None:
+            pdf = existing_store.cached_pdf_for(candidate_keys(build_identity(paper)))
+            if pdf:
+                paper["pdf_path"] = pdf
+                continue
+        missing.append(paper)
+    if existing_store is not None:
+        existing_store.close()
     try:
-        with_pdf = download_pdfs_for_papers(candidates[:limit], limit=limit)
+        with_pdf = download_pdfs_for_papers(missing[:limit], limit=limit) if missing else []
     except Exception as e:  # noqa: BLE001 - 下载失败不得中断研究
         coverage.failures.append(f"全文下载失败: {type(e).__name__}: {e}")
         return candidates
 
-    downloaded = [p for p in with_pdf if p.get("pdf_path")]
+    downloaded = [p for p in candidates if p.get("pdf_path")]
     coverage.fulltext_available = len(downloaded)
     if not downloaded:
         coverage.uncovered.append(
@@ -442,12 +487,16 @@ def gather_sources(
     # 自主检索刚入库的资料, 与用户资料库走同一条检索路径 (这就是"合并"的含义)
     owned_service = service is None
     service = service if service is not None else _open_service(topic)
-    # autonomous 只使用本轮外部命中；both 才合并用户资料库。
-    if policy is SourcePolicy.autonomous:
+    # autonomous may reuse its own research/shared cache, never an unrelated user KB.
+    if policy is SourcePolicy.autonomous and not topic.startswith(("shared-", "research-")):
         service_for_search = None
     else:
         service_for_search = service
     if service_for_search is not None:
+        from src.rag.relevance_filter import is_off_domain, mentions, resolve_domain
+
+        field_terms = resolve_domain(_claim_goal(claim) or
+                                     (contract.goal if contract else topic))
         for query in queries:
             outcome = service.search(RetrievalRequest(
                 query=query, claim_id=claim.id if claim else "", gap_type=gap_type,
@@ -457,7 +506,17 @@ def gather_sources(
                 coverage.executed = True
             else:
                 coverage.uncovered.append(f"资料库检索未执行: {query}")
-            refs.extend(outcome.refs)
+            if field_terms.is_empty():
+                refs.extend(outcome.refs)
+            else:
+                kept = [ref for ref in outcome.refs
+                        if mentions(field_terms.in_domain,
+                                    f"{ref.title} {ref.excerpt}")
+                        and not is_off_domain(ref.title, field_terms)]
+                if len(kept) < len(outcome.refs):
+                    coverage.uncovered.append(
+                        f"查询「{query}」排除 {len(outcome.refs) - len(kept)} 条跨领域已入库资料")
+                refs.extend(kept)
         if not refs and not external_items:
             coverage.uncovered.append("在所授权资料内没有命中 (不等于不存在)")
     elif policy is SourcePolicy.autonomous and not external_items:

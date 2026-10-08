@@ -191,7 +191,12 @@ def plan_queries(contract: ProblemContract | None = None, *, goal: str = "",
         # counting count` 返回 "Necessary Condition Analysis"、"动态车辆路径问题",
         # 而 `projective plane nonexistence` 精准返回 "The Nonexistence of Certain
         # Finite Projective Planes"。因此: 只留英文, 且按"领域术语 > 意图词"取前几个。
-        core = _select_english_terms(variants, relation_text=f"{text} {treatment} {outcome}")
+        from src.rag.relevance_filter import resolve_domain
+
+        field = resolve_domain(f"{text} {treatment} {outcome}")
+        preferred = [term for term in field.query_core if term in variants]
+        core = list(dict.fromkeys([*preferred, *_select_english_terms(
+            variants, relation_text=f"{text} {treatment} {outcome}")]))[:3]
         if core:
             queries.insert(1 if len(queries) > 1 else len(queries), Query(
                 text=_clean(" ".join(core)),

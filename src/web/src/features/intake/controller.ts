@@ -323,6 +323,8 @@ export function createIntakeController(deps: IntakeDeps): IntakeController {
     // 附件按项目归属校验: 项目 ID 与上传时不同就如实拦下, 不静默丢附件 (R3)
     if (!checkAttachmentBinding(pid)) return;
 
+    const thresholdText = val('reviewthreshold', '80').trim();
+    const thresholdValue = thresholdText ? Number(thresholdText) : 80;
     // 统一载荷: 不再发送 `mode` (服务端决定引擎); 其余字段始终带上。
     const payload: Record<string, any> = {
       request: request,
@@ -341,6 +343,8 @@ export function createIntakeController(deps: IntakeDeps): IntakeController {
       attachment_ids: pendingAttachments,
       // R5: 资料授权策略必须显式随请求发出 (后端校验, 非法策略拒绝而非静默回退)
       source_policy: val('sourcepolicy', 'both') || 'both',
+      review_threshold: Number.isFinite(thresholdValue)
+        ? Math.max(0, Math.min(100, thresholdValue)) : 80,
     };
 
     startSession(api, payload).then(({status, body: data}) => {

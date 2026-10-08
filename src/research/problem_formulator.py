@@ -168,6 +168,13 @@ def _rule_obligation(claim: Claim, ver: int, statement: str, kind: str,
     )
 
 
+def _population_scope(claim: Claim) -> bool:
+    """Use population/region/period only when an observational scope exists."""
+    from src.research.classification import uses_population_scope
+
+    return uses_population_scope(claim)
+
+
 def _applied_obligations(claim: Claim, ver: int,
                          method_available: dict[str, bool]) -> list[ProofObligation]:
     """非定义型命题的义务集合 (计划书 §7.2 / §7.4)。
@@ -179,7 +186,9 @@ def _applied_obligations(claim: Claim, ver: int,
     stats_ok = method_available.get("stats", True)
     obligations = [
         ProofObligation(
-            statement=f"在声明范围 (人群/地区/时期) 内限定结论: {claim.statement}",
+            statement=(f"在声明的人群/地区/时期内限定结论: {claim.statement}"
+                       if _population_scope(claim) else
+                       f"限定研究对象、环境与适用条件: {claim.statement}"),
             kind="scope_check", acceptance_method="rule",
             claim_id=claim.id, claim_version=ver,
             detail="应用类结论必须给出适用边界, 不得无限外推",
@@ -196,7 +205,7 @@ def _applied_obligations(claim: Claim, ver: int,
     if claim.claim_type == ClaimType.predictive:
         obligations.append(_rule_obligation(
             claim, ver, "给出样本外评估方案与基线比较",
-            "design_feasibility", "需说明划分方式、评价指标与基线模型"))
+            "predictive_validation", "需说明划分方式、评价指标与基线模型"))
     if claim.claim_type == ClaimType.scenario:
         obligations.append(_rule_obligation(
             claim, ver, "声明情景参数及其取值依据",
@@ -251,7 +260,8 @@ def _obligations_for(claim: Claim, wants_equality: bool, method_available: dict[
             detail="须列出混淆因素或说明识别策略 (不得默认无混淆)",
         ))
         obligations.append(ProofObligation(
-            statement="限定结论适用范围 (人群/地区/时期)",
+            statement=("限定结论适用范围 (人群/地区/时期)" if _population_scope(claim)
+                       else "限定研究对象、环境与适用条件"),
             kind="scope_check",
             acceptance_method="rule",
             claim_id=claim.id,

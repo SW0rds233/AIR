@@ -310,6 +310,7 @@ class StudyPlan(BaseModel):
     # ---- 计划书 §7.4: 因果结论需把以下各项列为独立研究义务 ----
     identification_assumptions: list[str] = Field(default_factory=list)  # 识别假设
     design_feasibility: str = ""          # 设计可行性 (为何该设计在本数据上可用)
+    predictive_validation: str = ""       # 样本外划分、指标与基线比较方案
     measurement_notes: str = ""           # 测量方案
     missing_data_handling: str = ""       # 缺失机制与处理
     error_structure: str = ""             # 误差结构 (聚类/异方差/自相关等)
@@ -915,6 +916,7 @@ class Claim(BaseModel):
     scope_population: str = ""
     scope_region: str = ""
     scope_period: str = ""
+    scope_conditions: str = ""  # 非人群研究的对象、环境与适用条件
     study: StudyPlan = Field(default_factory=StudyPlan)
     effect_estimate: dict[str, Any] = Field(default_factory=dict)
     evidence_grade: EvidenceGrade = EvidenceGrade.unsupported

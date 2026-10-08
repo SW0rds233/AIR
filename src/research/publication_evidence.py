@@ -34,59 +34,11 @@ from src.research.schemas import (
 
 _THEORY_LLM_OFF = "0"
 
-# 中文命题 vs 英文来源的**术语对照**。
-# 必要性来自实测: `assess_support` 用"命题里的词是否出现在原文"判支持关系, 而中文命题
-# 与英文摘要没有一个共同词 —— 真正的相关工作 (例如 "Nonexistence Certificates for Ovals
-# in a Projective Plane of Order Ten") 会被判成"原文未出现命题的主题词"而丢弃。
-# 这里只做**术语**对照, 不翻译句子; 命中只升级到 `background` (背景相关工作), 不声称支持。
-_TERM_MAP: dict[str, tuple[str, ...]] = {
-    "射影平面": ("projective plane",),
-    "设计": ("design",),
-    "不存在": ("nonexistence", "non-existence", "does not exist", "impossible"),
-    "存在性": ("existence",),
-    "必要条件": ("necessary condition",),
-    "定理": ("theorem",),
-    "组合": ("combinatorial", "combinatorics"),
-    "区组": ("block", "block design"),
-    "对称": ("symmetric", "symmetry"),
-    "计数": ("counting", "count"),
-    "图": ("graph",),
-    "猜想": ("conjecture",),
-    "分类": ("classification",),
-    "构造": ("construction", "construct"),
-    "有限": ("finite",),
-    "阶": ("order",),
-    # 记号型术语: 题面常写作 `2-设计`、`t-设计`、`(v,k,λ)` 设计。`-` 会把"设计"断开,
-    # 于是术语表匹配不到, 领域词全部丢失、只剩泛意图词 —— 实测该情况让检索式退化成
-    # `nonexistence` 一个词, 返回 "The Nonexistence of Character Traits"、
-    # "Nonexistence theorems for traversable wormholes" 这类完全无关的论文。
-    "设计存在性": ("design existence",),
-    "-设计": ("block design", "combinatorial design", "BIBD"),
-    "平衡不完全区组": ("balanced incomplete block design", "BIBD"),
-    "射影": ("projective",),
-}
+def _domain_translations(text: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Domain vocabulary belongs to data files, never to a mathematics-only code map."""
+    from src.rag.relevance_filter import resolve_domain
 
-# 记号型占位符 -> 术语含义: `2-设计`/`3-设计` 的编号不改变领域
-_MARKER_TERMS: tuple[tuple[str, str], ...] = (
-    ("-设计", "设计"),
-    ("-design", "设计"),
-)
-
-
-def _expand_marker_terms(text: str) -> str:
-    """把 `2-设计` 这类记号还原成术语表能命中的形式 (`2 设计`)。
-
-    只做**记号**层面的还原, 不改动任何数字/语义。注意连字符要变成空格而不是删除:
-    直接删会把"设计"粘到前面的数字上 (`2-设计` -> `2设计`), 术语表反而匹配不到
-    `-设计` 之外的其他键。见 `_TERM_MAP` 里的实测说明。
-    """
-    expanded = text or ""
-    for marker, term in _MARKER_TERMS:
-        expanded = expanded.replace(marker, " " + term)
-    return expanded
-_LATIN_THEORY_MARKERS = ("projective plane", "combinatorial design", "block design",
-                         "bruck", "ryser", "chowla", "design theory",
-                         "nonexistence", "classification of finite")
+    return resolve_domain(text).translations
 
 
 def terminology_variants(text: str) -> list[str]:
@@ -100,11 +52,11 @@ def terminology_variants(text: str) -> list[str]:
     因此中文题在检索前必须把领域术语换成英文变体再查。这里只做**术语**替换,
     不翻译句子; 取不到变体就返回空列表 (调用方保持原查询, 不臆造英文)。
     """
-    haystack = _expand_marker_terms(text or "")
+    haystack = text or ""
     if not haystack:
         return []
     variants: list[str] = []
-    for term, translations in _TERM_MAP.items():
+    for term, translations in _domain_translations(haystack):
         if term in haystack:
             for translation in translations:
                 if translation not in variants:
@@ -122,19 +74,15 @@ _RELATED_MIN_HITS = 2
 def _background_terms(claim_text: str) -> list[str]:
     """从中文命题里提取可对照的英文学术术语 (用于判定"背景相关")。"""
     terms: list[str] = []
-    for chinese, english in _TERM_MAP.items():
-        if chinese in (claim_text or ""):
-            terms.extend(english)
+    terms.extend(terminology_variants(claim_text))
     return list(dict.fromkeys(terms))
 
 
 def _relatedness(text: str, terms: list[str]) -> int:
     """主题相关度: 命中的不同术语数; 命中强领域短语时直接给 2 (视为相关)。"""
     lowered = (text or "").lower()
-    if any(marker in lowered for marker in _LATIN_THEORY_MARKERS):
-        return max(2, _RELATED_MIN_HITS)
     hits = {term for term in terms if term and term in lowered}
-    return len(hits)
+    return max(len(hits), 2 if any(" " in term and term in hits for term in terms) else 0)
 
 
 def _is_topically_related(text: str, terms: list[str]) -> bool:

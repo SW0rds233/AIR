@@ -207,8 +207,6 @@ ARXIV_MAX_RESULTS = int(os.getenv("ARXIV_SEARCH_MAX_RESULTS", "50"))
 SEMANTIC_SCHOLAR_MAX_RESULTS = int(os.getenv("SEMANTIC_SCHOLAR_MAX_RESULTS", "50"))
 
 MAX_REVISIONS = int(os.getenv("MAX_REVISIONS", "3"))
-# 百分制阈值；80 分等价于 Reviewer 固定量表的 40/50，与审稿决策锚点一致。
-REVIEW_ACCEPT_THRESHOLD = int(os.getenv("REVIEW_ACCEPT_THRESHOLD", "80"))
 # 收敛检测: 连续 N 轮评分无提升则提前终止修订循环
 STAGNATION_LIMIT = int(os.getenv("STAGNATION_LIMIT", "2"))
 

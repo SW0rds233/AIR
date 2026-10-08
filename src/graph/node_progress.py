@@ -91,6 +91,8 @@ def describe_node(node_name: str, node_state: dict) -> str:
             return f"[团队] 计划就绪: {len(state.get('tasks') or [])} 个任务"
         if event == "run_finished":
             return f"[团队] 运行结束: {state.get('status', '')}"
+        if event == "progress_saved":
+            return f"[团队] {agent} 中间成果已落盘: {state.get('path', '')}"[:220]
         return f"[团队] {event or '进行中'}"
     if node_name == "research_team_done":
         summary = state.get("summary") or {}

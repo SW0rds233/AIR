@@ -38,6 +38,7 @@ OBLIGATION_PRIORITY: dict[str, int] = {
     "design_necessity": 2,
     # 因果识别类声明必须在效应估计之后再评估 (计划书 §7.4)
     "identification_assumptions": 4, "design_feasibility": 4,
+    "predictive_validation": 4,
     "measurement_and_missing": 4, "error_structure": 4,
 }
 
