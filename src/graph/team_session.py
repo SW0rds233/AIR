@@ -505,6 +505,14 @@ class TeamSession:
         has_pdf = pdf_path.is_file() and pdf_path.stat().st_size > 1024
         if ok and has_pdf:
             return "ok", log[-2000:]
+        # 失败时 xelatex 常留下一个**部分** PDF。留在原处会让"包里有 manuscript.pdf
+        # 而 manifest 说没有"同时成立 —— 只按文件列表读包的人会被误导(实测
+        # transfer-eval2 留下 182KB 的部分 PDF)。改名保留供诊断, 但不再冒充交付件。
+        if pdf_path.is_file():
+            try:
+                pdf_path.replace(pdf_path.with_name("manuscript.failed.pdf"))
+            except OSError:                     # 改名失败不掩蔽真正的编译失败原因
+                pass
         if "未安装" in (log or ""):
             return "unavailable", log[-2000:]
         if ok and not has_pdf:

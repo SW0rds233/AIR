@@ -162,6 +162,149 @@ def _escape_active(text: str, char: str) -> str:
     return re.sub(r"(?<!\\)" + re.escape(char), lambda _match: "\\" + char, text)
 
 
+#: 已知的 LaTeX 命令（渲染器自己产出的 + 模型常写的数学/文本命令）。
+#: 用途只有一个：判断 `\leqz` 这种「控制词与字母粘连」该从哪里切开。
+_KNOWN_TEX_COMMANDS: frozenset[str] = frozenset("""
+leq geq neq approx equiv propto sim simeq cong asymp ll gg lll le ge
+times cdot div pm mp ast star circ bullet oplus ominus otimes odot
+frac dfrac tfrac cfrac sqrt sum prod coprod int iint iiint oint
+lim log ln exp sin cos tan cot sec csc arcsin arccos arctan sinh cosh tanh
+max min sup inf det dim ker deg gcd hom arg
+alpha beta gamma delta epsilon varepsilon zeta eta theta vartheta iota kappa
+lambda mu nu xi pi varpi rho varrho sigma varsigma tau upsilon phi varphi
+chi psi omega Gamma Delta Theta Lambda Xi Pi Sigma Upsilon Phi Psi Omega
+infty partial nabla forall exists neg lnot land lor implies iff
+in notin subset supset subseteq supseteq cup cap setminus emptyset varnothing
+to mapsto rightarrow leftarrow leftrightarrow Rightarrow Leftarrow Leftrightarrow
+longrightarrow longleftarrow uparrow downarrow
+langle rangle lfloor rfloor lceil rceil lvert rvert lVert rVert
+vert Vert mid parallel perp backslash
+left right big Big bigg Bigg quad qquad hspace vspace hfill
+mathrm mathbf mathit mathcal mathbb mathsf mathtt mathfrak
+text textbf textit textrm textsf texttt textwidth textheight
+textasciicircum textasciitilde textbackslash textbar textless textgreater
+overline underline widehat widetilde vec bar hat tilde dot ddot
+limits nolimits displaystyle textstyle scriptstyle
+operatorname bmod pmod cdots ldots dots vdots ddots
+tag notag nonumber label ref eqref cite item itemize enumerate description
+begin end
+""".split())
+
+_CONTROL_WORD_RE = re.compile(r"\\([a-zA-Z]+)")
+#: 文本模式下**合法**的命令；其余反斜杠命令一律按"数学命令"处理。
+_TEXT_SAFE_COMMANDS: frozenset[str] = frozenset("""
+text textbf textit textrm textsf texttt emph underline
+textbackslash textasciicircum textasciitilde textbar textless textgreater
+ldots dots copyright today LaTeX TeX label ref cite footnote url href
+hspace vspace
+""".split())
+#: 数学片段的字符域（ASCII 数学记法；遇到中日韩文字即断开）。
+_MATH_RUN_RE = re.compile(r"[A-Za-z0-9_^{}\\ \t+\-*/=<>.,()\[\]|:;'!?]+")
+_TEXT_GROUP_START = re.compile(r"\\text\{")
+
+
+def _wrap_math_runs(content: str) -> str:
+    """把 `\\text{...}` 内容里含数学记法的片段包进 `$...$`。
+
+    实测：`\\text{}` 处于文本模式，里面出现**任何**数学记法都报
+    ``! Missing $ inserted.`` 并中断整篇编译：
+
+    | 写法 | 结果 |
+    |---|---|
+    | `\\text{中文 \\delta x 中文}` | 失败 |
+    | `\\text{中文 x_i 中文}` | 失败 |
+    | `\\text{中文 \\delta_{gb} 中文}` | 失败 |
+    | `\\text{中文 $x_i$ 中文}` | **通过** |
+
+    含文本命令（`\\textbf` 等）的片段**不动** —— 把它们塞进数学模式反而会引入新错误；
+    这类片段交给编译如实暴露，不在渲染期猜。
+    """
+    def _sub(match: "re.Match[str]") -> str:
+        run = match.group(0)
+        commands = re.findall(r"\\([a-zA-Z]+)", run)
+        if any(cmd in _TEXT_SAFE_COMMANDS for cmd in commands):
+            return run
+        if not (re.search(r"[_^]", run)
+                or any(cmd not in _TEXT_SAFE_COMMANDS for cmd in commands)):
+            return run
+        return f"${run}$"
+
+    return _MATH_RUN_RE.sub(_sub, content or "")
+
+
+def _fix_text_groups(body: str) -> str:
+    """在数学体里逐个处理 `\\text{...}` 组，把其中的数学片段包起来。"""
+    out: list[str] = []
+    cursor = 0
+    while True:
+        match = _TEXT_GROUP_START.search(body, cursor)
+        if not match:
+            out.append(body[cursor:])
+            break
+        out.append(body[cursor:match.start()])
+        depth, index = 1, match.end()
+        while index < len(body) and depth:
+            if body[index] == "\\" and index + 1 < len(body):
+                index += 2
+                continue
+            if body[index] == "{":
+                depth += 1
+            elif body[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            index += 1
+        if index >= len(body):          # 花括号不配平: 原样保留, 交给编译暴露
+            out.append(body[match.start():])
+            break
+        out.append("\\text{" + _wrap_math_runs(body[match.end():index]) + "}")
+        cursor = index + 1
+    return "".join(out)
+
+#: 落在内部环境（`aligned` 等）里的 `\tag`：amsmath 报 `\tag not allowed here`。
+_INNER_ENV_TAG_RE = re.compile(
+    r"\\tag(\*?\{[^{}]*\})\s*(\\end\{(?:aligned|alignedat|gathered|split)\})")
+
+
+def _hoist_inner_tags(body: str) -> str:
+    r"""把落在 `aligned` 等**内部环境**里的 `\tag` 提到环境之外。
+
+    amsmath 只允许在公式层用 `\tag`。实测 `transfer-eval2`：模型把编号写在公式末尾，
+    而 `_display_math` 按 `;`/`\qquad` 拆行时会用 `aligned` 包住各行，编号就被卷进
+    内部环境，报 ``! Package amsmath Error: \tag not allowed here.``（同一篇里 2 处）。
+    """
+    previous = None
+    while previous != body:
+        previous = body
+        body = _INNER_ENV_TAG_RE.sub(lambda m: f"{m.group(2)}\\tag{m.group(1)}", body)
+    return body
+
+
+
+def _separate_glued_commands(body: str) -> str:
+    r"""`\leqz` → `\leq z`：控制词后紧跟字母时补一个空格。
+
+    TeX 的控制词由**非字母**结束。模型常把关系符与下一个变量直接连写，实测
+    `transfer-eval2` 的稿件里 `$0\leqz\leqL$`、`\leqRH`、`\geqN`、`\lld` 等共 **10 处**：
+    TeX 把 `\leqz` 当成一个未定义的控制词，报 ``! Undefined control sequence.``。
+    xelatex 带 `-halt-on-error` 只报第一个，但**整篇编译失败、没有 PDF** ——
+    与 `\tag` 冲突同属"模型自撰 LaTeX 构造未被规范化"这一族。
+
+    只切**已知命令的最长前缀**，且整词已命中白名单时原样返回 —— 否则会把
+    `\textwidth` 切成 `\text width`。未知宏一律不动，交给编译如实暴露。
+    """
+    def _fix(match: "re.Match[str]") -> str:
+        word = match.group(1)
+        if word in _KNOWN_TEX_COMMANDS:
+            return match.group(0)
+        for cut in range(len(word) - 1, 1, -1):
+            if word[:cut] in _KNOWN_TEX_COMMANDS:
+                return f"\\{word[:cut]} {word[cut:]}"
+        return match.group(0)
+
+    return _CONTROL_WORD_RE.sub(_fix, body or "")
+
+
 def _math_body(chunk: str) -> str:
     r"""把片段里的 Unicode 数学符号换成**数学模式命令**形式 (`λ`→`\lambda`)。
 
@@ -172,7 +315,7 @@ def _math_body(chunk: str) -> str:
     for char, latex in _UNICODE_TO_LATEX_MATH.items():
         if char in chunk:
             chunk = chunk.replace(char, latex)
-    return chunk
+    return _separate_glued_commands(chunk)
 
 
 def escape_latex(text: str) -> str:
@@ -197,7 +340,11 @@ def escape_latex(text: str) -> str:
     math_blocks: list[str] = []
 
     def _protect(match: "re.Match[str]") -> str:
-        math_blocks.append(match.group(0))
+        # 模型自撰的行内公式同样要规范化: `$0\leqz\leqL$` 里的 `\leqz` 会让整篇
+        # 编译报 `! Undefined control sequence.`（见 `_separate_glued_commands`）；
+        # `\text{...}` 里的数学记法同理会报 `! Missing $ inserted.`
+        math_blocks.append(_separate_glued_commands(
+            _fix_text_groups(match.group(0))))
         return f"\x00MATH{len(math_blocks) - 1}\x00"
 
     # 原有的 $...$ 先摘出来, 下面所有替换都不碰数学模式内部
@@ -307,14 +454,18 @@ def escape_math(text: str) -> str:
     # `%` 是注释符, `#` 是宏参数符, 在公式里都必须转义 —— 但**已经转义过的不能再转**
     # (见 `_escape_active`: `\#` 二次转义成 `\\#` 会让 display math 直接报错)
     body = _escape_active(_escape_active(body, "%"), "#")
-    return body
+    # `_fix_text_groups` 放在最后: Unicode 映射会把 `δ` 变成数学命令 `\delta`,
+    # 若它落在 `\text{...}` 里就成了"文本模式下的数学记法"→ `! Missing $ inserted.`
+    return _separate_glued_commands(_fix_text_groups(body))
 
 
 def _display_math(value: str) -> str:
     """Split long top-level formula groups; never split an existing TeX environment."""
     body = escape_math(value)
     if re.search(r"\\(?:begin|end)\{|\\\\", body):
-        return body
+        # 模型自己写了环境（如 `\begin{aligned}…\tag{3.1}\end{aligned}`）: 不拆行,
+        # 但编号若落在内部环境里必须提出来（amsmath: `\tag not allowed here`）
+        return _hoist_inner_tags(body)
     rows: list[str] = []
     start, depth = 0, 0
     index = 0
@@ -335,8 +486,54 @@ def _display_math(value: str) -> str:
         index += 1
     rows.append(body[start:].strip())
     if len(rows) > 1 and all(rows):
-        return r"\begin{aligned}" + r" \\ ".join("&" + row for row in rows) + r"\end{aligned}"
-    return body
+        # 用 aligned 包住各行时, 模型写在公式末尾的 `\tag` 会被卷进内部环境 ——
+        # 先摘出来, 拼到 `\end{aligned}` 之后（编号属于公式层, 不属于内部环境）
+        tags = [tag for row in rows for tag in _TAG_RE.findall(row)]
+        if tags:
+            rows = [_TAG_RE.sub("", row).strip() for row in rows]
+        return (r"\begin{aligned}" + r" \\ ".join("&" + row for row in rows)
+                + r"\end{aligned}" + "".join(tags))
+    return _hoist_inner_tags(body)
+
+
+#: 模型自撰的方程编号（`\tag{3.4}` 与 `\tag*{...}` 两种写法）。
+_TAG_RE = re.compile(r"\\tag\*?\{[^{}]*\}")
+#: 拆分后行首残留的分隔符（`;`、`\qquad`、`\quad`、`\;`、`\\` 换行等）。
+_LEADING_SEP_RE = re.compile(r"^(?:[\s;,]+|\\(?:qquad|quad|;|,|!)|\\\\)+")
+
+
+def _tagged_equations(value: str) -> list[str]:
+    """带模型自撰编号的公式块 → 逐条公式（每条保留自己的 `\\tag`）。
+
+    实测（`transfer-eval2` / `snap-c42273b2`）：模型常把一个数学块写成**多条带编号的
+    公式**（以 `;`/`\\qquad` 分隔，例如 `…\\tag{3.2};\\qquad …\\tag{3.3}`），
+    正文再按这些编号交叉引用（40 处 `见式（3.12）`）。而 `_display_math` 会把这些行
+    装进**同一个** `aligned`，整块又落在自动编号的 `equation` 里 —— amsmath 只允许
+    每个公式一个 `\\tag`，于是报
+    ``! Package amsmath Error: Multiple \\tag.`` 并**整篇编译失败**（该轮没有 PDF）。
+
+    这里按 `\\tag` 边界拆条，每条用 `equation*` 承载自己的编号：既消除与自动编号的
+    冲突，又保住模型编号与正文引用的一致性（**不能**简单删掉 `\\tag` 让渲染器重排，
+    那会让 40 处 `式（3.x）` 全部指错）。
+
+    无 `\\tag` 时返回空表，调用方沿用自动编号的 `equation`。
+    """
+    body = value or ""
+    matches = list(_TAG_RE.finditer(body))
+    if not matches:
+        return []
+    parts: list[str] = []
+    cursor = 0
+    for match in matches:
+        chunk = _LEADING_SEP_RE.sub("", body[cursor:match.start()]).strip()
+        if chunk:
+            parts.append(f"{chunk}{match.group(0)}")
+        cursor = match.end()
+    tail = _LEADING_SEP_RE.sub("", body[cursor:]).strip()
+    if tail:
+        # 末段没有编号：作为一条无编号公式附在后面，不丢内容
+        parts.append(tail)
+    return parts
 
 
 def render_latex(manuscript: Manuscript, *, author: str = "AI Research Team",
@@ -412,7 +609,16 @@ def _render_block(block: Block, citations: dict[str, int],
     if block.math:
         # 公式体**必须**先过 escape_math: 模型常直接写 Unicode (λ/≡/×/−/，),
         # 原样落进 equation 会缺字形, 落到文本模式还会中断整篇编译。
-        out += ["", f"\\begin{{equation}}{_display_math(block.math)}\\end{{equation}}", ""]
+        tagged = _tagged_equations(block.math)
+        if tagged:
+            # 模型自撰编号: 逐条 `equation*` 承载各自的 \tag —— 见 `_tagged_equations`
+            # 的实测说明 (整块塞进 equation 会报 Multiple \tag, 整篇编译失败)
+            out.append("")
+            out += [f"\\begin{{equation*}}{_display_math(part)}\\end{{equation*}}"
+                    for part in tagged]
+            out.append("")
+        else:
+            out += ["", f"\\begin{{equation}}{_display_math(block.math)}\\end{{equation}}", ""]
     marks = [f"\\cite{{ref{citations[ref.id]}}}"
              for kind, ref in zip(block.ref_kinds, block.refs)
              if kind == RefKind.source.value and ref.id in citations]
