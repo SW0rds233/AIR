@@ -57,6 +57,10 @@ class ScanRequestModel(BaseModel):
     label: str = ""
     max_files: int = 0
     max_bytes: int = 0
+    #: **已废弃**: 网页请求不能自行扩展授权根, 传非空值会被 400 拒绝。
+    #: 之所以保留字段而不是删掉它: pydantic 默认忽略未知字段, 删掉就等于又变回
+    #: "静默忽略" —— 照旧传该字段的调用方只会看到"全部被拒", 看不出原因。
+    #: 需要放行目录请用 `/api/library/pick-folder` 或服务端 `DATA_READ_ROOTS`。
     allow_roots: list[str] = Field(default_factory=list)
     folder_grants: list[str] = Field(default_factory=list)
 
@@ -316,6 +320,14 @@ def library_delete(source_set_id: str, delete_records: bool = False) -> dict[str
 def _scan_request(pi, req: ScanRequestModel):
     from src.kb.folder_picker import granted_roots
 
+    # 客户端不能自带授权根。此前是"静默忽略", 结果是照旧传 allow_roots 的调用方
+    # 只看到"文件全部被拒", 无从判断这个字段已废弃; 改为明确拒绝并给出替代做法。
+    if req.allow_roots:
+        raise HTTPException(
+            400,
+            "allow_roots 已废弃：网页请求不能自行扩展授权根。"
+            "请在页面用「从文件管理器选取文件夹」授权目标目录，"
+            "或在服务端配置 DATA_READ_ROOTS（分号分隔的绝对路径）。")
     try:
         roots = granted_roots(req.folder_grants)
     except ValueError as error:

@@ -115,7 +115,11 @@ export interface LibraryPathRequest {
   label: string;
   max_files: number;
   max_bytes: number;
-  allow_roots: string[];
+  /**
+   * 授权根只能由服务端签发：本机文件夹选择窗口给出 `folder_grants` 令牌，
+   * 或服务端配置 `DATA_READ_ROOTS`。页面**不发送** `allow_roots`
+   * （后端保留该字段正是为了对非空值返回 400，避免"静默忽略"）。
+   */
   folder_grants: string[];
 }
 
@@ -150,7 +154,6 @@ export function importKey(label: string, paths: string[]): string {
 export function emptyPathRequest(): LibraryPathRequest {
   return {
     paths: [], recursive: true, label: '', max_files: 0, max_bytes: 0,
-    allow_roots: [],
     folder_grants: [],
   };
 }

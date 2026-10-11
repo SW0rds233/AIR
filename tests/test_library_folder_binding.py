@@ -140,11 +140,20 @@ def test_native_choice_authorizes_only_the_chosen_external_folder(tmp_path, monk
     other = tmp_path / "other-folder"
     other.mkdir()
     (other / "secret.txt").write_text("未授权目录。", encoding="utf-8")
-    # HTTP 提交的 allow_roots 不能自行扩权。
+    # HTTP 提交的 allow_roots 不能自行扩权：**明确拒绝并说明替代做法**，
+    # 而不是静默忽略（静默忽略时调用方只看到"全部被拒"，无从知道字段已废弃）。
     denied = client.post("/api/library/scan", json={
         "paths": [str(external)], "allow_roots": [str(external)],
-    }).json()
-    assert denied["counts"]["ok"] == 0
+    })
+    assert denied.status_code == 400
+    assert "allow_roots" in denied.json()["detail"]
+    # 导入接口走同一条校验, 同样拒绝而不是悄悄扩权。
+    rejected = client.post("/api/library/import", json={
+        "paths": [str(external)], "label": "外部资料",
+        "allow_roots": [str(external)],
+    })
+    assert rejected.status_code == 400
+    assert "allow_roots" in rejected.json()["detail"]
 
     monkeypatch.setattr(folder_picker, "pick_folder", lambda: external)
     token = client.post("/api/library/pick-folder").json()["grant_token"]
