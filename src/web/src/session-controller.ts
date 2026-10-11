@@ -52,7 +52,7 @@ export interface SessionDeps {
   refreshArtifacts(): void;
   refreshContexts(): void;
   refreshHistorySelect(): void;
-  selectSourceSet?(sourceSetId: string): Promise<void>;
+  selectSourceSet?(sourceSetId: string, announce?: boolean): Promise<boolean>;
   loadArtifact(name: string): void;
 
   // 团队状态整体重置 (会话级)

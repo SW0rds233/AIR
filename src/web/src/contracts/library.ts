@@ -80,6 +80,12 @@ export interface LibraryImportReport {
   /** 当前对话绑定成功后的会话 ID；未选历史会话时为空。 */
   bound_session_id?: string;
   binding_error?: string;
+  /**
+   * 库的**规范 id**，即 `/api/sources` 里列出的那个值（磁盘目录名）。
+   * 用户输入的库名可能含空格等字符（实测 `星网 星链` → 目录 `星网_星链`），
+   * 因此选中资料库时必须用它，而不是用于回显的 `topic`。
+   */
+  source_set_id?: string;
 }
 
 /** `GET /api/library/{source_set_id}` 的返回 (`library_summary`)。 */

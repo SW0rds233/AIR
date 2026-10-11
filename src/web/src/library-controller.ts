@@ -149,7 +149,7 @@ export function createLibraryController(deps: LibraryControllerDeps = {}): Libra
         const merged = Boolean(imported?.library_existed);
         const binding = imported?.binding_error
           ? ` 当前对话未绑定：${imported.binding_error}`
-          : imported?.bound_session_id ? ' 已绑定当前对话。' : ' 已为下一次研究选中该库。';
+          : imported?.bound_session_id ? ' 已绑定当前对话。' : '';
         notify(
           cached
             ? `资料库「${label}」命中幂等缓存（目录内容未变，本次未重新导入）。` +
@@ -217,7 +217,8 @@ export interface LibrarySectionDeps {
   renderWorkspace(sources: any[]): void;
   /** 库列表变化后刷新资料源下拉框。 */
   refreshSourceSets(): void;
-  selectSourceSet(sourceSetId: string): Promise<void>;
+  /** 选中资料库; `announce` 为真时由实现方给出选中结果提示。返回是否选中成功。 */
+  selectSourceSet(sourceSetId: string, announce?: boolean): Promise<boolean>;
   currentSessionId(): string;
   writePaths(text: string): void;
   pickFolder?(): Promise<{ path: string; cancelled: boolean; grant_token: string }>;
@@ -274,7 +275,9 @@ export function createLibrarySection(deps: LibrarySectionDeps): LibrarySection {
     const sessionId = deps.currentSessionId();
     const result = await getController().commit(sessionId);
     if (result && !result.binding_error && deps.currentSessionId() === sessionId) {
-      await deps.selectSourceSet(result.topic);
+      // 必须用**规范 id**：`topic` 是回显用的原文（可能含空格），而下拉框里是
+      // 目录名（`星网 星链` → `星网_星链`）。用原文选不中，还会让下一次运行无绑定。
+      await deps.selectSourceSet(result.source_set_id || result.topic, true);
     }
     deps.setImportDisabled(!getController().canImport());
   }

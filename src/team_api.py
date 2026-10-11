@@ -235,25 +235,32 @@ def library_import(req: ImportRequestModel) -> dict[str, Any]:
 
         if not re.fullmatch(r"[0-9a-f]{32}", session_id) or not conversation_exists(session_id):
             raise HTTPException(404, "当前对话不存在，无法绑定资料库")
-    from src.kb.store import default_db_path
+    from src.kb.store import default_db_path, topic_dir
 
     existed = default_db_path(topic).is_file()
+    # 库的**规范 id** 是磁盘目录名 (`sanitize_filename(库名)`), 而 `/api/sources`
+    # 列出的正是目录名。用户输入的库名可能含空格等字符 (实测 `星网 星链` →
+    # 目录 `星网_星链`), 只回显原文会让前端在下拉框里找不到这个库, 于是
+    # "已导入" 之后又报 "未能在选择列表中找到该库", 下一次运行还会变成未绑定。
+    canonical_id = topic_dir(topic).name
 
     def with_binding(report: dict[str, Any]) -> dict[str, Any]:
         result = dict(report)
         result["library_existed"] = existed
+        result["source_set_id"] = canonical_id
         result["bound_session_id"] = ""
         result["binding_error"] = ""
         from src.kb.sources import validate_binding
 
-        check = validate_binding(topic)
+        check = validate_binding(canonical_id)
         if not check["ok"]:
             result["binding_error"] = check["reason"]
         elif session_id:
             from src.sessions.store import bind_conversation_library
 
             try:
-                bind_conversation_library(session_id, topic)
+                # 存规范 id: 恢复对话时前端要拿它去下拉框里选中, 必须是列表里的那个值。
+                bind_conversation_library(session_id, canonical_id)
             except KeyError:
                 result["binding_error"] = "当前对话已不存在，资料库已导入但未绑定"
             else:

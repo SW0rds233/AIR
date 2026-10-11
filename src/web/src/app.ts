@@ -272,18 +272,26 @@ function refreshSourceSets(preferredId?: string): Promise<void> {
   }).catch(() => {});
 }
 
-async function selectSourceSet(sourceSetId: string): Promise<void> {
+async function selectSourceSet(sourceSetId: string, announce = false): Promise<boolean> {
   await refreshSourceSets(sourceSetId);
   const sel = byId<HTMLSelectElement>('sourceset');
-  if (!sourceSetId) return;
+  if (!sourceSetId) return false;
   if (!sel || sel.value !== sourceSetId) {
-    addMsg('资料库已导入，但未能在选择列表中找到该库，请刷新资料库。', 'msg-error');
-    return;
+    // 列表里的 id 是库的**目录名**（规范化结果）：库名里的空格会变成下划线。
+    // 因此这里要告诉用户去哪儿找，而不是只说"没找到"。
+    if (announce) {
+      addMsg('资料库已导入，但未能自动选中「' + sourceSetId + '」。' +
+        '请在下方「资料库」下拉框里手动选择（列表显示的是规范化后的库名，' +
+        '例如空格会变成下划线）。', 'msg-error');
+    }
+    return false;
   }
   // 已选人工库应参与检索；保留“只用指定资料”或“两者结合”的既有偏好。
   const policy = byId<HTMLSelectElement>('sourcepolicy');
   if (policy?.value === 'autonomous') policy.value = 'both';
   onSourceSetChange();
+  if (announce) addMsg('已为下一次研究选中资料库「' + sourceSetId + '」。', 'msg-system');
+  return true;
 }
 
 function onSourceSetChange() {
