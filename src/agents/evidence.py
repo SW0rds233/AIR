@@ -682,6 +682,11 @@ def _topic_of(task: AgentTask, context: ContextPack,
         candidate = str(row.get("source_set_id", "") or "")
         if candidate:
             return candidate
+    # In a web conversation, autonomous retrieval writes to this conversation's
+    # library.  With no selected user library, local reads must use the same ID.
+    if task.session_id and task.source_policy == "both":
+        from src.utils.conversation_layout import conversation_topic
+        return conversation_topic(task.session_id)
     # Unbound autonomous studies in the same recognised field share one KB.
     # Unknown fields stay project-scoped rather than risking cross-field pollution.
     from src.rag.relevance_filter import resolve_domain

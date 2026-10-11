@@ -24,6 +24,8 @@ export function esc(text: unknown): string {
 /** 交付包里可反查性检查的结果 (`manifest.manuscript_traceability`)。 */
 export interface ManuscriptTraceability {
   ok?: boolean;
+  status?: string;
+  total_claims?: number;
   mapped?: Array<{ claim_id?: string; anchor?: string }>;
   unmapped_claims?: string[];
   missing_anchors?: string[];

@@ -148,11 +148,12 @@ def _traceability(snapshot: ResearchSnapshot, manuscript_md: str,
           and not unlabeled and not orphan_refs)
     return {
         "ok": ok, "checked": checked, "mapped": mapped,
-        "status": "not_applicable" if not core else "passed" if ok else "failed",
+        "status": "unverifiable" if not core else "passed" if ok else "failed",
         "unmapped_claims": unmapped, "missing_anchors": missing,
         "unlabeled_blocks": unlabeled, "orphan_claim_refs": sorted(set(orphan_refs)),
-        "core_claims": len(core),
-        "note": ("没有可核查的核心结论映射，不能据此认定论文结论已通过核验" if not core else
+        "core_claims": len(core), "total_claims": len(snapshot.claims),
+        "note": (f"登记了 {len(snapshot.claims)} 条候选命题，但没有已确定的核心结论，"
+                 "目前无法核验正文结论映射" if not core else
                  "真实正文的核心结论已反查到冻结快照对象" if ok else
                  "正文与快照的映射不完整，或缺少可核对的正文"),
     }

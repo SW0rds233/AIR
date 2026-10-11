@@ -188,7 +188,12 @@ limits nolimits displaystyle textstyle scriptstyle
 operatorname bmod pmod cdots ldots dots vdots ddots
 tag notag nonumber label ref eqref cite item itemize enumerate description
 begin end
+leqq geqq neqq llap ggg
 """.split())
+
+# 仅对容易与单个变量粘连的关系符作保守修复。未知控制词可能是合法宏，
+# 不能因为它有一个已知前缀就拆开（例如 \bigl、\caption、\multicolumn）。
+_GLUED_RELATION_COMMANDS: frozenset[str] = frozenset({"leq", "geq", "ll", "gg"})
 
 _CONTROL_WORD_RE = re.compile(r"\\([a-zA-Z]+)")
 #: 文本模式下**合法**的命令；其余反斜杠命令一律按"数学命令"处理。
@@ -290,15 +295,15 @@ def _separate_glued_commands(body: str) -> str:
     xelatex 带 `-halt-on-error` 只报第一个，但**整篇编译失败、没有 PDF** ——
     与 `\tag` 冲突同属"模型自撰 LaTeX 构造未被规范化"这一族。
 
-    只切**已知命令的最长前缀**，且整词已命中白名单时原样返回 —— 否则会把
-    `\textwidth` 切成 `\text width`。未知宏一律不动，交给编译如实暴露。
+    只修复关系符后粘连 1–2 个变量字母的高置信形态。其他未知宏保留原文，
+    交给编译如实暴露，避免把合法宏 `\bigl` 或 `\includegraphics` 改坏。
     """
     def _fix(match: "re.Match[str]") -> str:
         word = match.group(1)
         if word in _KNOWN_TEX_COMMANDS:
             return match.group(0)
         for cut in range(len(word) - 1, 1, -1):
-            if word[:cut] in _KNOWN_TEX_COMMANDS:
+            if word[:cut] in _GLUED_RELATION_COMMANDS and len(word) - cut <= 2:
                 return f"\\{word[:cut]} {word[cut:]}"
         return match.group(0)
 

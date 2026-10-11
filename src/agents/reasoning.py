@@ -525,8 +525,7 @@ class ReasoningAgent(AgentBase):
         文本相似也不等于支持), 因此这里:
 
         - 有已判定为支持/部分支持的来源时, 生成"该子问题有来源支持"的候选并附定位;
-        - 只有候选材料 (关系未定) 时, 生成"材料已收集、支持关系待判定"的候选 ——
-          这是**诚实的中间结论**, 不是"已证明";
+        - 只有候选材料 (关系未定) 时, 只返回覆盖说明，不把检索数量登记为科研命题;
         - 什么都没有时返回空列表 (调用方据此如实报未决)。
         """
         evidence = context.objects.get("evidence") or []
@@ -556,34 +555,14 @@ class ReasoningAgent(AgentBase):
                 "needs_check": False,
             })
         elif locatable:
-            # 材料已收集但支持关系未判定: 诚实记录, 不声称结论成立
-            claims.append({
-                "statement": f"关于「{clip(subject, 120)}」已取得 {len(locatable)} 条"
-                             f"可定位来源, 支持关系尚未判定",
-                "claim_type": "descriptive",
-                "reasoning": [
-                    ("规则综合: 命中材料具备可回到原文的定位, 但规则层不判定语义支持 "
-                     "(命中不等于支持)"),
-                    *[f"{clip(str(e.get('title', '')), 80)} @ {e.get('locator')}"
-                      for e in locatable[:5]],
-                ],
-                "premises": [clip(str(e.get("excerpt", "")), 200) for e in locatable[:5]],
-                "informal": True,
-                "support_refs": [str(e.get("source_id") or e.get("id") or "")
-                                 for e in locatable[:5]],
-                "needs_check": True,
-            })
+            # 检索覆盖是过程状态，不是有关研究对象的科学命题。
+            if not contradicting:
+                return [], (f"已取得 {len(locatable)} 条可定位来源，但支持关系尚未判定；"
+                            "需核读原文并判定支持/冲突后再形成命题")
         else:
-            claims.append({
-                "statement": f"关于「{clip(subject, 120)}」取得 {len(evidence)} 条材料, "
-                             f"但均无可用定位",
-                "claim_type": "descriptive",
-                "reasoning": ["规则综合: 命中材料没有可回到原文的定位, 不能作为引用依据"],
-                "premises": [],
-                "informal": True,
-                "support_refs": [],
-                "needs_check": True,
-            })
+            if not contradicting:
+                return [], (f"已取得 {len(evidence)} 条材料，但均无可用定位；"
+                            "这些材料只能登记为检索覆盖，不能形成命题")
         if contradicting:
             claims.append({
                 "statement": f"关于「{clip(subject, 120)}」存在相反证据",
