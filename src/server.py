@@ -1198,6 +1198,8 @@ def session_state(thread_id: str):
         "project_id": session.request.get("project_id", ""),
         "problem_id": session.request.get("problem_id", ""),
         "run_id": session.run_id,
+        "bound_source_set_id": (session.bound_source_set_id
+                                or session.request.get("source_set_id", "")),
         "event_seq": session.event_seq,
         "pending_interrupt_id": session.pending_interrupt_id,
         "answered_interrupts": list(session.answered_interrupts),
@@ -1288,6 +1290,7 @@ def resume_session(session_id: str):
         # `session.request` 读身份与资料, 先建图会让续跑的团队拿到空身份。
         request=stored_request,
     )
+    session.bound_source_set_id = str(record.get("bound_source_set_id", "") or "")
     session.created_at = record.get("created_at", session.created_at)
     # 恢复历史对话, 避免续跑落盘时用空 messages 覆盖历史记录
     session.messages = list(record.get("messages", []))

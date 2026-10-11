@@ -95,6 +95,7 @@ class Session:
         self.error: str | None = None
         self.messages: list[dict] = []
         self.request: dict = {}
+        self.bound_source_set_id: str = ""
         # F2: 当前等待中的 interrupt 稳定 ID 与已回答记录 (幂等 + 只接受等待态响应)
         self.pending_interrupt_id: str = ""
         self.answered_interrupts: list[str] = []

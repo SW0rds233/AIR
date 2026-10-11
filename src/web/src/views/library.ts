@@ -185,9 +185,16 @@ export function renderImportReport(report: LibraryImportReport | null | undefine
       '<b>未重新导入</b>。若你刚往同一目录新增了文件，请重新「扫描预览」后再导入' +
       '（服务端按内容签名判断，目录一变就会重新导入）。</div>'
     : report.ok
-      ? '<div class="lib-ok">导入完成：所有命中文件都已入库（幂等键防止重复计费）。</div>'
+      ? (report.library_existed
+        ? '<div class="lib-ok">已向同名资料库并入新文献，原有文献保留。</div>'
+        : '<div class="lib-ok">资料库已建立，所有命中文件均已处理。</div>')
       : '<div class="lib-warn">导入<b>未全部成功</b>：下面逐条列出被拒绝、失败或截断的文件。' +
         '已入库的部分保留，可修正路径后再次导入（同一文件不会重复入库）。</div>';
+  const binding = report.binding_error
+    ? `<div class="lib-warn">当前对话未绑定：${esc(report.binding_error)}</div>`
+    : report.bound_session_id
+      ? '<div class="lib-ok">已绑定当前对话；正在运行的研究仍使用启动时的资料范围，下一次研究生效。</div>'
+      : '';
   const groups: Array<[string, ImportedPathRow[]]> = [
     ['新增入库', report.imported ?? []],
     ['合并到既有文献', report.merged ?? []],
@@ -205,7 +212,7 @@ export function renderImportReport(report: LibraryImportReport | null | undefine
     ? '<div class="lib-warn">本次导入被<b>截断</b>（达到数量/体量上限）。</div>' : '';
   const notes = (report.notes ?? []).length
     ? '<div class="lib-notes">' + esc(report.notes.join('；')) + '</div>' : '';
-  return head + verdict + truncated + notes + blocks;
+  return head + verdict + binding + truncated + notes + blocks;
 }
 
 // ----------------------------------------------------------------------

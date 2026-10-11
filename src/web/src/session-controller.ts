@@ -52,6 +52,7 @@ export interface SessionDeps {
   refreshArtifacts(): void;
   refreshContexts(): void;
   refreshHistorySelect(): void;
+  selectSourceSet?(sourceSetId: string): Promise<void>;
   loadArtifact(name: string): void;
 
   // 团队状态整体重置 (会话级)
@@ -161,6 +162,8 @@ export function createSessionController(deps: SessionDeps): SessionController {
       // 字段必须在工作台查询之前写上, 否则 `workbenchTargetPid()` 会按草稿/空身份拒绝查询。
       fieldValue('projid', req.project_id || '');
       fieldValue('probid', req.problem_id || 'problem');
+      const library = String(rec.bound_source_set_id || req.source_set_id || '');
+      void deps.selectSourceSet?.(library);
       renderHistoryToLog(rec);
       deps.switchTab('workbench');
       if (req.project_id) deps.refreshWorkbench();

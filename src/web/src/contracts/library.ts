@@ -75,6 +75,11 @@ export interface LibraryImportReport {
   cached?: boolean;
   /** 服务端实际使用的缓存键（客户端键#内容签名）。 */
   cache_key?: string;
+  /** 同名库已存在时，本次会把新文献并入其中。 */
+  library_existed?: boolean;
+  /** 当前对话绑定成功后的会话 ID；未选历史会话时为空。 */
+  bound_session_id?: string;
+  binding_error?: string;
 }
 
 /** `GET /api/library/{source_set_id}` 的返回 (`library_summary`)。 */
@@ -111,6 +116,7 @@ export interface LibraryPathRequest {
   max_files: number;
   max_bytes: number;
   allow_roots: string[];
+  folder_grants: string[];
 }
 
 /** 导入请求 = 扫描请求 + 库名与幂等键。 */
@@ -118,6 +124,7 @@ export interface LibraryImportRequest extends LibraryPathRequest {
   topic: string;
   embed: boolean;
   idempotency_key: string;
+  session_id?: string;
 }
 
 /** 用户在多行文本框里逐行给出的路径 (兼容 Windows 换行与中英文分号)。 */
@@ -144,5 +151,6 @@ export function emptyPathRequest(): LibraryPathRequest {
   return {
     paths: [], recursive: true, label: '', max_files: 0, max_bytes: 0,
     allow_roots: [],
+    folder_grants: [],
   };
 }
