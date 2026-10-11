@@ -804,21 +804,22 @@ def _abstract_of(packet: WritingPacket) -> str:
     它只陈述两件事: 研究了什么, 以及当前登记到的结论状态。绝不把候选说成结论 ——
     这个函数是降级路径的一部分, 而"没有模型就把候选写成定论"正是最危险的那种失败。
     """
-    settled = [c for c in packet.claims
-               if str(c.get("status", "")) in ("supported", "refuted")]
+    supported = [c for c in packet.claims if str(c.get("status", "")) == "supported"]
+    refuted = [c for c in packet.claims if str(c.get("status", "")) == "refuted"]
     pending = [c for c in packet.claims
                if str(c.get("status", "")) not in ("supported", "refuted")]
     from src.utils.file_utils import derive_topic
 
     parts = [f"本文研究{derive_topic(packet.main_question or packet.original_request)}。"]
-    if settled:
-        for claim in settled[:3]:
-            status = "已确证" if str(claim.get("status")) == "supported" else "已被反例否决"
-            parts.append(f"当前登记到 {len(settled)} 条{status}的结论, 例如: "
-                         f"{clip(str(claim.get('statement', '')), 200)}。")
+    if supported:
+        parts.append(f"当前有 {len(supported)} 条获支持的命题，例如："
+                     f"{clip(str(supported[0].get('statement', '')), 200)}。")
+    if refuted:
+        parts.append(f"另有 {len(refuted)} 条命题已被反例否决，例如："
+                     f"{clip(str(refuted[0].get('statement', '')), 200)}。")
     if pending:
         parts.append(f"另有 {len(pending)} 条结论尚未定论, 正文按候选状态如实标注。")
-    if not settled and not pending:
+    if not supported and not refuted and not pending:
         parts.append("本次运行未登记到可陈述的结论; 该状态如实记录, 不是零结果。")
     if packet.unresolved:
         parts.append(f"存在 {len(packet.unresolved)} 项未决事宜, 见末节。")

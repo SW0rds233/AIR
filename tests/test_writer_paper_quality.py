@@ -41,6 +41,14 @@ def test_writer_outline_marks_unverified_work_as_research_framework():
     assert any("文献" in heading or "相关研究" in heading for heading in headings)
     assert not any("实证结果" in heading or "已证实结果" in heading for heading in headings)
     assert build_paper_outline(WritingPacket())[4]["heading"] == "证据现状与未决问题"
+    from src.agents.writing import _abstract_of
+
+    mixed = WritingPacket(claims=[
+        {"status": "supported", "statement": "命题甲成立"},
+        {"status": "refuted", "statement": "命题乙不成立"},
+    ])
+    summary = _abstract_of(mixed)
+    assert "1 条获支持" in summary and "1 条命题已被反例否决" in summary
 
 
 def test_writer_drafts_sections_from_registered_materials_and_targeted_review():
