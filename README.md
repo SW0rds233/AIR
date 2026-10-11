@@ -32,7 +32,12 @@
 - **任务持久化与一致性**：任务生命周期落盘、幂等续跑、`read-set` 版本检查（依据 v2 产出而对象已到 v3 时**拒绝合入**并记录过期）；图状态只保存身份与引用，正文留在产物里
 - **团队工作台（前端）**：`ResearchStore` 一份状态（selection / entities / transport / ui 各有归属）；连接状态与运行状态分开显示（**离线不等于后台已停止**）；会话级事件游标、按 `seq` 去重、缺口要求重新同步而不是把页面停在"完成"；团队状态条按角色聚合任务数，失败/受阻原因直接可见
 - **按用户指定路径建库**：`POST /api/library/scan`（只预览）→ `POST /api/library/import`（只读引用，**不复制**用户文件）；未授权路径与 `.env`/`*.key` 等敏感目标一律拒绝并给原因；原件被移动后标记 stale
-- **会话文献目录**：Web 研究新下载的网络 PDF 与自动入库的文献数据库按会话保存；人工导入的共享资料库继续独立登记引用。目录说明见 [`docs/会话资料存储.md`](docs/会话资料存储.md)。
+- **文献归档：会话 / 领域共享 / 人工库三者分开**：
+  - **Web 会话**：新下载的网络 PDF 与自动入库的文献数据库按会话保存到 `data/conversations/<session_id>/literature/`，会话之间互不写入；
+  - **无会话的自主检索（CLI 等）**：按**领域共享库** `shared-<领域>` 归档，同领域的后续运行可复用；领域词表未命中时按检索规划的字段标识共享（`shared-<field_key>`），都识别不出则退回 `research-<project>-<problem>`；
+  - **人工导入的资料库**（`data/kb/<资料库名>/`）：独立登记引用，会话的自动检索结果**不写回**；显式 `--source-set-id` 绑定优先于上述默认，且自主检索不会去用无关的人工命名库。
+
+  目录与清理范围见 [`docs/会话资料存储.md`](docs/会话资料存储.md)；检索式的领域扩展见 `src/rag/domain_terms/<领域>.md`。
 - **审阅与过程可见**：审阅阈值在每次请求中设置（百分制，默认 80），原则性学术问题直接打回；每轮任务的计划、研究对象、稿件草稿与审阅意见逐步保存于 `outputs/research/<project_id>/<run_id>/progress/`，可在当前运行的文件页查看。
 
 离线（无 LLM）时团队走**确定性实现**：检索走 KB/外部检索并留下覆盖记录、综合按已登记证据关系生成候选、写作渲染已登记结果并保留完整追溯；判定层仍为零 LLM。
@@ -352,9 +357,9 @@ AIR/
 │       │   └── team-controller.ts  # 团队视图接入 (只读, 单向同步旧状态)
 │       ├── assets/          #   构建出的 JS/CSS (入库, server.py 从这里提供)
 │       └── dist/            #   构建出的页面 (不入库, 新克隆需 npm run build, 见「快速开始」)
-├── docs/                    # 项目文档 (进度.md / 计划书.md / 合并计划.md)
+├── docs/                    # 项目文档 (进度.md / 计划书.md / 合并计划.md / 会话资料存储.md)
 ├── evals/                   # 验收用例 (cases/) 与审查报告归档 (reports/)
-├── data/                    # 运行时数据 (chroma/pdfs/conversations/checkpoints/kb/research)
+├── data/                    # 运行时数据 (conversations/<会话ID>/literature/ | kb/ | pdfs/ | chroma/ | research/ | checkpoints/)
 ├── outputs/                 # 统一团队产物 (研究包按 project/snapshot 隔离)
 ├── setup_env.bat            # 一键搭建环境
 ├── start.bat                # 一键启动 Web 界面
