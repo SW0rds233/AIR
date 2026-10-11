@@ -14,7 +14,9 @@ def build_paper_outline(packet: WritingPacket) -> list[dict[str, str | int]]:
     """Plan the argument from the registered result state, not a claimed result."""
     settled = any(str(row.get("status")) in {"supported", "refuted"}
                   for row in packet.claims)
-    finding = "研究结果与证据链" if settled else "候选机制与可检验命题"
+    finding = ("研究结果与证据链" if settled else
+               "候选机制与可检验命题" if packet.claims or packet.models else
+               "证据现状与未决问题")
     return [
         {"heading": "引言", "level": 1, "role": "introduction",
          "purpose": "提出研究问题、研究范围、贡献与本文结构；不汇报修订过程。"},
@@ -26,7 +28,9 @@ def build_paper_outline(packet: WritingPacket) -> list[dict[str, str | int]]:
          "purpose": "解释已登记模型、条件、公式和识别边界；不填造未知参数。"},
         {"heading": finding, "level": 1, "role": "result",
          "purpose": ("只呈现已确定结论及其证书，并区分反例与支持。" if settled else
-                     "提出待核验机制、可证伪含义和现有证据边界，不宣称已测得效应。")},
+                     "提出待核验机制、可证伪含义和现有证据边界，不宣称已测得效应。"
+                     if packet.claims or packet.models else
+                     "如实汇总已登记证据及当前未决问题；没有模型或命题时不编造机制。")},
         {"heading": "讨论与局限", "level": 1, "role": "discussion",
          "purpose": "比较解释、适用域、反事实与未决项；说明进一步验证所需资料。"},
         {"heading": "结论", "level": 1, "role": "conclusion",

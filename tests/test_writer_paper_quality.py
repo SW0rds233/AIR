@@ -40,6 +40,7 @@ def test_writer_outline_marks_unverified_work_as_research_framework():
     assert "method" in roles and "discussion" in roles
     assert any("文献" in heading or "相关研究" in heading for heading in headings)
     assert not any("实证结果" in heading or "已证实结果" in heading for heading in headings)
+    assert build_paper_outline(WritingPacket())[4]["heading"] == "证据现状与未决问题"
 
 
 def test_writer_drafts_sections_from_registered_materials_and_targeted_review():
