@@ -15,13 +15,15 @@ from __future__ import annotations
 """
 
 from src.sessions.controller import Session
-from src.utils.conversation_store import save_conversation
+from src.utils.conversation_store import load_conversation, save_conversation
 
 __all__ = [
     "SESSIONS",
     "final_summary",
     "persist_session",
     "session_record",
+    "conversation_exists",
+    "bind_conversation_library",
     "shutdown_sessions",
 ]
 
@@ -78,6 +80,8 @@ def session_record(session: Session) -> dict:
         "summary": final_summary(session.final_state) if session.final_state else {},
         "messages": list(session.messages),
         "request": dict(session.request),
+        "bound_source_set_id": (session.bound_source_set_id
+                                or str(session.request.get("source_set_id", "") or "")),
     }
 
 
@@ -87,6 +91,30 @@ def persist_session(session: Session) -> None:
         save_conversation(session.session_id, session_record(session))
     except Exception:  # noqa: BLE001 - 落盘失败不得影响研究本身
         pass
+
+
+def conversation_exists(session_id: str) -> bool:
+    return (any(session.session_id == session_id for session in SESSIONS.values())
+            or load_conversation(session_id) is not None)
+
+
+def bind_conversation_library(session_id: str, source_set_id: str) -> None:
+    """Record a library choice without rewriting the research run's input snapshot.
+
+    A running team's source scope was fixed when that run started.  The new
+    choice is persisted for the conversation and restored in the UI; it takes
+    effect when the user starts another run from that UI selection.
+    """
+    for session in SESSIONS.values():
+        if session.session_id == session_id:
+            session.bound_source_set_id = source_set_id
+            save_conversation(session_id, session_record(session))
+            return
+    record = load_conversation(session_id)
+    if record is None:
+        raise KeyError(session_id)
+    record["bound_source_set_id"] = source_set_id
+    save_conversation(session_id, record)
 
 
 def shutdown_sessions() -> int:

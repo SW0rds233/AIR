@@ -254,11 +254,11 @@ function copyProjectId() {
 }
 
 /* ---------------- 资料源绑定 (计划书 §3 R0) ---------------- */
-function refreshSourceSets() {
+function refreshSourceSets(preferredId?: string): Promise<void> {
   const sel = byId<HTMLSelectElement>('sourceset')!;
-  if (!sel) return;
-  pageApi().json(ENDPOINTS.sources).then((d: any) => {
-    const prev = sel.value;
+  if (!sel) return Promise.resolve();
+  return pageApi().json(ENDPOINTS.sources).then((d: any) => {
+    const prev = preferredId ?? sel.value;
     sel.innerHTML = '<option value="">（不绑定，按主题名匹配）</option>';
     (d.sources || []).forEach((s: any) => {
       const opt = document.createElement('option');
@@ -270,6 +270,20 @@ function refreshSourceSets() {
     sel.value = prev;
     onSourceSetChange();
   }).catch(() => {});
+}
+
+async function selectSourceSet(sourceSetId: string): Promise<void> {
+  await refreshSourceSets(sourceSetId);
+  const sel = byId<HTMLSelectElement>('sourceset');
+  if (!sourceSetId) return;
+  if (!sel || sel.value !== sourceSetId) {
+    addMsg('资料库已导入，但未能在选择列表中找到该库，请刷新资料库。', 'msg-error');
+    return;
+  }
+  // 已选人工库应参与检索；保留“只用指定资料”或“两者结合”的既有偏好。
+  const policy = byId<HTMLSelectElement>('sourcepolicy');
+  if (policy?.value === 'autonomous') policy.value = 'both';
+  onSourceSetChange();
 }
 
 function onSourceSetChange() {
@@ -309,6 +323,9 @@ function library(): LibrarySection {
     renderWorkspace: (sources) => setHtml('libworkspace',
       renderLibraryWorkspace(sources, libraryDetails)),
     refreshSourceSets: () => refreshSourceSets(),
+    selectSourceSet,
+    currentSessionId: () => selectionOf().sessionId || '',
+    writePaths: (text) => setVal('libpaths', text),
     setImportDisabled: (disabled) => setDisabled('btn-lib-import', disabled),
     readPaths: () => val('libpaths', ''),
     readLabel: () => val('liblabel', ''),
@@ -717,6 +734,7 @@ const sessions: SessionController = createSessionController({
   refreshArtifacts: () => refreshArtifacts(),
   refreshContexts: () => refreshContexts(),
   refreshHistorySelect: () => sessions.refreshHistorySelect(),
+  selectSourceSet,
   loadArtifact: (name) => loadArtifact(name),
   resetTeam: () => { resetTeamStore(); teamCache = null; },
 });

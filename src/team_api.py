@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from src.agents.registry import describe_team
@@ -58,12 +58,14 @@ class ScanRequestModel(BaseModel):
     max_files: int = 0
     max_bytes: int = 0
     allow_roots: list[str] = Field(default_factory=list)
+    folder_grants: list[str] = Field(default_factory=list)
 
 
 class ImportRequestModel(ScanRequestModel):
     topic: str = ""
     embed: bool = False
     idempotency_key: str = ""
+    session_id: str = ""
 
 
 # ----------------------------------------------------------------------
@@ -161,6 +163,37 @@ def run_team(req: TeamRunRequest) -> dict[str, Any]:
 # ----------------------------------------------------------------------
 # 资料库 (§13)
 # ----------------------------------------------------------------------
+@router.post("/api/library/pick-folder")
+def library_pick_folder(request: Request) -> dict[str, Any]:
+    """在运行 AIR 的本机打开系统文件夹选择器。"""
+    from ipaddress import ip_address
+    from urllib.parse import urlsplit
+
+    def is_loopback(host: str) -> bool:
+        try:
+            return ip_address(host).is_loopback
+        except ValueError:
+            return host == "localhost"
+
+    peer = request.client.host if request.client else ""
+    origin = request.headers.get("origin", "")
+    origin_host = urlsplit(origin).hostname if origin else ""
+    if not is_loopback(peer) or (origin and not is_loopback(origin_host or "")):
+        raise HTTPException(403, "文件夹选择器只允许从本机页面打开")
+    from src.kb.folder_picker import issue_grant, pick_folder
+
+    try:
+        selected = pick_folder()
+    except Exception as error:  # GUI 不可用时保留手动填路径入口
+        raise HTTPException(503, f"无法打开文件夹选择器: {error}") from error
+    try:
+        grant_token = issue_grant(selected) if selected else ""
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from error
+    return {"path": str(selected) if selected else "", "cancelled": selected is None,
+            "grant_token": grant_token}
+
+
 @router.post("/api/library/scan")
 def library_scan(req: ScanRequestModel) -> dict[str, Any]:
     """只扫描不导入: 返回逐条状态 (含 denied 与截断提示) 供用户**先预览再确认**。"""
@@ -186,9 +219,43 @@ def library_import(req: ImportRequestModel) -> dict[str, Any]:
     from src.kb import path_import as pi
     from src.kb.store import KBStore
 
-    topic = (req.topic or req.label or "").strip()
+    topic = req.topic.strip() or req.label.strip()
     if not topic:
         raise HTTPException(400, "topic 或 label 至少填一项 (库名)")
+    if req.topic.strip() and req.label.strip() and req.topic.strip() != req.label.strip():
+        raise HTTPException(400, "库名与导入主题不一致")
+    session_id = req.session_id.strip()
+    if session_id:
+        import re
+        from src.sessions.store import conversation_exists
+
+        if not re.fullmatch(r"[0-9a-f]{32}", session_id) or not conversation_exists(session_id):
+            raise HTTPException(404, "当前对话不存在，无法绑定资料库")
+    from src.kb.store import default_db_path
+
+    existed = default_db_path(topic).is_file()
+
+    def with_binding(report: dict[str, Any]) -> dict[str, Any]:
+        result = dict(report)
+        result["library_existed"] = existed
+        result["bound_session_id"] = ""
+        result["binding_error"] = ""
+        from src.kb.sources import validate_binding
+
+        check = validate_binding(topic)
+        if not check["ok"]:
+            result["binding_error"] = check["reason"]
+        elif session_id:
+            from src.sessions.store import bind_conversation_library
+
+            try:
+                bind_conversation_library(session_id, topic)
+            except KeyError:
+                result["binding_error"] = "当前对话已不存在，资料库已导入但未绑定"
+            else:
+                result["bound_session_id"] = session_id
+        return result
+
     scan_request = _scan_request(pi, req)
     scan = pi.scan_paths(scan_request)
     signature = pi.scan_signature(scan)
@@ -205,7 +272,7 @@ def library_import(req: ImportRequestModel) -> dict[str, Any]:
                 f"{existing.get('batch_id') or '未知'}, 目录内容与上次完全一致)。"
                 "若刚往该目录新增了文件, 请重新「扫描预览」后再次导入。",
             ]
-            return payload
+            return with_binding(payload)
     store = KBStore(topic)
     try:
         report = pi.import_paths(store, topic, scan_request, embed=req.embed, scan=scan)
@@ -216,7 +283,7 @@ def library_import(req: ImportRequestModel) -> dict[str, Any]:
     payload["cache_key"] = cache_key
     if cache_key:
         _remember_import_report(topic, cache_key, payload)
-    return payload
+    return with_binding(payload)
 
 
 @router.get("/api/library/{source_set_id}")
@@ -247,11 +314,18 @@ def library_delete(source_set_id: str, delete_records: bool = False) -> dict[str
 # 内部
 # ----------------------------------------------------------------------
 def _scan_request(pi, req: ScanRequestModel):
+    from src.kb.folder_picker import granted_roots
+
+    try:
+        roots = granted_roots(req.folder_grants)
+    except ValueError as error:
+        raise HTTPException(410, str(error)) from error
     kwargs: dict[str, Any] = {
         "paths": list(req.paths),
         "recursive": req.recursive,
         "label": req.label,
-        "allow_roots": list(req.allow_roots),
+        # HTTP 客户端不能自行扩展授权根；只有本机系统选择窗口签发的短期授权可用。
+        "allow_roots": roots,
     }
     if req.max_files > 0:
         kwargs["max_files"] = req.max_files

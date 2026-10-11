@@ -21,11 +21,12 @@ import {
   type LibraryImportReport,
   type LibraryScanReport,
 } from './contracts/library';
-import { ENDPOINTS } from './api/research-client';
+import { ENDPOINTS, client as researchClient } from './api/research-client';
 
 export const LIBRARY_API = {
   scan: ENDPOINTS.libraryScan,
   import: ENDPOINTS.libraryImport,
+  pickFolder: ENDPOINTS.libraryPickFolder,
   detail: (sourceSetId: string) => ENDPOINTS.library(sourceSetId),
   remove: (sourceSetId: string) => ENDPOINTS.library(sourceSetId),
 } as const;
@@ -43,8 +44,9 @@ export interface LibraryControllerDeps {
 }
 
 export interface LibraryController {
-  scan(rawPaths: string, label: string): Promise<LibraryScanReport | null>;
-  commit(): Promise<LibraryImportReport | null>;
+  scan(rawPaths: string, label: string, folderGrants?: string[]): Promise<LibraryScanReport | null>;
+  commit(sessionId?: string): Promise<LibraryImportReport | null>;
+  invalidate(): void;
   remove(sourceSetId: string): Promise<LibraryDeleteResult | null>;
   detail(sourceSetId: string): Promise<LibraryDetail | null>;
   pendingPaths(): string[];
@@ -80,14 +82,21 @@ export function createLibraryController(deps: LibraryControllerDeps = {}): Libra
   }
 
   return {
-    async scan(rawPaths: string, label: string) {
+    invalidate() {
+      scanned = null;
+      imported = null;
+    },
+    async scan(rawPaths: string, label: string, folderGrants: string[] = []) {
       if (busy) return null;
+      scanned = null;
+      imported = null;
       const paths = parsePaths(rawPaths);
       if (!paths.length) {
         notify('请先填入至少一个本机文件或文件夹路径（每行一条）。', 'msg-error');
         return null;
       }
-      request = { ...emptyPathRequest(), paths, label: String(label || '').trim() };
+      request = { ...emptyPathRequest(), paths, label: String(label || '').trim(),
+                  folder_grants: [...folderGrants] };
       busy = true;
       try {
         const body = await fetchJson(LIBRARY_API.scan, {
@@ -110,7 +119,7 @@ export function createLibraryController(deps: LibraryControllerDeps = {}): Libra
       }
     },
 
-    async commit() {
+    async commit(sessionId = '') {
       if (busy) return null;
       if (!scanned) {
         notify('还没有扫描结果：请先「扫描预览」确认将要入库的文件。', 'msg-error');
@@ -130,20 +139,25 @@ export function createLibraryController(deps: LibraryControllerDeps = {}): Libra
             topic: label,
             embed: false,
             idempotency_key: importKey(label, request.paths),
+            session_id: sessionId,
           }),
         });
         imported = body as LibraryImportReport;
         const ok = Boolean(imported?.ok);
         // 命中幂等缓存时**不得**报"导入完成": 服务端这次没有重新导入任何文件
         const cached = Boolean(imported?.cached);
+        const merged = Boolean(imported?.library_existed);
+        const binding = imported?.binding_error
+          ? ` 当前对话未绑定：${imported.binding_error}`
+          : imported?.bound_session_id ? ' 已绑定当前对话。' : ' 已为下一次研究选中该库。';
         notify(
           cached
             ? `资料库「${label}」命中幂等缓存（目录内容未变，本次未重新导入）。` +
-              '若刚新增了文件，请重新「扫描预览」后再导入。'
-            : ok ? `资料库「${label}」导入完成。`
+              '若刚新增了文件，请重新「扫描预览」后再导入。' + binding
+            : ok ? `资料库「${label}」${merged ? '已并入新文献' : '已建立'}。` + binding
                  : `资料库「${label}」导入未全部成功：有文件被拒绝、失败或被截断，` +
-                   '请查看清单后处理（已入库部分保留）。',
-          'msg-system');
+                   '请查看清单后处理（已入库部分保留）。' + binding,
+          !ok || imported?.binding_error ? 'msg-error' : 'msg-system');
         deps.renderResult?.(imported as LibraryImportReport);
         deps.refresh?.();
         return imported;
@@ -203,6 +217,10 @@ export interface LibrarySectionDeps {
   renderWorkspace(sources: any[]): void;
   /** 库列表变化后刷新资料源下拉框。 */
   refreshSourceSets(): void;
+  selectSourceSet(sourceSetId: string): Promise<void>;
+  currentSessionId(): string;
+  writePaths(text: string): void;
+  pickFolder?(): Promise<{ path: string; cancelled: boolean; grant_token: string }>;
   setImportDisabled(disabled: boolean): void;
   readPaths(): string;
   readLabel(): string;
@@ -215,6 +233,7 @@ export interface LibrarySection {
   controller(): LibraryController;
   scan(): Promise<void>;
   commit(): Promise<void>;
+  chooseFolder(): Promise<void>;
   refreshWorkspace(): Promise<void>;
   remove(sourceSetId: string): Promise<void>;
   bind(): void;
@@ -228,6 +247,7 @@ export interface LibrarySection {
  */
 export function createLibrarySection(deps: LibrarySectionDeps): LibrarySection {
   let controller: LibraryController | null = null;
+  const folderGrants = new Map<string, string>();
 
   function getController(): LibraryController {
     if (controller) return controller;
@@ -236,7 +256,6 @@ export function createLibrarySection(deps: LibrarySectionDeps): LibrarySection {
       renderPreview: (report) => deps.setPreviewHtml(deps.renderScanPreview(report)),
       renderResult: (report) => deps.setPreviewHtml(deps.renderImportReport(report)),
       refresh: () => {
-        deps.refreshSourceSets();
         void refreshWorkspace();
       },
     });
@@ -244,13 +263,41 @@ export function createLibrarySection(deps: LibrarySectionDeps): LibrarySection {
   }
 
   async function scan(): Promise<void> {
-    const report = await getController().scan(deps.readPaths(), deps.readLabel());
+    const paths = deps.readPaths();
+    const grants = parsePaths(paths).map((path) => folderGrants.get(path)).filter(
+      (token): token is string => Boolean(token));
+    const report = await getController().scan(paths, deps.readLabel(), grants);
     if (report) deps.setImportDisabled(!getController().canImport());
   }
 
   async function commit(): Promise<void> {
-    await getController().commit();
+    const sessionId = deps.currentSessionId();
+    const result = await getController().commit(sessionId);
+    if (result && !result.binding_error && deps.currentSessionId() === sessionId) {
+      await deps.selectSourceSet(result.topic);
+    }
     deps.setImportDisabled(!getController().canImport());
+  }
+
+  async function chooseFolder(): Promise<void> {
+    try {
+      const result = await (deps.pickFolder
+        ? deps.pickFolder()
+        : researchClient().json<{ path: string; cancelled: boolean; grant_token: string }>(
+            LIBRARY_API.pickFolder, { method: 'POST' }));
+      if (!result.path || result.cancelled) return;
+      if (result.grant_token) folderGrants.set(result.path, result.grant_token);
+      const existing = deps.readPaths().trim();
+      const paths = parsePaths(existing);
+      if (!paths.includes(result.path)) {
+        deps.writePaths(existing ? `${existing}\n${result.path}` : result.path);
+      }
+      getController().invalidate();
+      deps.setImportDisabled(true);
+      deps.notify('已添加所选文件夹，请扫描预览后确认导入。');
+    } catch (error) {
+      deps.notify('文件夹选择失败：' + String(error) + '。也可手动填写路径。', 'msg-error');
+    }
   }
 
   async function refreshWorkspace(): Promise<void> {
@@ -268,6 +315,7 @@ export function createLibrarySection(deps: LibrarySectionDeps): LibrarySection {
     if (!id) return;
     const outcome = await getController().remove(id);
     if (outcome && outcome.ok) deps.deleteDetail(id);
+    deps.refreshSourceSets();
     await refreshWorkspace();
   }
 
@@ -278,8 +326,15 @@ export function createLibrarySection(deps: LibrarySectionDeps): LibrarySection {
     };
     on('btn-lib-scan', 'click', () => { void scan(); });
     on('btn-lib-import', 'click', () => { void commit(); });
-    on('libpaths', 'input', () => deps.setImportDisabled(true));
+    on('btn-lib-choose-folder', 'click', () => { void chooseFolder(); });
+    const invalidate = () => {
+      getController().invalidate();
+      deps.setImportDisabled(true);
+    };
+    on('libpaths', 'input', invalidate);
+    on('liblabel', 'input', invalidate);
   }
 
-  return { controller: getController, scan, commit, refreshWorkspace, remove, bind };
+  return { controller: getController, scan, commit, chooseFolder,
+           refreshWorkspace, remove, bind };
 }

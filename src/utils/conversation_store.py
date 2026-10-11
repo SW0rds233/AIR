@@ -65,6 +65,7 @@ def list_conversations() -> list[dict]:
             "created_at": data.get("created_at", ""),
             "updated_at": data.get("updated_at", ""),
             "status": data.get("status", ""),
+            "bound_source_set_id": data.get("bound_source_set_id", ""),
             "summary": data.get("summary", {}),
             "message_count": len(data.get("messages", [])),
         })

@@ -228,6 +228,7 @@ export const ENDPOINTS = {
   // 资料库接入 (§13.4): 扫描 / 导入 / 详情 / 解除登记
   libraryScan: '/api/library/scan',
   libraryImport: '/api/library/import',
+  libraryPickFolder: '/api/library/pick-folder',
   library: (sourceSetId: string) =>
     `/api/library/${encodeURIComponent(sourceSetId)}`,
 } as const;
