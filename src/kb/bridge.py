@@ -271,10 +271,12 @@ def _harvest_external(queries: list[str], policy: SourcePolicy, coverage: Retrie
     fetched: dict[str, dict] = {}
     from src.kb.store import KBStore, default_db_path
 
+    from src.utils.conversation_layout import session_id_from_topic
+
     cached_store = KBStore(topic, create_if_missing=False) if default_db_path(topic).exists() else None
     successful_queries: dict[str, int] = {}
     for query in queries:
-        if cached_store is not None and cached_store.query_recently_searched(query) \
+        if session_id_from_topic(topic) is None and cached_store is not None and cached_store.query_recently_searched(query) \
                 and cached_store.search_keyword(query, limit=1):
             coverage.executed = True
             coverage.uncovered.append(f"查询「{query}」复用同领域已入库结果；7 天后可刷新外检")
@@ -385,6 +387,7 @@ def _download_fulltext_for(papers, *, topic: str, per_query: int,
     try:
         from src.config import PDF_DOWNLOAD_LIMIT
         from src.tools.pdf_fetcher import download_pdfs_for_papers
+        from src.utils.conversation_layout import pdf_dir, session_id_from_topic
     except Exception as e:  # noqa: BLE001 - 工具不可用时退回元数据入库
         coverage.failures.append(f"全文下载工具不可用: {type(e).__name__}: {e}")
         return candidates
@@ -405,7 +408,13 @@ def _download_fulltext_for(papers, *, topic: str, per_query: int,
     if existing_store is not None:
         existing_store.close()
     try:
-        with_pdf = download_pdfs_for_papers(missing[:limit], limit=limit) if missing else []
+        session_id = session_id_from_topic(topic)
+        destination = pdf_dir(session_id) if session_id else None
+        if destination and missing:
+            destination.mkdir(parents=True, exist_ok=True)
+        with_pdf = (download_pdfs_for_papers(missing[:limit], limit=limit,
+                                            save_dir=destination)
+                    if missing else [])
     except Exception as e:  # noqa: BLE001 - 下载失败不得中断研究
         coverage.failures.append(f"全文下载失败: {type(e).__name__}: {e}")
         return candidates
@@ -447,6 +456,7 @@ def gather_sources(
     contract: ProblemContract | None,
     *,
     topic: str = "",
+    external_topic: str = "",
     policy: SourcePolicy = SourcePolicy.user_kb,
     claim: Claim | None = None,
     gap_type: str = "",
@@ -484,15 +494,21 @@ def gather_sources(
     external_items: list[SourceEvidence] = []
     if policy in (SourcePolicy.autonomous, SourcePolicy.both):
         topic = topic or stable_id("research-kb", _claim_goal(claim), contract.goal if contract else "")
-        external_items = _harvest_external(queries, policy, coverage, topic=topic, search_fn=search_fn,
+        external_items = _harvest_external(queries, policy, coverage,
+                                          topic=external_topic or topic, search_fn=search_fn,
                                           per_query=per_query, ingest=ingest)
 
     refs: list[SourceRef] = []
     # 自主检索刚入库的资料, 与用户资料库走同一条检索路径 (这就是"合并"的含义)
     owned_service = service is None
     service = service if service is not None else _open_service(topic)
-    # autonomous may reuse its own research/shared cache, never an unrelated user KB.
-    if policy is SourcePolicy.autonomous and not topic.startswith(("shared-", "research-")):
+    # Autonomous studies may reuse their own session library or a legacy
+    # research cache, but never an unrelated manually named source library.
+    from src.utils.conversation_layout import session_id_from_topic
+
+    if (policy is SourcePolicy.autonomous
+            and not (topic.startswith(("shared-", "research-"))
+                     or session_id_from_topic(topic))):
         service_for_search = None
     else:
         service_for_search = service
@@ -529,6 +545,24 @@ def gather_sources(
         uncovered_note = "没有可用的用户资料库 (未绑定或为空)"
         if uncovered_note not in coverage.uncovered:
             coverage.uncovered.append(uncovered_note)
+
+    # In "both" mode the bound manual library and this session's machine
+    # library are separate. Search the latter as well, including when the
+    # external engine returned no new hits during a later retrieval step.
+    if policy is SourcePolicy.both and external_topic and external_topic != topic:
+        session_service = _open_service(external_topic)
+        if session_service is not None:
+            try:
+                for query in queries:
+                    outcome = session_service.search(RetrievalRequest(
+                        query=query, claim_id=claim.id if claim else "",
+                        gap_type=gap_type, max_results=k))
+                    coverage.failures.extend(str(f) for f in outcome.failures)
+                    external_items.extend(ref_to_evidence(session_service, ref, claim)
+                                          for ref in outcome.refs)
+            finally:
+                if session_service.store is not None:
+                    session_service.store.close()
 
     merged: list[SourceRef] = []
     seen: set[str] = set()

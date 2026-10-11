@@ -117,9 +117,14 @@
 
 /* 资料接入 (合并计划 §13.4): 预览清单与资料工作区。
  * 拒绝/截断必须视觉上"显眼但可读" —— 不用纯红色单独承担语义, 同时有图标与文字。 */
-.path-import {
+.panel.chat .path-import {
+  flex: 0 0 clamp(240px, 38%, 360px);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   border-top: 1px solid var(--border, #d8d8d8);
-  padding-top: 6px;
+  padding: 6px 10px 10px;
   font-size: 13px;
 }
 
@@ -129,10 +134,20 @@
 }
 
 .path-import textarea {
+  flex: 0 0 auto;
   width: 100%;
   box-sizing: border-box;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
+}
+
+.panel.chat .path-import .adv-row { flex: 0 0 auto; }
+
+.panel.chat .lib-preview {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .lib-preview,

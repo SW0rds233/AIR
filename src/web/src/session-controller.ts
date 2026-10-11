@@ -380,7 +380,7 @@ export function createSessionController(deps: SessionDeps): SessionController {
     if (!sid) { alert('请先在「历史会话」下拉框选择要删除的会话'); return; }
     const label = sel && sel.selectedOptions[0] ? sel.selectedOptions[0].textContent : sid;
     if (!confirm('确认删除该会话？\n\n' + label + '\n\n将删除以下内容（不可恢复）：\n' +
-      '· 对话记录（data/conversations/）\n' +
+        '· 对话记录与该会话下载的文献（data/conversations/对应子目录）\n' +
       '· 检查点（data/checkpoints/）\n' +
       '· 产出文件夹（outputs/ 对应子目录）\n' +
       '· 检索缓存（data/pipeline_cache/ 对应主题）\n' +

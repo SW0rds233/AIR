@@ -18,6 +18,11 @@ from src.utils.file_utils import sanitize_filename
 
 
 def topic_dir(topic: str) -> Path:
+    from src.utils.conversation_layout import literature_dir, session_id_from_topic
+
+    session_id = session_id_from_topic(topic)
+    if session_id:
+        return literature_dir(session_id)
     from src.config import DATA_DIR
 
     return DATA_DIR / "kb" / sanitize_filename(topic)

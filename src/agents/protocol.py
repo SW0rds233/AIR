@@ -1132,6 +1132,7 @@ class AgentTask(BaseModel):
     project_id: str = ""
     problem_id: str = ""
     run_id: str = ""
+    session_id: str = ""
     branch_id: str = ""
     plan_version: int = 1
     input_refs: list[ObjectRef] = Field(default_factory=list)
