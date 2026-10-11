@@ -108,8 +108,7 @@ def _search_local_kb(query: str, topic: str = "", limit: int = 8) -> str:
     service = KnowledgeService(topic, create_if_missing=False)
     try:
         if not service.usable:
-            return (f"资料库 {topic!r} 不可用或为空: 没有可检索的已登记资料; "
-                    f"如需外部检索请把资料范围改为 autonomous")
+            return f"资料库 {topic!r} 不可用或为空: 没有可检索的已登记资料"
         outcome = service.search(RetrievalRequest(query=query, max_results=limit))
         if not outcome.searched:
             return "资料库检索未执行: " + "; ".join(str(f) for f in outcome.failures)

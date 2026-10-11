@@ -372,7 +372,7 @@ class TeamSession:
         `ExportError` 让调用方看到"为什么没有包", 而不是静默返回 `None` 让界面把
         "导出失败"显示成"没跑过"。
         """
-        from src.research.delivery import assess_delivery
+        from src.research.delivery import apply_review_gate, assess_delivery
         from src.research.package import export_package
 
         store = self.team.task_store.store
@@ -480,10 +480,16 @@ class TeamSession:
                 on_skip=None)
             _rewrite_manifest(package, self.delivery, compile_status, compile_log)
         from src.research.package import write_unresolved_report
-        self.team.outcome.delivery = self.delivery.to_dict()
-        self.team.outcome.unresolved_report["delivery"] = self.delivery.to_dict()
+        delivery_result = self.delivery.to_dict()
+        previous_review = self.team.outcome.delivery.get("review")
+        if previous_review is not None:
+            delivery_result = apply_review_gate(delivery_result, previous_review)
+        self.team.outcome.delivery = delivery_result
+        self.team.outcome.unresolved_report["delivery"] = dict(delivery_result)
+        _record_delivery_verdict(package, delivery_result)
         write_unresolved_report(package, snapshot, [
-            *package_notes, *(self.delivery.blocking or []), *(self.delivery.unresolved or [])
+            *package_notes, *(delivery_result.get("blocking") or []),
+            *(delivery_result.get("unresolved") or [])
         ])
         return package
 
@@ -648,6 +654,19 @@ def _reference_rows(store, manuscript=None) -> list[dict[str, Any]]:
         return []
     from src.publication.references import cited_reference_rows
     return cited_reference_rows(manuscript, _evidence_rows(store))
+
+
+def _record_delivery_verdict(package: Path, delivery: dict) -> None:
+    """Persist the final verdict after compilation without dropping review state."""
+    import json
+
+    path = Path(package) / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["delivery_accepted"] = bool(delivery.get("accepted"))
+    manifest["delivery_blocking"] = list(delivery.get("blocking") or [])
+    if "review" in delivery:
+        manifest["review"] = delivery["review"]
+    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _rewrite_manifest(package: Path, assessment, compile_status: str,

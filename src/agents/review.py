@@ -139,6 +139,9 @@ class ReviewAgent(AgentBase):
 
     def _run(self, task: AgentTask, context: ContextPack, runtime: AgentRuntime,
              usage: UsageRecord, tools: list[ToolSpec]) -> AgentResult:
+        # 历史草稿仍可供用户回看，但独立审阅只针对当前版本。把多版正文拼在
+        # 同一个提示词里会制造“两个版本并存”的假问题，且可能截断最新稿。
+        context = _current_manuscript_context(context)
         issues: list[ReviewIssueRef] = []
         parse_note = ""
         unresolved: list[str] = []
@@ -254,7 +257,7 @@ def deterministic_issues(context: ContextPack) -> list[ReviewIssueRef]:
     后按 (类别 + 摘要) 去重, 保证同一问题在多次审阅之间保持稳定 id。
     """
     issues: list[ReviewIssueRef] = []
-    manuscript_rows = context.objects.get("manuscript") or []
+    manuscript_rows = (context.objects.get("manuscript") or [])[-1:]
     evidence = context.objects.get("evidence") or []
     claims = context.objects.get("claim") or []
     figures = context.objects.get("figure") or []
@@ -474,7 +477,7 @@ def _tally(issues: list[ReviewIssueRef], field: str = "category") -> dict[str, i
 
 def _draft_text(context: ContextPack) -> str:
     parts: list[str] = []
-    for manuscript in context.objects.get("manuscript") or []:
+    for manuscript in (context.objects.get("manuscript") or [])[-1:]:
         parts.append(f"# {manuscript.get('title', '')}")
         if manuscript.get("abstract"):
             parts.append(str(manuscript["abstract"]))
@@ -489,6 +492,15 @@ def _draft_text(context: ContextPack) -> str:
                     if block.get("math"):
                         parts.append("公式: " + str(block["math"]))
     return "\n\n".join(parts)[:40000]
+
+
+def _current_manuscript_context(context: ContextPack) -> ContextPack:
+    rows = context.objects.get("manuscript") or []
+    if len(rows) <= 1:
+        return context
+    return context.model_copy(update={
+        "objects": {**context.objects, "manuscript": rows[-1:]},
+    })
 
 
 def _review_materials(context):
@@ -525,6 +537,8 @@ def _needs_from(issues: list[ReviewIssueRef]) -> list[ResearchNeed]:
             blocked_refs=list(issue.affected_refs),
             hints={"trigger_id": issue.issue_id, "suggested_owner": issue.suggested_owner,
                    "locator": issue.locator},
+            owner="figures" if issue.category == "figure"
+            and issue.suggested_owner == "figures" else "",
             blocking=True,
         ))
     return needs

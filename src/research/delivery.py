@@ -33,7 +33,22 @@ from src.research.acceptance import (
 )
 from src.research.snapshot import snapshot_from_store
 
-__all__ = ["DeliveryAssessment", "MANUSCRIPT_MIN_CHARS", "assess_delivery"]
+__all__ = ["DeliveryAssessment", "MANUSCRIPT_MIN_CHARS", "assess_delivery",
+           "apply_review_gate"]
+
+
+def apply_review_gate(delivery: dict[str, Any], review: dict[str, Any]) -> dict[str, Any]:
+    """Keep the independent review verdict when publication reassesses a delivery."""
+    result = dict(delivery)
+    result["review"] = dict(review)
+    accepted = review.get("accepted", review.get("decision") == "accepted")
+    if not accepted or not review.get("current"):
+        result["accepted"] = False
+        reason = "独立审阅尚未达到通过门槛，或审阅早于最新稿件"
+        result["blocking"] = list(result.get("blocking") or [])
+        if reason not in result["blocking"]:
+            result["blocking"].append(reason)
+    return result
 
 #: 正文短于这个长度就不算"研究稿"(与 `delivery_gate` 的判据同源)。
 MANUSCRIPT_MIN_CHARS = 200

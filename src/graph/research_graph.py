@@ -539,7 +539,7 @@ class TeamRun:
 
     def _apply_delivery_assessment(self) -> None:
         """用交付门槛复核"主控说可以交付"这件事 (失败即降级, 并给出理由)。"""
-        from src.research.delivery import assess_delivery
+        from src.research.delivery import apply_review_gate, assess_delivery
         from src.research.snapshot import manuscript_markdown
 
         store = self.task_store.store
@@ -576,14 +576,12 @@ class TeamRun:
             reviewed = (self.loop.results[self.outcome.task_order[review_index]]
                         if review_index >= 0 else None)
             judgement = dict(reviewed.payload or {}) if reviewed else {}
-            self.outcome.delivery["review"] = {
+            review = {
                 "score": judgement.get("score"), "threshold": self.review_threshold,
                 "decision": judgement.get("decision", "unreviewed"),
+                "accepted": bool(judgement.get("accepted")),
                 "current": review_index > writing_index}
-            if not judgement.get("accepted") or (writing_index >= 0 and review_index <= writing_index):
-                self.outcome.delivery["accepted"] = False
-                self.outcome.delivery.setdefault("blocking", []).append(
-                    "独立审阅尚未达到通过门槛，或审阅早于最新稿件")
+            self.outcome.delivery = apply_review_gate(self.outcome.delivery, review)
         self.outcome.unresolved_report["delivery"] = dict(self.outcome.delivery)
         if not self.outcome.delivery["accepted"]:
             self.outcome.status = TaskStatus.partial.value

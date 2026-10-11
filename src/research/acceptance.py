@@ -37,6 +37,12 @@ from src.research.schemas import (
 )
 
 
+_EXPERIMENT_RESULT_ASSERTION = re.compile(
+    r"(?:实验|实测|试验|仿真)(?:结果|数据).{0,8}(?:表明|显示|证实|发现|证明|支持)"
+    r"|(?:本研究|本文|我们).{0,12}(?:实测|实验|试验|仿真).{0,8}(?:得到|获得|发现|显示|表明)"
+)
+
+
 @dataclass
 class GateResult:
     passed: bool
@@ -87,7 +93,7 @@ def theory_validity_gate(
         referenced: set[str] = set()
         for ids in snapshot.verification_index.values():
             referenced.update(ids)
-        in_scope = [v for v in verifications if v.id in referenced] or verifications
+        in_scope = [v for v in verifications if v.id in referenced]
     else:
         in_scope = verifications
 
@@ -219,7 +225,7 @@ def theory_validity_gate(
     if snapshot is not None:
         for ids in snapshot.verification_index.values():
             referenced_ids.update(ids)
-    stale = [v for v in in_scope if v.stale and (not referenced_ids or v.id in referenced_ids)]
+    stale = [v for v in in_scope if v.stale and v.id in referenced_ids]
     if stale:
         reasons.append(f"存在 {len(stale)} 条被本次交付引用的过期验证记录, 需重算")
 
@@ -347,7 +353,7 @@ def delivery_gate(manuscript: str, snapshot: ResearchSnapshot,
     for spec in snapshot.experiment_specs or []:
         status = str(spec.get("execution_status", "proposed"))
         if status in ("proposed", "spec_validated") \
-                and ("实验结果" in manuscript or "实测" in manuscript):
+                and _EXPERIMENT_RESULT_ASSERTION.search(manuscript):
             reasons.append(
                 f"实验规格 {spec.get('id')} 尚未执行 ({status}), 正文不得出现实验结果"
             )

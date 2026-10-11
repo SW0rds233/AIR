@@ -138,7 +138,10 @@ export function renderPaperTraceability(manifest: DeliveryManifestView | null | 
     `证据 ${manifest.evidence ?? 0}</div>` +
     '</div>';
 
-  const verdict = trace.ok
+  const verdict = trace.status === 'unverifiable'
+    ? '<div class="paper-warn">可反查性暂无法核验：尚无已确定的核心结论。' +
+      (trace.note ? `<div class="wb-note">${esc(trace.note)}</div>` : '') + '</div>'
+    : trace.ok
     ? '<div class="paper-ok">可反查性检查通过：正文中的每条核心论断都能回到冻结快照对象。</div>'
     : '<div class="paper-warn">可反查性检查<b>未通过</b>：下面逐条列出无法反查的论断。' +
       (trace.note ? `<div class="wb-note">${esc(trace.note)}</div>` : '') + '</div>';
