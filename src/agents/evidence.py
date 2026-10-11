@@ -333,6 +333,7 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
         不能假装检索过。
         """
         from src.kb import bridge
+        from src.utils.conversation_layout import conversation_topic
         from src.kb.service import KnowledgeService
         from src.research.schemas import Claim, SourcePolicy
 
@@ -361,6 +362,9 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
 
             items, coverage = bridge.gather_sources(
                 service if usable else None, None, topic=topic, policy=parsed_policy,
+                external_topic=(conversation_topic(task.session_id)
+                                if task.session_id and parsed_policy in (SourcePolicy.autonomous, SourcePolicy.both)
+                                else ""),
                 claim=claim, k=self.per_query, max_queries=self.max_queries,
                 per_query=self.per_query, extra_queries=selected_queries,
                 search_fn=observed_or_search)
@@ -669,6 +673,9 @@ def _parse_claim(row: dict[str, Any]):
 
 def _topic_of(task: AgentTask, context: ContextPack,
               retrieval_plan: dict[str, Any] | None = None) -> str:
+    if task.session_id and task.source_policy == "autonomous":
+        from src.utils.conversation_layout import conversation_topic
+        return conversation_topic(task.session_id)
     if task.source_set_ids:
         return str(task.source_set_ids[0])
     for row in context.sources:

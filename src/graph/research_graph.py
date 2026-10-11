@@ -178,6 +178,7 @@ class TeamRun:
     """
 
     def __init__(self, *, project_id: str, problem_id: str = "", run_id: str = "",
+                 session_id: str = "",
                  request: str = "", supervisor: SupervisorAgent | None = None,
                  executor: InProcessExecutor | None = None,
                  runtime: AgentRuntime | None = None,
@@ -197,6 +198,7 @@ class TeamRun:
         self.project_id = project_id
         self.problem_id = problem_id or new_id("prob")
         self.run_id = run_id or new_id("run")
+        self.session_id = session_id
         self.request = request
         self.cancel = cancel or CancelToken()
         self.runtime = runtime or AgentRuntime(sink=sink, cancel=self.cancel,
@@ -614,6 +616,8 @@ class TeamRun:
         # 身份只在这一个执行口回填, 角色自己不需要 (也不应该) 关心运行身份。
         if not task.run_id:
             task.run_id = self.run_id
+        if self.session_id:
+            task.session_id = self.session_id
         if not task.project_id:
             task.project_id = self.project_id
         if not task.problem_id:

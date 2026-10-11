@@ -5,7 +5,7 @@
     python -m src.server
     或 uvicorn src.server:app --host 127.0.0.1 --port 8000
 
-前端为原生 HTML + JS (无构建), 由 / 直接返回 src/web/index.html。
+前端使用 Vite 构建；服务端从 src/web/dist/ 提供页面与静态资源。
 后端把 LangGraph 流水线跑在后台线程, 通过 SSE 把节点进度与 interrupt 暂停点
 推给浏览器; 用户响应经 /api/sessions/{id}/respond 回传, 由 Command(resume=...) 续跑。
 """
@@ -210,6 +210,7 @@ def _build_team_app(session):
     request = session.request or {}
     run_id = session.run_id or str(request.get("run_id", "") or "")
     team = TeamRun(
+        session_id=session.session_id,
         project_id=str(request.get("project_id", "") or session.session_id),
         problem_id=str(request.get("problem_id", "") or ""),
         run_id=run_id,
@@ -1592,7 +1593,7 @@ def delete_session(session_id: str):
         sess.shutdown()
     # 2. 删除对话记录
     if delete_conversation(session_id):
-        removed.append(f"data/conversations/{session_id}.json")
+        removed.append(f"data/conversations/{session_id}/")
     # 3. 删除检查点 (每会话一个 SQLite, 含 WAL/SHM)
     closed = True
     try:

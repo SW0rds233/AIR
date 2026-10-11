@@ -296,7 +296,8 @@ def _resolve_pdf_from_doi(doi: str, save_dir: Path, nice_name: Optional[str] = N
         return None
 
 
-def download_pdfs_for_papers(papers: list[dict], limit: int = 10) -> list[dict]:
+def download_pdfs_for_papers(papers: list[dict], limit: int = 10,
+                             save_dir: Optional[Path] = None) -> list[dict]:
     """批量下载论文 PDF，返回带 pdf_path 字段的论文列表
 
     下载顺序: arXiv 官方链接 → DOI 开放获取 (OpenAlex best_oa_location)
@@ -308,6 +309,8 @@ def download_pdfs_for_papers(papers: list[dict], limit: int = 10) -> list[dict]:
 
     from src.utils.http_client import circuit_remaining_cooldown
 
+    if save_dir is not None:
+        save_dir.mkdir(parents=True, exist_ok=True)
     downloaded = []
     count = 0
     processed = 0
@@ -344,14 +347,16 @@ def download_pdfs_for_papers(papers: list[dict], limit: int = 10) -> list[dict]:
                         arxiv_blocked_reported = True
                     time.sleep(remaining + 1.0)
                     attempted = True
-                    path = download_arxiv_pdf(f"https://arxiv.org/abs/{arxiv_id}", nice_name=nice_name)
+                    path = download_arxiv_pdf(f"https://arxiv.org/abs/{arxiv_id}",
+                                              save_dir=save_dir, nice_name=nice_name)
                     if path:
                         consecutive_arxiv_waits = 0
                     else:
                         reasons.append("arXiv 下载失败")
             else:
                 attempted = True
-                path = download_arxiv_pdf(f"https://arxiv.org/abs/{arxiv_id}", nice_name=nice_name)
+                path = download_arxiv_pdf(f"https://arxiv.org/abs/{arxiv_id}",
+                                          save_dir=save_dir, nice_name=nice_name)
                 if path:
                     consecutive_arxiv_waits = 0
                 else:
@@ -364,7 +369,8 @@ def download_pdfs_for_papers(papers: list[dict], limit: int = 10) -> list[dict]:
             doi = p.get("doi", "") or ""
             if doi:
                 attempted = True
-                path = _resolve_pdf_from_doi(doi, ensure_pdf_dir(), nice_name=nice_name)
+                path = _resolve_pdf_from_doi(doi, save_dir or ensure_pdf_dir(),
+                                             nice_name=nice_name)
                 if not path:
                     reasons.append("OA 下载失败")
             else:

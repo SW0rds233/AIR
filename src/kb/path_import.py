@@ -399,6 +399,16 @@ def _generated_source_reason(path: Path) -> str:
     """System outputs and the PDF download cache are not user literature sources."""
     from src.config import DATA_DIR, OUTPUT_DIR
 
+    from src.utils.conversation_layout import session_id_from_topic
+
+    conversation_root = (DATA_DIR / "conversations").resolve()
+    try:
+        relative = path.relative_to(conversation_root)
+        if (len(relative.parts) >= 3 and relative.parts[1:3] == ("literature", "pdfs")
+                and session_id_from_topic(f"conversation-{relative.parts[0]}") is not None):
+            return "会话自动下载缓存不得作为外部文献批量导入；下载文献须经身份核验入口入库"
+    except ValueError:
+        pass
     for root, label in ((OUTPUT_DIR, "系统研究产出"),
                         (DATA_DIR / "pdfs", "自动下载缓存")):
         try:

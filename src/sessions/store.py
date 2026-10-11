@@ -5,7 +5,7 @@ from __future__ import annotations
 职责只有三件, 都很小但都有真实约束:
 
 1. **注册表** `SESSIONS`: thread_id → 活跃会话。端点、删除、批关闭都从这里取;
-2. **落盘**: 会话记录写入 `data/conversations/<session_id>.json` (失败不中断会话);
+2. **落盘**: 会话记录写入 `data/conversations/<session_id>/conversation.json` (失败不中断会话);
 3. **批关闭** `shutdown_sessions()`: 先给**所有**会话发停止信号, 再逐个等线程退出。
 
 为什么"先全部发信号"是硬要求: 逐个"发信号→等待"会让线程串行收敛, 多会话时白等
@@ -82,7 +82,7 @@ def session_record(session: Session) -> dict:
 
 
 def persist_session(session: Session) -> None:
-    """把会话记录写入 data/conversations/ (失败不中断会话)。"""
+    """把会话记录写入对应会话目录 (失败不中断会话)。"""
     try:
         save_conversation(session.session_id, session_record(session))
     except Exception:  # noqa: BLE001 - 落盘失败不得影响研究本身

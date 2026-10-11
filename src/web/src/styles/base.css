@@ -82,11 +82,11 @@
     outline: 2px solid var(--primary); outline-offset: 1px;
   }
 
-  /* F3: 窄屏纵向布局 —— 左右面板与 42% 聊天宽度在小窗口会互相挤压 */
+  /* Narrow windows stack the two panels while keeping each scroll region bounded. */
   @media (max-width: 1000px) {
-    main { flex-direction: column; }
-    .panel.chat, .panel.output { flex: 1 1 auto; min-height: 45vh; }
-    #log { max-height: 45vh; }
+    main { flex-direction: column; overflow-y: auto; }
+    .panel.chat { flex: 0 0 min(75vh, 720px); min-height: 430px; }
+    .panel.output { flex: 0 0 45vh; min-height: 320px; }
     .panel-head { flex-wrap: wrap; gap: 6px; }
     .tabs { margin-left: 0; }
     #inputbar { flex-wrap: wrap; }
@@ -98,7 +98,7 @@
   details.wb-more > summary { cursor: pointer; color: var(--primary); font-size: 12px; }
   details.wb-more > div { white-space: pre-wrap; word-break: break-word; }
 
-  #log { flex: 1; overflow-y: auto; padding: 12px; }
+  #log { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 12px; }
   .msg { display: flex; gap: 8px; margin-bottom: 10px; align-items: flex-start; }
   .avatar {
     flex: 0 0 26px; height: 26px; border-radius: 50%; background: #e5e7eb;
@@ -125,7 +125,9 @@
     padding: 6px 10px 10px; border-top: 1px dashed var(--border);
   }
   #attachrow label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 4px; }
-  #attachrow #attachlist { flex: 1 1 100%; margin-top: 0; }
+  #attachrow #attachlist {
+    flex: 1 1 100%; margin-top: 0; max-height: 56px; overflow-y: auto;
+  }
   /* 原生 file 控件在各浏览器外观差异大且偏灰, 用 label 包一层做成一枚按钮 */
   .attach-pick {
     border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px;
