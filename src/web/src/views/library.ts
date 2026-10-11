@@ -180,10 +180,14 @@ export function renderImportReport(report: LibraryImportReport | null | undefine
     `拒绝 <b>${counts.denied ?? (report.denied ?? []).length}</b> · ` +
     `失败 <b>${counts.failed ?? (report.failed ?? []).length}</b>` +
     '</div>';
-  const verdict = report.ok
-    ? '<div class="lib-ok">导入完成：所有命中文件都已入库（幂等键防止重复计费）。</div>'
-    : '<div class="lib-warn">导入<b>未全部成功</b>：下面逐条列出被拒绝、失败或截断的文件。' +
-      '已入库的部分保留，可修正路径后再次导入（同一文件不会重复入库）。</div>';
+  const verdict = report.cached
+    ? '<div class="lib-warn">本次为<b>幂等缓存命中</b>：目录内容与上次导入完全一致，' +
+      '<b>未重新导入</b>。若你刚往同一目录新增了文件，请重新「扫描预览」后再导入' +
+      '（服务端按内容签名判断，目录一变就会重新导入）。</div>'
+    : report.ok
+      ? '<div class="lib-ok">导入完成：所有命中文件都已入库（幂等键防止重复计费）。</div>'
+      : '<div class="lib-warn">导入<b>未全部成功</b>：下面逐条列出被拒绝、失败或截断的文件。' +
+        '已入库的部分保留，可修正路径后再次导入（同一文件不会重复入库）。</div>';
   const groups: Array<[string, ImportedPathRow[]]> = [
     ['新增入库', report.imported ?? []],
     ['合并到既有文献', report.merged ?? []],

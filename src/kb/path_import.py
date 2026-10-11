@@ -322,6 +322,9 @@ class ImportReport(BaseModel):
             "batch_id": self.batch_id,
             "origin": self.origin,
             "roots": list(self.roots),
+            # 计数由服务端给出: 前端契约一直声明有 `counts`, 但此前只返回列表,
+            # 界面只能各算各的 len(); 一旦某类条目没被渲染就会静默少算。
+            "counts": self.counts(),
             "imported": [r.to_dict() for r in self.imported],
             "merged": [r.to_dict() for r in self.merged],
             "skipped": [r.to_dict() for r in self.skipped],
@@ -660,13 +663,33 @@ class _ImportContext:
     refs: list[PathImportRef]
 
 
+def scan_signature(scan: ScanReport) -> str:
+    """目录**内容签名**: 候选文件的 `path + size + mtime`。
+
+    为什么需要它: 幂等键若只由 `库名 + 输入路径字符串` 决定, 那么往同一目录里
+    新增文件后键不变 —— 调用方会命中旧缓存、直接拿到上一次的报告, **新文件一个
+    都不会入库**。实测 2026-10-11 库 `星网 星链`: 扫描报"将入库 42", 点确认导入
+    却回"新增 12 · 合并 1"(2026-10-09 的旧报告), 新增的 29 个文件从未被处理。
+
+    签名只看 `ok` 候选(被跳过/拒绝的文件不影响导入结果); 目录内容一变签名就变,
+    于是缓存自然失效并重新导入, 而重复点击(内容未变)仍命中缓存。
+    """
+    import hashlib
+
+    parts = [f"{item.path}|{item.size}|{item.mtime:.3f}"
+             for item in sorted(scan.ok_files, key=lambda entry: entry.path)]
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
 def import_paths(store: KBStore | None, topic: str, request: ScanRequest,
-                 embed: bool = False) -> ImportReport:
+                 embed: bool = False, scan: ScanReport | None = None) -> ImportReport:
     """按 `ScanRequest` 导入; 逐条返回结果, 部分失败显式呈现。
 
     - 幂等: 同一路径 + 同一 hash 再次导入命中既有身份, 不重复解析与计费;
     - 同一 hash 出现在多个路径 → 同一文献的多个 `PathImportRef`, 文献只入库一次;
-    - 只读: 不改动被导入文件 (校验项见模块 docstring)。
+    - 只读: 不改动被导入文件 (校验项见模块 docstring);
+    - `scan` 可传入已经算好的扫描结果: HTTP 层为算 `scan_signature` 已扫过一次,
+      不必在这里再扫一遍 (扫描只做目录遍历与 stat, 不算内容 hash)。
     """
     name = (topic or request.label or "").strip()
     batch_id = f"batch-{get_timestamp().replace(' ', 'T').replace(':', '')}"
@@ -676,7 +699,7 @@ def import_paths(store: KBStore | None, topic: str, request: ScanRequest,
         report.notes.append("未指定库名 (topic/label 均为空), 无法导入")
         return report
 
-    scan = scan_paths(request)
+    scan = scan if scan is not None else scan_paths(request)
     report.truncated = scan.truncated
     report.notes.extend(scan.notes)
 

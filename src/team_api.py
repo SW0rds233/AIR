@@ -172,25 +172,50 @@ def library_scan(req: ScanRequestModel) -> dict[str, Any]:
 
 @router.post("/api/library/import")
 def library_import(req: ImportRequestModel) -> dict[str, Any]:
-    """按请求导入; 幂等键防重复导入; 部分失败**逐条返回**。"""
+    """按请求导入; 幂等键防重复导入; 部分失败**逐条返回**。
+
+    幂等键必须与**目录内容**绑定。只按 `label + 路径字符串` 计时: 往同一目录新增
+    文件后键不变, 调用方会命中旧缓存并拿到上一次的报告, 新文件一个都不处理
+    (实测 2026-10-11 库 `星网 星链`: 扫描报"将入库 42", 导入却回 2026-10-09 的
+    "新增 12 · 合并 1", 新增的 29 个文件从未入库)。
+
+    因此这里先扫描取**内容签名**(`path+size+mtime`), 用 `客户端键#签名` 作为真正的
+    缓存键: 重复点击(内容未变)仍命中缓存; 内容一变就重新导入。命中缓存时**如实
+    标注** `cached`, 界面不得把旧报告当成一次成功的导入。
+    """
     from src.kb import path_import as pi
     from src.kb.store import KBStore
 
     topic = (req.topic or req.label or "").strip()
     if not topic:
         raise HTTPException(400, "topic 或 label 至少填一项 (库名)")
-    if req.idempotency_key:
-        existing = _find_import_report(topic, req.idempotency_key)
+    scan_request = _scan_request(pi, req)
+    scan = pi.scan_paths(scan_request)
+    signature = pi.scan_signature(scan)
+    cache_key = f"{req.idempotency_key}#{signature}" if req.idempotency_key else ""
+    if cache_key:
+        existing = _find_import_report(topic, cache_key)
         if existing is not None:
-            return existing
+            payload = dict(existing)
+            payload["cached"] = True
+            payload["cache_key"] = cache_key
+            payload["notes"] = [
+                *(existing.get("notes") or []),
+                "命中幂等缓存: 本次未重新导入 (上次批次 "
+                f"{existing.get('batch_id') or '未知'}, 目录内容与上次完全一致)。"
+                "若刚往该目录新增了文件, 请重新「扫描预览」后再次导入。",
+            ]
+            return payload
     store = KBStore(topic)
     try:
-        report = pi.import_paths(store, topic, _scan_request(pi, req), embed=req.embed)
+        report = pi.import_paths(store, topic, scan_request, embed=req.embed, scan=scan)
     finally:
         store.close()
     payload = report.to_dict()
-    if req.idempotency_key:
-        _remember_import_report(topic, req.idempotency_key, payload)
+    payload["cached"] = False
+    payload["cache_key"] = cache_key
+    if cache_key:
+        _remember_import_report(topic, cache_key, payload)
     return payload
 
 

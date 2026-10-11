@@ -68,6 +68,13 @@ export interface LibraryImportReport {
   counts: Record<string, number>;
   /** 整体是否"完全成功": 有任何拒绝/失败/截断即为 false。 */
   ok: boolean;
+  /**
+   * 本次是否为**幂等缓存命中**（目录内容与上次导入完全一致，未重新导入）。
+   * 服务端按「客户端键#内容签名」查缓存；签名含每个候选的 path+size+mtime。
+   */
+  cached?: boolean;
+  /** 服务端实际使用的缓存键（客户端键#内容签名）。 */
+  cache_key?: string;
 }
 
 /** `GET /api/library/{source_set_id}` 的返回 (`library_summary`)。 */

@@ -134,11 +134,16 @@ export function createLibraryController(deps: LibraryControllerDeps = {}): Libra
         });
         imported = body as LibraryImportReport;
         const ok = Boolean(imported?.ok);
+        // 命中幂等缓存时**不得**报"导入完成": 服务端这次没有重新导入任何文件
+        const cached = Boolean(imported?.cached);
         notify(
-          ok ? `资料库「${label}」导入完成。`
-             : `资料库「${label}」导入未全部成功：有文件被拒绝、失败或被截断，` +
-               '请查看清单后处理（已入库部分保留）。',
-          ok ? 'msg-system' : 'msg-error');
+          cached
+            ? `资料库「${label}」命中幂等缓存（目录内容未变，本次未重新导入）。` +
+              '若刚新增了文件，请重新「扫描预览」后再导入。'
+            : ok ? `资料库「${label}」导入完成。`
+                 : `资料库「${label}」导入未全部成功：有文件被拒绝、失败或被截断，` +
+                   '请查看清单后处理（已入库部分保留）。',
+          'msg-system');
         deps.renderResult?.(imported as LibraryImportReport);
         deps.refresh?.();
         return imported;
