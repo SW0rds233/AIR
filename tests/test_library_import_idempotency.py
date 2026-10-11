@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -120,3 +121,28 @@ def test_textual_sources_are_importable(tmp_path, monkeypatch, suffix):
     report = _import(client, papers, key=f"k-{suffix}")
     assert report["counts"]["imported"] == 1
     assert report["counts"]["failed"] == 0
+
+
+def test_report_cache_is_bounded_and_drops_legacy_keys(tmp_path, monkeypatch):
+    """报告缓存要么有上限、要么会无限增长；旧格式键在新逻辑下再也命中不了，应清掉。"""
+    from src.team_api import _IMPORT_REPORT_KEEP, _import_marker_path
+
+    client = _client(tmp_path, monkeypatch)
+    papers = tmp_path / "data" / "papers"
+    _write(papers / "a.txt", "卫星互联网 星链 综述。")
+
+    marker = _import_marker_path("t")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    legacy = {"lib-legacy-1": {"batch_id": "batch-20260101_000000", "notes": []}}
+    extra = {f"k{i}#sig{i}": {"batch_id": f"batch-{20260100 + i:08d}_000000", "notes": []}
+             for i in range(_IMPORT_REPORT_KEEP + 5)}
+    marker.write_text(json.dumps({**legacy, **extra}, ensure_ascii=False), encoding="utf-8")
+
+    report = _import(client, papers)          # 本次导入会写一次缓存
+    assert report["cached"] is False
+
+    data = json.loads(marker.read_text(encoding="utf-8"))
+    assert "lib-legacy-1" not in data, "旧格式键(无内容签名)应被清掉"
+    assert all("#" in key for key in data), "缓存里只应留下「键#签名」格式"
+    assert len(data) <= _IMPORT_REPORT_KEEP, "缓存不得无限增长"
+    assert report["cache_key"] in data, "本次导入的报告必须留在缓存里"

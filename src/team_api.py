@@ -298,6 +298,11 @@ def _find_import_report(topic: str, key: str) -> dict[str, Any] | None:
     return data.get(key)
 
 
+#: 幂等报告最多保留的条数。目录每次变化都会产生一个新的「键#签名」,
+#: 不设上限时 `import_reports.json` 会随使用时间无限增长。
+_IMPORT_REPORT_KEEP = 20
+
+
 def _remember_import_report(topic: str, key: str, payload: dict[str, Any]) -> None:
     import json
 
@@ -308,7 +313,16 @@ def _remember_import_report(topic: str, key: str, payload: dict[str, Any]) -> No
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:  # noqa: BLE001
             data = {}
+    # 去掉旧格式键(不含 `#内容签名`): 新逻辑只按「客户端键#签名」查找,
+    # 这类条目再也命中不了, 留着只是垃圾。顺带把无上限的增长压到最近 N 条
+    # (batch_id 形如 batch-YYYYMMDD_HHMMSS, 字典序即时间序)。
+    data = {k: v for k, v in data.items() if "#" in k}
     data[key] = payload
+    if len(data) > _IMPORT_REPORT_KEEP:
+        newest = sorted(data.items(),
+                        key=lambda item: str((item[1] or {}).get("batch_id") or ""),
+                        reverse=True)[:_IMPORT_REPORT_KEEP]
+        data = dict(newest)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 

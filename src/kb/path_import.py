@@ -322,9 +322,6 @@ class ImportReport(BaseModel):
             "batch_id": self.batch_id,
             "origin": self.origin,
             "roots": list(self.roots),
-            # 计数由服务端给出: 前端契约一直声明有 `counts`, 但此前只返回列表,
-            # 界面只能各算各的 len(); 一旦某类条目没被渲染就会静默少算。
-            "counts": self.counts(),
             "imported": [r.to_dict() for r in self.imported],
             "merged": [r.to_dict() for r in self.merged],
             "skipped": [r.to_dict() for r in self.skipped],
@@ -333,6 +330,8 @@ class ImportReport(BaseModel):
             "duplicates": [r.to_dict() for r in self.duplicates],
             "truncated": self.truncated,
             "notes": list(self.notes),
+            # 计数由服务端给出: 前端契约一直声明有 `counts`, 但此前只返回列表,
+            # 界面只能各算各的 len(); 一旦某类条目没被渲染就会静默少算。
             "counts": self.counts(),
             "ok": self.ok,
         }
