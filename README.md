@@ -359,7 +359,7 @@ AIR/
 │       │   └── team-controller.ts  # 团队视图接入 (只读, 单向同步旧状态)
 │       ├── assets/          #   构建出的 JS/CSS (入库, server.py 从这里提供)
 │       └── dist/            #   构建出的页面 (不入库, 新克隆需 npm run build, 见「快速开始」)
-├── docs/                    # 项目文档 (进度.md / 计划书.md / 合并计划.md / 会话资料存储.md)
+├── docs/                    # 项目文档 (进度.md / 计划书.md / 合并计划.md / 会话资料存储.md / writer-paper-workflow.md)
 ├── evals/                   # 验收用例 (cases/) 与审查报告归档 (reports/)
 ├── data/                    # 运行时数据 (conversations/<会话ID>/literature/ | kb/ | pdfs/ | chroma/ | research/ | checkpoints/)
 ├── outputs/                 # 统一团队产物 (研究包按 project/snapshot 隔离)
