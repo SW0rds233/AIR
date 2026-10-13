@@ -137,7 +137,7 @@ export function createLibraryController(deps: LibraryControllerDeps = {}): Libra
         const merged = Boolean(imported?.library_existed);
         const binding = imported?.binding_error
           ? ` 当前对话未绑定：${imported.binding_error}`
-          : imported?.bound_session_id ? ' 已绑定当前对话。' : ' 已为下一次研究选中该库。';
+          : imported?.bound_session_id ? ' 已绑定当前对话。' : '';
         notify(
           cached
             ? `资料库「${label}」命中幂等缓存（目录内容未变，本次未重新导入）。` +
@@ -190,6 +190,7 @@ export function createLibraryController(deps: LibraryControllerDeps = {}): Libra
 
 // 页面接入
 export interface LibrarySectionDeps {
+  fetchJson?: LibraryControllerDeps['fetchJson'];
   /** 用户可见提示。 */
   notify(text: string, cls?: string): void;
   /** 预览清单/导入报告的渲染出口 (纯视图函数在 `views/library.ts`, 由页面注入)。 */
@@ -203,7 +204,7 @@ export interface LibrarySectionDeps {
   renderWorkspace(sources: any[]): void;
   /** 库列表变化后刷新资料源下拉框。 */
   refreshSourceSets(): void;
-  selectSourceSet(sourceSetId: string): Promise<void>;
+  selectSourceSet(sourceSetId: string, announce?: boolean): Promise<boolean>;
   currentSessionId(): string;
   writePaths(text: string): void;
   pickFolder?(): Promise<{ path: string; cancelled: boolean; grant_token: string }>;
@@ -238,6 +239,7 @@ export function createLibrarySection(deps: LibrarySectionDeps): LibrarySection {
   function getController(): LibraryController {
     if (controller) return controller;
     controller = createLibraryController({
+      fetchJson: deps.fetchJson,
       notify: (text, cls) => deps.notify(text, cls),
       renderPreview: (report) => deps.setPreviewHtml(deps.renderScanPreview(report)),
       renderResult: (report) => deps.setPreviewHtml(deps.renderImportReport(report)),
@@ -260,7 +262,7 @@ export function createLibrarySection(deps: LibrarySectionDeps): LibrarySection {
     const sessionId = deps.currentSessionId();
     const result = await getController().commit(sessionId);
     if (result && !result.binding_error && deps.currentSessionId() === sessionId) {
-      await deps.selectSourceSet(result.topic);
+      await deps.selectSourceSet(result.source_set_id || result.topic, true);
     }
     deps.setImportDisabled(!getController().canImport());
   }

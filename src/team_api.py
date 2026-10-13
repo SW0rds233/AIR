@@ -196,25 +196,27 @@ def library_import(req: ImportRequestModel) -> dict[str, Any]:
 
         if not re.fullmatch(r"[0-9a-f]{32}", session_id) or not conversation_exists(session_id):
             raise HTTPException(404, "当前对话不存在，无法绑定资料库")
-    from src.kb.store import default_db_path
+    from src.kb.store import default_db_path, topic_dir
 
     existed = default_db_path(topic).is_file()
+    canonical_id = topic_dir(topic).name
 
     def with_binding(report: dict[str, Any]) -> dict[str, Any]:
         result = dict(report)
         result["library_existed"] = existed
+        result["source_set_id"] = canonical_id
         result["bound_session_id"] = ""
         result["binding_error"] = ""
         from src.kb.sources import validate_binding
 
-        check = validate_binding(topic)
+        check = validate_binding(canonical_id)
         if not check["ok"]:
             result["binding_error"] = check["reason"]
         elif session_id:
             from src.sessions.store import bind_conversation_library
 
             try:
-                bind_conversation_library(session_id, topic)
+                bind_conversation_library(session_id, canonical_id)
             except KeyError:
                 result["binding_error"] = "当前对话已不存在，资料库已导入但未绑定"
             else:
