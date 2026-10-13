@@ -75,7 +75,7 @@ def test_same_name_merges_new_files_and_binds_each_conversation(tmp_path, monkey
 
 def test_library_name_uses_canonical_source_set_id(tmp_path, monkeypatch):
     from src.kb.store import topic_dir
-    from src.utils.conversation_store import load_conversation
+    from src.utils.conversation_store import load_conversation, save_conversation
 
     client = _client(tmp_path, monkeypatch)
     folder = tmp_path / "data" / "papers"
@@ -103,6 +103,14 @@ def test_library_name_uses_canonical_source_set_id(tmp_path, monkeypatch):
     cached = client.post("/api/library/import", json=request).json()
     assert cached["cached"] is True
     assert cached["source_set_id"] == report["source_set_id"]
+
+    legacy = load_conversation(SID_A)
+    legacy["bound_source_set_id"] = label
+    save_conversation(SID_A, legacy)
+    restored = client.get(f"/api/conversations/{SID_A}")
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["bound_source_set_id"] == report["source_set_id"]
+    assert load_conversation(SID_A)["bound_source_set_id"] == label
 
 
 def test_import_rejects_unknown_conversation_before_creating_library(tmp_path, monkeypatch):
