@@ -1,29 +1,6 @@
 from __future__ import annotations
 
-"""会话控制器: `Session` 的身份、状态机、事件出口与关闭时序 (合并计划 §8 / M4)。
-
-为什么单独成模块
-----------------
-`server.py` 里的 `Session` 同时承担"会话状态"与"研究线程管理"。会话状态本身是**纯
-状态 + 线程原语**, 不依赖 FastAPI, 因此可以独立测试; 而端点只剩装配与注入。
-
-这个模块**不 import FastAPI**: 会话状态本身是纯状态 + 线程原语。图应用 (`app`)
-由调用方注入 (`server._make_session` 决定"模式 → 哪张图"); 只有当调用方完全没有
-注入时, 才回落到缺省建图 (`_build_app()`, 与拆分前一致) —— 那条回落路径按名称取
-入口层的工厂, 因此不在这里固化第二份"模式 → 图"的决策。
-
-不可让步的边界 (真实事故记忆, 改动前请先读)
-------------------------------------------
-1. **关闭时序**: 后台研究线程仍在使用 `checkpoint_conn` (sqlite, `check_same_thread=False`)
-   时 close, CPython 的 sqlite3 会访问已释放句柄 —— 实测触发 `0xC0000005`
-   (STATUS_ACCESS_VIOLATION) 崩掉整个进程, 崩点在 C 层, `except Exception` 拦不住。
-   因此 `shutdown()` 先 join, 线程仍存活就**不关**并如实返回 False。
-2. **日志归属按线程**: 每个会话的研究线程持有自己的 `_StdoutBridge`
-   (`src/sessions/runtime.py`), 不替换全局 `sys.stdout`。`shutdown()` 因此必须能
-   在任意调用线程里安全调用, 并且**不能让本线程的绑定泄漏到别的会话**。
-3. **事件序号唯一**: `event_seq`/`event_log`/`event_lock` 只是 `EventLog` 的只读视图,
-   不得再出现第二份序号。
-"""
+"""管理会话身份、状态、事件和关闭时序。"""
 
 import queue
 import threading
@@ -120,9 +97,7 @@ class Session:
 
         return _server._build_app_for_mode(self.checkpointer, self.mode, session=self)
 
-    # ------------------------------------------------------------------
     # 事件出口
-    # ------------------------------------------------------------------
     @property
     def event_seq(self) -> int:
         """当前事件序号 (只读视图; 序号由 EventLog 分配)。"""
@@ -150,9 +125,7 @@ class Session:
             self.messages.append(message)
         return record
 
-    # ------------------------------------------------------------------
     # 停止请求
-    # ------------------------------------------------------------------
     def request_stop(self) -> None:
         """请求停止: 置停止标志, 并解除可能正在阻塞的 interrupt 等待。
 
@@ -168,23 +141,9 @@ class Session:
         except Exception:  # noqa: BLE001 - 队列已满/已关闭都不影响停止标志
             pass
 
-    # ------------------------------------------------------------------
     # 关闭
-    # ------------------------------------------------------------------
     def shutdown(self, timeout: float = 10.0) -> bool:
-        """关闭会话持有的检查点连接 (幂等)。
-
-        为什么必须有这一步: 每个会话一个 SQLite 检查点, 连接不关闭时在 Windows 上
-        会**一直持有文件句柄** —— 删除会话时 `unlink` 静默失败 (留下无法删除的文件),
-        测试的临时目录清理也会报 `WinError 32`。这里显式关闭, 并让调用方知道结果。
-
-        为什么要先等后台线程: `checkpoint_conn` 是 `check_same_thread=False` 的 sqlite3
-        连接, 后台研究线程仍在 `app.stream`/落盘中用它。在另一个线程还在使用时 close,
-        CPython 的 sqlite3 会访问已释放的句柄 —— 实测直接触发
-        `0xC0000005` (STATUS_ACCESS_VIOLATION) 崩掉整个进程, 而且崩点在 C 层,
-        Python 的 `except Exception` 拦不住。因此这里先 join, 只在线程确实退出后才关;
-        线程还在跑就**不关**并如实返回 False (宁可有句柄残留, 也不崩进程)。
-        """
+        """关闭会话持有的检查点连接 (幂等)。"""
         thread = self.worker_thread
         if thread is not None and thread.is_alive():
             thread.join(timeout)

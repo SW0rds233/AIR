@@ -1,19 +1,6 @@
 from __future__ import annotations
 
-"""存储 → 领域快照的**唯一**映射 (合并计划 §3.2 G11 / §6.1)。
-
-为什么单独成模块
-----------------
-"把团队登记的候选组装成交付快照"这件事此前长在 `graph/team_session.py` 里, 而交付
-评估 (`research/delivery.py`) 与团队循环 (`graph/research_graph.py`) 都要用它。重复
-一份映射就是重复一份丢字段的机会 —— G11 正是这样丢掉了证据定位与版本的。因此这里
-只做映射, 不做判定, 也不依赖任何图/会话对象。
-
-两条**不得静默**的规则 (§3.2 G11):
-1. 单条坏数据不阻断整次导出, 但必须记下**是哪条、为什么**;
-2. 只汇集 evidence/claim/model 是不够的 —— 义务、验证方案、图表、审阅问题同样属于
-   引用闭包, 缺了它们交付包讲不出"结论依赖什么"。
-"""
+"""从存储记录构造研究对象快照，供团队角色读取。"""
 
 from typing import Any
 
@@ -26,8 +13,7 @@ __all__ = [
     "snapshot_from_store",
 ]
 
-#: 存储行的字段名与领域 schema 的差异表 (§6.1 "统一领域 schema、显式映射并校验")。
-#:
+#: 存储行的字段名与领域 schema 的差异表。
 #: 为什么要显式映射而不是直接 `model_validate(row)`: 存储行用的是**投影层写入时的
 #: 字段名**, 领域 schema 用的是自己的名字。靠"名字碰巧一样"就会静默丢数据 ——
 #: 实测 `locator` 进不了 `location` (定位变空)、`relation` 进不了 `support`
@@ -74,10 +60,9 @@ def snapshot_from_store(store: Any, *, project_id: str, problem_id: str, run_id:
     snapshot = ResearchSnapshot(project_id=project_id, problem_id=problem_id,
                                 run_id=run_id)
     #: 存储 kind -> (目标字段, 映射函数)
-    #
-    # **引用闭包必须完整** (§3.2 G11): 只有 evidence/claim/model/obligation 是不够的 ——
+    # **引用闭包必须完整**: 只有 evidence/claim/model/obligation 是不够的 ——
     # 缺少 `verification` 时交付门槛会报"结论缺少有效验证记录", 而那条记录其实就存在
-    # (实测: 判定层已据它把命题算成 supported, 快照里却是 0 条)。缺 `attempt` 时
+    #。缺 `attempt` 时
     # "已定结论缺少已完成的证明尝试记录"也会误报。因此新增对象种类时**一并加进这张表**,
     # 否则门槛与交付包会与真实研究状态不一致。
     plan = (
@@ -97,8 +82,7 @@ def snapshot_from_store(store: Any, *, project_id: str, problem_id: str, run_id:
     counts: dict[str, int] = {}
     # **按问题过滤** (R6 / F0-2): 同一个项目里另一个问题的对象绝不能进这份快照 ——
     # 否则交付包里会混入别的问题的结论与验证记录, 门槛也会照着别人的命题判等级
-    # (实测: 同项目 p2 的冻结快照里带着 p1 的命题)。
-    #
+    #。
     # 归属读**两条来源** (与只读检视层同一口径): 对象自己的 `problem_id`, 或提交口写入的
     # `_scope.problem_id`。两条都读不到的是旧数据 —— 只有当项目里**没有**别的问题的对象时
     # 才保留 (单问题项目不该因为字段缺失而变成空包)。
@@ -149,7 +133,7 @@ def snapshot_from_store(store: Any, *, project_id: str, problem_id: str, run_id:
             ))
         if on_skip is not None:
             on_skip({"skipped": skipped, "registered": counts})
-    # 正文位置映射必须**真的**算出来 (§3.2 G12): 交付门槛用 `writing_map` 判断
+    # 正文位置映射必须**真的**算出来: 交付门槛用 `writing_map` 判断
     # "核心结论能否在正文里反查到"。留空会让一份明明写了结论的稿件被判成
     # "主要结论未映射到正文位置" —— 那不是内容缺失, 是映射没做。
     snapshot.writing_map = _writing_map_from_store(store, problem_id=problem_id)
@@ -251,7 +235,7 @@ def _model_of(row: dict[str, Any]):
     """模型候选 -> `ResearchModel`。
 
     这里曾 import 一个**不存在**的 `ModelRecord`, 抛出的 `ImportError` 又被上层的
-    裸 `except` 吞掉 —— 于是"模型一个都没进包"完全无声 (§3.2 G11)。真实类名是
+    裸 `except` 吞掉 —— 于是"模型一个都没进包"完全无声。真实类名是
     `ResearchModel`。
     """
     from src.research.schemas import ResearchModel
@@ -313,7 +297,7 @@ def _definition_of(row: dict[str, Any]):
 def _validation_plan_of(row: dict[str, Any]) -> dict[str, Any]:
     """验证方案以 dict 形式进入 `experiment_specs` (schema 未定义专门类型)。
 
-    补上 `executed=False`: 本轮**不运行**仿真/实验, 方案不是成功证据 (§4 角色表)。
+    补上 `executed=False`: 本轮**不运行**仿真/实验, 方案不是成功证据。
     """
     data = _row_payload(row)
     data.setdefault("executed", False)

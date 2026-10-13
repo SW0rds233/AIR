@@ -108,7 +108,7 @@ def compile_latex(tex_path: str, workdir: str | None = None, engine: str = "xela
             break
 
     # 编译报错时**不能**再用"PDF 存在且非空"兜底: LaTeX 遇错仍会写出截断的 PDF
-    # (实测 1 页), 旧逻辑据此返回成功, 于是半篇论文被当成正常交付。
+    #, 旧逻辑据此返回成功, 于是半篇论文被当成正常交付。
     if not last_ok:
         return False, last_log[-2000:]
 

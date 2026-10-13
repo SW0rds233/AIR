@@ -1,14 +1,6 @@
 from __future__ import annotations
 
-"""Lean 4 形式化适配器 (P4 增强; 未安装时返回 unavailable)。
-
-计划书 §7.2 / §2 P2-A16: **不能只检查编译退出码或扫描源码关键词**。
-- 必须先固定并校验目标声明名 (checker 只对指定定理负责);
-- 编译后强制执行 `#print axioms <target>`, 审计**传递公理闭包**:
-  出现 `sorryAx` 一律拒绝; 出现未在允许清单内的自定义公理一律拒绝;
-- 拒绝 `sorry` / `admit` / `unsafe` 等留洞与逃生构造;
-- 通过只表示"内核检查了该形式化声明", 仍需人工确认陈述忠实于原问题。
-"""
+"""Lean 4 形式化适配器。"""
 
 import re
 import shutil

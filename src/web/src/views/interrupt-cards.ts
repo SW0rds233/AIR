@@ -1,15 +1,4 @@
-/*!
- * 暂停点 / 澄清卡片视图 (合并计划 §9.5: 交互卡片渲染迁出 `app.ts`)。
- *
- * 这些卡片原先直接在 `app.ts` 里 `createElement` + `onclick`, 于是:
- * "候选路线显示哪些条件" 与 "点选后提交什么 ID" 混在一起, 无法单测。
- * 这里把它们改成**纯函数**: 输入暂停点/澄清载荷, 输出卡片 DOM 或条目标记;
- * 提交与追加消息由调用方通过回调处理 (视图不发请求、不改全局状态)。
- *
- * 硬约束不变: 动态按钮仍然写 `data-action` (CSP 下内联处理器不执行);
- * `buildObjectPicker()` 仍返回真实的 `<select>` 元素, 并继续使用同一份
- * `views/research-workbench.ts::feedbackObjectOptions` 选项构造。
- */
+/** 展示会话中断点和用户响应入口。 */
 
 import { feedbackObjectOptions, OBJECT_KIND_LABEL, wbEsc } from './research-workbench';
 

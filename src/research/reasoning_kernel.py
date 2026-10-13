@@ -1,32 +1,6 @@
 from __future__ import annotations
 
-"""推理动作的内核 (合并计划 §7.1 / M2「按职责抽取」)。
-
-这一层解决的是什么
-------------------
-合并计划 §7.1 要求把 `research/loop.py` 里属于推理的动作**按职责抽走**, 而不是把
-`TheoryEngine` 整体包成一个子智能体; §2 也明确 `TheoryEngine` "不能继续作为主控
-下面第二个全权总控"。
-
-但抽取必须**逐字等价**: `loop.py` 的 `_act_plan_proof` / `_act_derive_step` 里混着
-三件不同性质的东西 ——
-
-1. **纯计算**: 由命题与义务算出证明计划、推导步骤、待核验义务 (无 IO、无状态);
-2. **持久化**: 把结果与事件写进存储 (`append_step`);
-3. **状态判定**: 按记录重算命题状态 (`_reconcile_claim`, 判定层, 保持零 LLM)。
-
-本模块只取第 1 件, 并把结果连同**幂等键与事件载荷**一起返回。这样:
-
-- 引擎的 `_act_*` 变成"调内核 + 落盘", 计算只有一份实现 (不会出现两套推导);
-- 角色 (`ReasoningAgent`) 可以直接调内核, 于是"团队路径"与"旧引擎路径"在推导上
-  **同源** —— 差异测试因此是有意义的 (`tests/test_reasoning_kernel.py`);
-- 判定层完全不动: 内核不写命题真值, 不产生验证等级。
-
-`ReasoningOutcome.events` 的载荷字段与 `loop.py` 原实现逐字一致 (例如
-`derive_step` 的 `formal_gap` / `review_obligations` / `adversarial_checked`),
-因为 `research/logging_schema.py` 的 `EVENT_SPECS` 会校验必需键 —— 少一个键就会被
-记成契约异常, 界面显示为 0。
-"""
+"""推理动作的核心逻辑：管理命题、证明义务和验证结果。"""
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -55,9 +29,7 @@ __all__ = [
 ]
 
 
-# ----------------------------------------------------------------------
 # 结果
-# ----------------------------------------------------------------------
 @dataclass
 class ReasoningOutcome:
     """一次推理动作的**纯**结果。
@@ -80,9 +52,7 @@ class ReasoningOutcome:
     progressed: bool = False
 
 
-# ----------------------------------------------------------------------
 # 设计/计数存在性: 推导步骤 = 证书判定链 (S1)
-# ----------------------------------------------------------------------
 def is_design_claim(claim: Claim | None) -> bool:
     """该命题是否为"设计/计数存在性"类 (由题面参数决定, 不看措辞)。
 
@@ -163,9 +133,7 @@ def _ref_of(obligation: ProofObligation):
     return ObjectRef(id=obligation.id, version=obligation.version)
 
 
-# ----------------------------------------------------------------------
 # 通用推导步骤 + 反方审查
-# ----------------------------------------------------------------------
 def derive_steps_for(claim: Claim, *, attempt: ProofAttempt,
                      obligations: list[ProofObligation],
                      evidence: list[Any],
@@ -235,9 +203,7 @@ def derive_steps_for(claim: Claim, *, attempt: ProofAttempt,
     )
 
 
-# ----------------------------------------------------------------------
 # 证明计划
-# ----------------------------------------------------------------------
 def plan_proof_for(claim: Claim, *, obligations: list[ProofObligation],
                    available: dict[str, bool] | None = None,
                    llm: Any = None,
@@ -302,9 +268,7 @@ def plan_proof_for(claim: Claim, *, obligations: list[ProofObligation],
     )
 
 
-# ----------------------------------------------------------------------
 # 反例搜索 (候选)
-# ----------------------------------------------------------------------
 def seek_counterexample_for(claim: Claim, *, available: dict[str, bool] | None = None
                             ) -> ReasoningOutcome:
     """判断该命题能否编码成反例搜索; 返回**可核验的检查项**而不是执行它。
@@ -348,7 +312,7 @@ def counterexample_verdict_for(status: Any,
                                detail: str = "") -> CounterexampleVerdict:
     """把一次反例搜索的验证状态映射为义务/命题层面的处置 (零 LLM)。
 
-    依据 (合并计划 §7.3: 统一验证结果语义):
+    依据:
     - 找到满足前提的反例 → 命题被反驳 (`refute`);
     - 工具通过但没给反例 → 只是**有限测试证据**, 不构成证明 (`record_test`);
     - 报"找到反例"却给不出可回代的反例 → 记 blocked, 不得当作数学反驳;
@@ -386,7 +350,7 @@ COUNTEREXAMPLE_REPEAT_FAILURES: frozenset[str] = frozenset({
 
 @dataclass
 class ObligationDisposition:
-    """一次工具核验结果 → **义务处置**的纯映射 (合并计划 §7.4 / M2 剩余)。
+    """一次工具核验结果 → **义务处置**的纯映射。
 
     为什么留在这里而不是搬进角色: `ValidationStatus`/`ObligationStatus` 的对应关系
     是判定层的一部分 (M2 的边界明确写了 `_act_check_step`/`_run_tool`/`_reconcile_claim`
@@ -418,7 +382,7 @@ def obligation_disposition_for(result: Any, obligation: Any) -> ObligationDispos
     与 `_to_validation_status` 同一张映射表; 因此这里是**唯一**的"结果→义务状态"
     判据。调用方负责落盘与 `_reconcile_claim` (唯一状态写入点)。
 
-    规则 (逐条对应计划书的判定要求):
+    规则:
     - `passed` → 义务关闭 (closed), 记录解除 stale;
     - `failed` + **可回代反例** → 义务被反驳 (refuted), 属科学结论;
     - 声明 `failed` 却给不出反例 → blocked, **不得**当作数学反驳;
@@ -521,9 +485,9 @@ def novelty_comparison_for(claim: Claim, *, lookup: Any,
 def model_proposal_for(claim: Claim, *, evidence: list[Any], contract: Any = None,
                        available: dict[str, bool] | None = None,
                        ) -> ReasoningOutcome:
-    """从已读原文提出**候选模型并比较**, 再显式选中一个 (计划书 §3 R2 / §5.2)。
+    """从已读原文提出**候选模型并比较**, 再显式选中一个。
 
-    为什么必须有多个候选 (§3 R2): 早期实现按命题类型套一个通用模板就结束, 于是
+    为什么必须有多个候选: 早期实现按命题类型套一个通用模板就结束, 于是
     "候选与舍弃理由"无从审查。这里至少构造互相竞争的候选, 比较来源/忠实度/可验证性,
     并给出选中理由; 候选预测冲突时另产出**可区分检验**。
 
@@ -572,7 +536,7 @@ def model_proposal_for(claim: Claim, *, evidence: list[Any], contract: Any = Non
             ok=False, summary="原文不足以形成候选机制",
             payload={"requires_evidence": True})
 
-    # §5.2: 提出候选后**必须显式选中一个**, 否则 `ResearchModel.selected` 永远为假,
+    # 提出候选后**必须显式选中一个**, 否则 `ResearchModel.selected` 永远为假,
     # "结论依据哪个模型"无从审计。
     chosen = next((m for m in models if m.name.startswith(
         next((x.name for x in comparison.mechanisms if x.id == comparison.selected), ""))),
@@ -667,11 +631,11 @@ def _as_distinguishing_test(value: Any) -> Any:
 
 
 def _claim_category(claim: Claim) -> str:
-    """命题在能力矩阵里的问题类型 (**唯一口径**, 合并计划 §7.2)。
+    """命题在能力矩阵里的问题类型。
 
     先看命题类型本身; 定义性命题再区分单调性/恒等/不等式 —— 否则能力声明会把
     "可符号核验的不等式命题"说成"未知问题类型 formal: 需先澄清类型再研究",
-    而那正是团队建模角色用来决定"要不要提前澄清"的输入 (实测)。
+    而那正是团队建模角色用来决定"要不要提前澄清"的输入。
 
     **这里曾经与 `loop._claim_category` 分叉**: 内核只回 causal/empirical/scenario/
     normative/formal, 引擎还会回 monotonicity/identity/inequality。而且内核的文档
@@ -694,9 +658,7 @@ def _claim_category(claim: Claim) -> str:
     return "definitional"
 
 
-# ----------------------------------------------------------------------
 # 命题状态归并 (唯一的状态判据, 零 LLM)
-# ----------------------------------------------------------------------
 def assurance_for_support_kind(support_kind: Any) -> Any:
     """支持方式 → 保证等级 (与 `loop._assurance_for` 同一张表)。
 
@@ -718,7 +680,7 @@ def assurance_for_support_kind(support_kind: Any) -> Any:
 class ClaimStateDisposition:
     """由义务聚合与有效验证记录算出的命题状态 (**纯映射, 不写任何状态**)。
 
-    为什么把它抽到内核 (合并计划 §3.1 G06): 团队形式化路径必须能自己走完
+    为什么把它抽到内核: 团队形式化路径必须能自己走完
     "义务 → 工具核验 → 结构化记录 → **状态归并**", 而状态归并的判据只能有一份 ——
     否则团队路径与旧引擎会在"什么时候算 supported"上分叉, 那正是"团队接管研究"
     最难发现的一类错误。抽取后引擎的 `_reconcile_claim` 变成"调内核 + 落盘",

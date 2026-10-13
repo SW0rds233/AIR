@@ -1,18 +1,6 @@
 from __future__ import annotations
 
-"""理论研究对象的版本化存储 (P0)。
-
-- 以 SQLite 为权威存储 (Chroma 只提供检索, 不作为命题真伪来源)。
-- 每个对象按 (project_id, kind, obj_id, version) 保存, 旧版本保留用于审计。
-- 事件日志带幂等键, 避免暂停恢复/重试重复增加引理或重复支付工具调用成本。
-- 快照以 JSON 保存, 用于冻结交付与断点恢复。
-
-计划书 §9.2 的两条硬约束:
-1. `INSERT OR REPLACE` 不适合不可变研究历史 —— `append_version` 用纯 INSERT:
-   同版本同内容幂等返回, 同版本不同内容抛 VersionConflict (绝不覆盖)。
-2. 对象写入与事件登记必须处于同一事务 —— `submit_step` 把一次研究步骤的
-   全部对象版本与事件放在一个 SQLite 事务里提交, 并用幂等键去重。
-"""
+"""理论研究对象的版本化存储。"""
 
 import json
 import sqlite3
@@ -37,7 +25,7 @@ KIND_MODEL = "model"
 KIND_ROUTE = "route"
 KIND_GAP = "gap"
 KIND_RUNTIME = "runtime"
-#: 团队运行的**可恢复循环状态** (合并计划 §3.3 G16): 画像/计划/已交回成果/派工历史。
+#: 团队运行的**可恢复循环状态**: 画像/计划/已交回成果/派工历史。
 #: 与 `KIND_RUNTIME` 分开: 后者是旧理论引擎的运行计数 (动作数/用量/路由状态),
 #: 两者字段与语义都不同, 混用会让"恢复到哪一步"说不清。
 KIND_TEAM_RUN = "team_run"
@@ -225,7 +213,7 @@ class ResearchStore:
     ) -> int:
         """写入对象的一个版本并**返回实际生效的版本号**。
 
-        版本语义 (计划书 §9.2: 不可变研究历史):
+        版本语义:
         - 版本号由存储层分配, 只增不减, 每个版本一个独立行;
         - 同内容重复写入幂等返回既有版本;
         - 同版本不同内容 → VersionConflict (绝不覆盖, 也绝不静默降级)。
@@ -346,7 +334,7 @@ class ResearchStore:
 
         幂等: 若 idempotency_key 已登记, 抛 StepAlreadyApplied, 调用方不得重复执行。
 
-        事件幂等键的分配 (实测踩过): `events` 的唯一索引是
+        事件幂等键的分配: `events` 的唯一索引是
         `(project_id, idempotency_key)`, 而一个步骤可以带**多条**事件 —— 若每条都用
         同一个基键, 第二条就会撞唯一索引, 整个步骤被回滚 (表现为"提交失败但看不出
         为什么")。因此只有**第一条**事件带基键 (它同时就是"这一步已提交"的判据),
@@ -488,7 +476,7 @@ class ResearchStore:
             ).fetchall()
         return [{"run_id": r[0], "tool": r[1], "operation": r[2], "created_at": r[3]} for r in rows]
 
-    # ---- 动作执行账本 (计划书 §4.1 ActionExecution) ----
+    # ---- 动作执行账本 ----
     def record_action(self, execution: ActionExecution) -> None:
         with self._lock:
             try:

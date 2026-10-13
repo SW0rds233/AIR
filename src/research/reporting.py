@@ -1,26 +1,6 @@
 from __future__ import annotations
 
-"""工作台只读投影与交付引用 (计划书 §4)。
-
-计划书对 `reporting.py` 的要求是"输入明确的 `project/problem/snapshot`, 输出稳定的
-工作台只读投影和交付引用; 前端不需要理解研究库有多少张表, 服务端的多个入口也不应
-各自用'取第一个规格'的代码拼对象"。
-
-本模块就是那层投影, 只做三件事:
-
-1. **把研究对象投影成稳定字段** (`claims_payload` / `obligations_payload` / ...):
-   字段名与前端读取的键一一对应, 由本模块统一定义, 页面不得自行推算;
-2. **给出统计计数的单一来源** (`objects_counts`, F0-3): 缺失字段在前端会显示成 0,
-   因此计数必须一次算清、口径在此固定;
-3. **说明"知道了什么、还缺什么"** (`coverage_notes`): 未覆盖的现实因素、未关闭义务、
-   尚未检索/未比较等, 由服务端显式声明, 而不是让前端从空数组里猜。
-
-硬约束:
-- 只读: 不写库、不改任何结论状态、不触发研究动作;
-- **不猜归属**: 调用方已经完成问题级过滤 (见 `server._research_state` 的 `_owned`),
-  本模块不再按题目去"推断"某对象属于哪个问题;
-- 字段一旦出现在这里就是**契约**: 改名/删字段必须同时改前端与契约测试。
-"""
+"""工作台只读投影与交付引用。"""
 
 from typing import Any
 
@@ -64,7 +44,7 @@ def objects_counts(claims, obligations, evidence, verifications,
 
 
 def uncovered_factors(claim) -> list[str]:
-    """结论明确**未覆盖**的现实因素 (§4.3-4: 不得写成无条件成立)。"""
+    """结论明确**未覆盖**的现实因素。"""
     gaps: list[str] = []
     study = claim.study
     if claim.claim_type.value == "causal":
@@ -262,16 +242,7 @@ def workbench_projection(*, project_id: str, problem_id: str, claims,
                          modeling: dict | None = None,
                          assumptions=None, decisions=None, events=None,
                          gaps=None, budget: dict | None = None) -> dict:
-    """组装工作台只读投影。
-
-    调用方 (server._research_state) 负责: 打开库、解析问题、按问题过滤对象, 以及从
-    **只读检视层** (
-esearch/inspection.py) 取出运行身份/指标/缺口等派生值。
-
-    为什么不再收 ngine: 一个**只读**端点此前必须建一个能执行研究动作的引擎才读得出
-    数据 (§5.5 要抽的正是这件事)。现在这里只接受已经算好的值, 因此"读工作台"不可能顺手
-    推进研究, 引擎退役时这一层也不用改。
-    """
+    """组装工作台只读投影。"""
     metrics = dict(metrics or {})
     counts = objects_counts(claims, obligations, evidence, verifications,
                             models=models, routes=routes)
@@ -297,7 +268,7 @@ esearch/inspection.py) 取出运行身份/指标/缺口等派生值。
             # 问题契约 (研究类型、允许的方法、研究路径、澄清问题)
             "contract": (spec.contract.model_dump(mode="json")
                          if spec.contract is not None else None),
-            # P0-1/§1 契约第 2 行: 授权策略与检索覆盖记录 (用了哪些检索式/库, 缺什么)
+            # 授权策略与检索覆盖记录。
             "source_policy": spec.source_policy.value,
             "coverage": (spec.coverage.model_dump(mode="json")
                          if spec.coverage is not None else None),
@@ -330,16 +301,7 @@ esearch/inspection.py) 取出运行身份/指标/缺口等派生值。
 
 
 def summarize_event(kind: str, payload: dict | None) -> str:
-    """把一条研究事件压成一句人可读的说明 (界面"研究过程"用)。
-
-    从 TheoryEngine._summarize_event **逐字**迁出 (合并计划 §5.5: 通用摘要不留在
-    引擎里): 工作台读的是存储里的对象与事件, 不该因此必须建一个研究引擎。
-
-    **团队发出的事件在这里补齐** (第九轮): 只从旧引擎搬过来的那份覆盖的是引擎事件,
-    而统一入口之后真正发生的是团队的提交/派工/状态重算 —— 缺摘要时界面只能回显事件名
-    (`task_finished`), 于是"研究过程"变成一串英文标识符 (实测被
-    `test_event_digest_only_shows_surface_events` 抓到)。
-    """
+    """把一条研究事件压成一句人可读的说明 (界面"研究过程"用)。"""
     payload = payload or {}
     # ---- 团队运行 (统一入口之后的主要事件) ----
     if kind == "task_finished":

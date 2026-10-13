@@ -1,23 +1,6 @@
 from __future__ import annotations
 
-"""问题形式化服务 (合并计划 §3.1 G06 / §9 R2「抽取有效能力」)。
-
-它把"题面 → 命题 + 义务 + 假设 + 定义"这段**确定性**能力从 `TheoryEngine.bootstrap()`
-里抽出来, 让团队的形式化路径与旧引擎走同一份实现。
-
-为什么要抽而不是让角色自己写一套
-------------------------------
-形式化决定了后面所有核验的**编码**: 命题的 `lhs/rhs/relation/variables` 一旦与
-义务的 `acceptance_method` 对不上, 工具核验要么报 unsupported, 要么验错东西。
-让团队路径另写一份, 就是制造"同一个题面在两条路径上被形式化成不同命题"的隐患 ——
-这正是合并计划 §7.1 要求"按职责抽取"而不是"再包一层"的原因。
-
-来源顺序不可颠倒:
-1. **精确计数约束** (`design_feasibility`): 这类题面能被必要条件 + 证书精确判定;
-   若不优先, 含"希望/要求"措辞的精确题会被当成"研究方向";
-2. **通用形式化** (`problem_formulator.formulate`): 由研究类型与可用方法决定
-   命题与义务。
-"""
+"""问题形式化服务。"""
 
 from dataclasses import dataclass, field
 from typing import Any

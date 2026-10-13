@@ -1,16 +1,6 @@
 from __future__ import annotations
 
-"""ContextPack 组装 (计划书 §5.3-2、§5.5 记忆三层)。
-
-控制器每一步只读取**当前目标与相关对象**, 不把整段历史聊天塞进提示词。
-三层记忆:
-1. 原始资料与工具产物 (不可变, 落盘);
-2. 权威研究对象 (SQLite 版本化);
-3. 供模型读取的压缩摘要 —— 必须带对象引用, 不能反过来覆盖原始证据。
-
-摘要只用于导航: 它引用 `object_id@version`, 因此对象换代后摘要自动失效,
-不会被误当作当前结论。
-"""
+"""ContextPack 组装。"""
 
 from dataclasses import dataclass, field
 
@@ -38,7 +28,7 @@ class ContextPack:
     budget: dict = field(default_factory=dict)
     permissions: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
-    # 计划书 §3 R1: 提议必须能看到"当前候选项与冲突", 否则只能按缺口排序
+    # 提议器需同时看到当前候选模型和证据冲突。
     models: list[dict] = field(default_factory=list)          # 候选领域模型
     conflicts: list[dict] = field(default_factory=list)       # 证据冲突 (支持/反对并存)
     available_actions: list[str] = field(default_factory=list)  # 当前可派发的动作
@@ -163,7 +153,7 @@ def build_context_pack(
          "failure_reason": r.failure_reason}
         for r in routes[:max_items]
     ]
-    # 候选模型 (计划书 §3 R1): 提议需要知道"现在有哪些模型可选/已选"
+    # 候选模型: 提议需要知道"现在有哪些模型可选/已选"
     pack.models = [
         {"ref": _ref(m), "name": (getattr(m, "name", "") or "")[:80],
          "mechanism": (getattr(m, "mechanism", "") or "")[:120],

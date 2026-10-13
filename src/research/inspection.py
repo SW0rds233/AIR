@@ -1,20 +1,6 @@
 from __future__ import annotations
 
-"""研究对象库的**只读检视** (合并计划 §5.5 / G01 的前置)。
-
-为什么单独一层
---------------
-`server._research_state`（工作台只读端点）此前必须 `TheoryEngine(spec, store, …)` 才读得出
-对象 —— 一个**只读**接口因此依赖了"能执行研究动作"的引擎。抽出来之后:
-
-- 读路径只需要"存储 + 规格", 不需要任何执行能力, 也不可能顺手推进研究;
-- 引擎退役时这一层**原样保留**, 工作台不用跟着重写;
-- "读"与"判"的边界更清楚: 本模块不写任何对象, 也不产生状态。
-
-实现口径与引擎的同类只读方法**逐字对齐**(`_load` 回填权威版本号、按问题过滤命题、
-逐命题证据归属)。两者的一致性由 `tests/test_store_inspection.py` 的差异用例把守 ——
-在引擎删除之前, 它们必须给出同样的结果; 删除之后这些用例改指本模块。
-"""
+"""研究对象库的只读检视。"""
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -50,9 +36,7 @@ class StoreInspection:
     #: 本层不自己猜。缺省表示"没有运行记录", 计数按 0 呈现。
     runtime_counters: dict[str, Any] = field(default_factory=dict)
 
-    # ------------------------------------------------------------------
     # 对象读取 (与引擎 `_load` 同一口径: 回填权威版本号)
-    # ------------------------------------------------------------------
     def _load(self, kind: str, model) -> list:
         versions = self.store.version_index(kind)
         out = []
@@ -64,18 +48,7 @@ class StoreInspection:
         return out
 
     def claims(self, problem_id: str = "") -> list[Claim]:
-        """当前**研究问题**的命题 (R6: 同项目多问题按问题隔离)。
-
-        归属判定按**两条来源**, 缺一不可 —— 只看载荷里的 `problem_id` 时, 团队写下的
-        命题 (载荷里没有这个字段, 归属记在 `_scope`) 会被当成"归属不明", 于是同项目
-        每个问题都看得到全部命题 (实测: 两个问题的结论集合完全相同, R6 形同虚设):
-
-        1. 命题自身的 `problem_id`;
-        2. 对象的 `_scope.problem_id` (提交时由唯一提交口写入的运行身份)。
-
-        两条都读不到 (旧数据) 时才退回"本问题的" —— 前提是项目里**没有**归属别的
-        问题的命题, 否则归属不明的一律不展示 (fail-closed)。
-        """
+        """当前研究问题的命题 (R6: 同项目多问题按问题隔离)。"""
         rows = self.store.list_latest("claim")
         pid = problem_id or self.spec.problem_id
 
@@ -129,9 +102,7 @@ class StoreInspection:
     def attempts(self) -> list[dict]:
         return list(self.store.list_latest("attempt"))
 
-    # ------------------------------------------------------------------
-    # 逐命题证据归属 (计划书 §3 R3)
-    # ------------------------------------------------------------------
+    # 逐命题证据归属
     def evidence_links_for(self, claim: Claim) -> list[EvidenceLink]:
         """绑定到该命题**当前版本**的证据关系 (旧版本关系视为过期)。"""
         return [link for link in self.evidence_link_records()
@@ -143,9 +114,7 @@ class StoreInspection:
         linked = {link.source_ref.id for link in self.evidence_links_for(claim)}
         return [e for e in self.evidence() if e.claim_id == claim.id or e.id in linked]
 
-    # ------------------------------------------------------------------
     # 运行与用量
-    # ------------------------------------------------------------------
     @property
     def retrieval_available(self) -> bool:
         """能否开展检索: 有可用资料库, 或策略授权自主检索 (P0-1 场景 ②)。"""
@@ -165,17 +134,7 @@ class StoreInspection:
             return {}
 
     def identity(self) -> dict[str, str]:
-        """统一身份四元组 (project / problem / run / branch, 计划书 R6)。
-
-        运行身份有**两个**可能来源, 顺序不能反:
-        1. 旧引擎的运行记录 (`KIND_RUNTIME`, 理论路径);
-        2. 团队运行状态 (`KIND_TEAM_RUN`, 统一入口)。
-
-        只读第一种时, 团队运行的 `run_id` 在工作台里恒为空 —— 而 HTTP 启动响应、任务、
-        事件与交付包用的都是同一个值, "三处必须是同一个 id" 因此在团队路径上直接断了
-        (实测: `wb['run_id'] == start['run_id']` 失败)。这里按"最近一次运行"取,
-        与问题列表/交付清单看到的是同一次运行。
-        """
+        """统一身份四元组。"""
         record = self.runtime_record()
         run_id = str(record.get("run_id", "") or "")
         branch_id = str(record.get("branch_id", "") or "")
@@ -254,9 +213,7 @@ class StoreInspection:
         record = self.runtime_record()
         return str(record.get("stopped_reason", "") or "")
 
-    # ------------------------------------------------------------------
     # 摘要与指标
-    # ------------------------------------------------------------------
     def event_digest(self, claims: list[Claim], *, problem_id: str = "",
                      limit: int = 40) -> list[dict]:
         """最近的研究事件摘要 (按问题过滤, 与引擎同一实现)。"""
@@ -289,9 +246,7 @@ class StoreInspection:
         data["identity"] = self.identity()
         return data
 
-    # ------------------------------------------------------------------
     # 模型选择 / 缺口 (工作台展示用)
-    # ------------------------------------------------------------------
     def model_selection(self, claims: list[Claim],
                         available: dict[str, bool] | None = None) -> dict[str, Any]:
         """当前选中的模型与"需不需要模型"的判定。"""
@@ -388,7 +343,7 @@ class StoreInspection:
             # validation_status=verified, 但证据条数为 **0**; 早期实现按 status 直接
             # `continue`, 于是它永不产生证据缺口、也不触发检索 —— 那次运行的全部外部
             # 检索都发生在 publication 层 (研究冻结之后), 对研究本身毫无作用
-            # (计划书 P0-1/P0-2)。
+            #。
             concluded = claim.status in (ClaimStatus.supported, ClaimStatus.refuted)
             needs_literature = (self.retrieval_available and not own_evidence)
             if concluded and not needs_literature:
@@ -399,8 +354,7 @@ class StoreInspection:
             # 研究一开始就应先掌握已有定义/条件, 不应等到缺条件才检索。
             # 因此只要**检索能力可用**且尚无"已判定支持"的证据, 就存在证据缺口。
             # 这里同样不能用 `knowledge_available`: 本地库为空但授权自主检索时, 外部
-            # 检索仍可用 —— 否则缺口不产生, 检索请求也就无从生成 (计划书 P0-1 的第二处
-            # 一票否决, 与 `_retrieval_requests` 的那处配合才构成"自主检索被整个跳过")。
+            # 检索仍可用，证据缺口必须继续产生检索请求。
             if self.retrieval_available and not supported_evidence:
                 reason = ("尚有候选证据未判定支持关系" if unjudged
                           else "尚未检索已有定义/模型/结论, 无法判断当前问题的新颖性与适用条件")

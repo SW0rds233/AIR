@@ -165,9 +165,7 @@ def domain_terms(topic: str = "", domain: str = "") -> DomainTerms:
     return DomainTerms()
 
 
-# ---------------------------------------------------------------------------
 # 与领域无关的匹配原语
-# ---------------------------------------------------------------------------
 def _term_pattern(term: str) -> re.Pattern | None:
     """英文/中英混写词按**词边界**匹配 (避免 rf 命中 pe-rf-ormance)。"""
     parts = [p for p in re.split(r"\s+", (term or "").strip().lower()) if p]
@@ -246,7 +244,7 @@ def is_off_domain(title: str, domain: str | DomainTerms | None = None) -> bool:
 
 
 def has_off_domain_signal(title: str, domain: str | DomainTerms | None = None) -> bool:
-    """兼容入口: 与 `is_off_domain` 同一实现 (计划书 §5 的命名统一)。"""
+    """兼容入口: 与 `is_off_domain` 同一实现。"""
     return is_off_domain(title, domain)
 
 
@@ -270,14 +268,7 @@ def _normalize_keyword(kw: str) -> str:
 
 
 def _split_keyword_tokens(kw: str) -> list[str]:
-    """把中英混写关键词拆成可匹配的 token (英文短语/缩写 + 中文短语分开)。
-
-    实测教训: Planner 提取的关键词常为中英混写 "射频指纹（RF fingerprinting / RFFI）",
-    若整体归一化后仍含中文与括号, 英文论文标题/摘要永远命中不了 → 200 篇被误删到 1 篇。
-    拆成 token 后 "rffingerprinting"/"rffi"/"射频指纹" 各自独立匹配:
-    - 英文 token: 连续字母数字, 长度 ≥4 (丢弃 rf/fi/sei 等过短缩写, 它们信息量低易误匹配)
-    - 中文 token: 连续汉字, 长度 ≥2
-    """
+    """把中英混写关键词拆成可匹配的 token (英文短语/缩写 + 中文短语分开)。"""
     tokens: list[str] = []
     for m in re.finditer(r"[a-z0-9]+", (kw or "").lower()):
         t = m.group(0)
@@ -395,7 +386,7 @@ def rule_filter(papers: list[dict], topic: str, user_keywords: str = "",
     norm_kws = list(dict.fromkeys(norm_kws))
     # 命中依据 = 完整关键词 + 拆解后的中英文 token。
     # 中英混写关键词 (如 "射频指纹（RF fingerprint）") 拆成 "射频指纹"/"fingerprint",
-    # 否则英文论文标题无法命中带中文/括号的关键词 → 大量误删 (实测 200→1)。
+    # 否则英文论文标题无法命中带中文/括号的关键词 → 大量误删。
     match_terms = list(norm_kws)
     for kw in kws:
         match_terms.extend(_split_keyword_tokens(kw))

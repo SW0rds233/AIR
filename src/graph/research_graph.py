@@ -1,19 +1,6 @@
 from __future__ import annotations
 
-"""统一团队外层循环 (合并计划 §3 / §4.2 / §10 M1)。
-
-它替代的是"按 `stages` 列表线性跑节点"的旧编排 (§4.2: "不能把旧 `stages` 列表
-换个名字继续线性运行")。这里的外层只有一套团队入口, 循环体是:
-
-    主控决策 → 运行时派发任务 → 子智能体提交成果 → 运行时校验/登记 → 主控复盘
-
-子智能体内部可以有工具循环或子图, 但它们不决定团队该怎么走 —— 决定权在主控,
-而**执行与状态写入**在运行时与判定层 (职责分离)。
-
-第一版形态 (§10 M1): 串行执行, 同进程。合并计划 §10 明确要求"M4 中的资源隔离应随
-M1 开始处理, **完成前保持串行角色执行及受控会话并发**", 因此这里不做并行调度;
-并行是可选的显式开关, 且必须带上预算预留与失效传播。
-"""
+"""团队研究的主控循环：决策、派工、登记成果和复盘。"""
 
 import logging
 from collections.abc import Callable, Iterable
@@ -63,16 +50,7 @@ __all__ = [
 
 @dataclass
 class TeamLoopState:
-    """主控循环的显式状态 (合并计划 §15.3 第 1 步)。
-
-    为什么必须显式: 会话引擎要"一步一事件、可中断、可从磁盘续跑", 而把状态埋在
-    `run()` 的局部变量里时, 轮次之间外部无法接手 (也没法在不重复派工的前提下恢复)。
-    字段含义与旧实现的局部变量**一一对应**, 因此 `run()` 改为 `prepare()`+反复
-    `step()` 后行为不变。
-
-    幂等/不重复派工依赖 `objectives`(角色+目标 → 历史)、`dispatched`(已派发键)、
-    `pending_retries`(放行重试的键) 三者的组合判据, 三者都必须随状态一起保留。
-    """
+    """主控循环的显式状态。"""
 
     brief: ResearchBrief | None = None
     plan: TeamPlan | None = None
@@ -82,13 +60,14 @@ class TeamLoopState:
     #: 计划克隆后 task_id 会变, 只看当前计划会漏掉历史成果。
     objectives: dict[str, str] = field(default_factory=dict)
     #: 允许重试的"角色+目标"键。**默认不允许**: 同一件事实失败两次不会因为再派
-    #: 一次就成功, 只会把预算烧光 (实测过)。依据版本变了才在这里放行。
+    #: 一次就成功, 只会把预算烧光。依据版本变了才在这里放行。
     pending_retries: set[str] = field(default_factory=set)
     #: 本运行已派发过的"角色+目标"键。计划任务与补派任务共用, 防止 replan
     #: 克隆出的同键任务被反复派发。
     dispatched: set[str] = field(default_factory=set)
     clarifications: int = 0
     rounds: int = 0
+    review_revisions: int = 0
     stop_reason: str = ""
     finished: bool = False
 
@@ -96,6 +75,7 @@ class TeamLoopState:
         """给会话引擎/界面用的**只读摘要** (不含正文, 只含身份与状态)。"""
         return {
             "rounds": self.rounds,
+            "review_revisions": self.review_revisions,
             "finished": self.finished,
             "stop_reason": self.stop_reason,
             "tasks": sorted(self.results),
@@ -121,7 +101,7 @@ class TeamRunOutcome:
     issues: list[ReviewIssueRef] = field(default_factory=list)
     unresolved_report: dict[str, Any] = field(default_factory=dict)
     #: 交付评估 (等级 + 三道门槛的理由, 见 `research/delivery.py`)。**不是**"角色跑过"
-    #: 的摘要: 它由研究有效性/论文表达/出版完备门槛算出 (§3.2 G12)。
+    #: 的摘要: 它由研究有效性/论文表达/出版完备门槛算出。
     delivery: dict[str, Any] = field(default_factory=dict)
     usage: UsageRecord = field(default_factory=UsageRecord)
 
@@ -152,7 +132,7 @@ class TeamRunOutcome:
 
 
 def build_default_team() -> InProcessExecutor:
-    """注册七个功能角色 (合并计划 §3 的默认团队)。"""
+    """注册七个功能角色。"""
     from src.agents.evidence import EvidenceAgent
     from src.agents.figures import FigureAgent
     from src.agents.modeling import ModelingAgent
@@ -167,6 +147,23 @@ def build_default_team() -> InProcessExecutor:
                   ReviewAgent()):
         executor.register(agent, prompt_version=agent.prompt_version)
     return executor
+
+
+def _is_review_revision(task: AgentTask) -> bool:
+    return task.agent == "writing" and bool((task.hints or {}).get("review_cycle"))
+
+
+def _review_revisions_from_history(
+    plan: TeamPlan | None, results: dict[str, AgentResult],
+) -> int:
+    if plan is None:
+        return 0
+    return sum(
+        1 for row in plan.tasks
+        if row.get("task_id") in results
+        and row.get("agent") == "writing"
+        and bool((row.get("hints") or {}).get("review_cycle"))
+    )
 
 
 class TeamRun:
@@ -186,6 +183,7 @@ class TeamRun:
                  projection: Any | None = None,
                  llm_factory: Callable[[str], Any] | None = None,
                  max_rounds: int = 24,
+                 max_review_revisions: int = 3,
                  review_threshold: int = 80,
                  run_budget: RunBudget | None = None,
                  attachments: list[dict[str, Any]] | None = None,
@@ -224,10 +222,13 @@ class TeamRun:
         if projection is None:
             from src.research.projection import TeamProjection
 
-            # 投影绑定本运行: 查询默认只返回本次运行产出的对象 (§3.3 G14)
+            # 投影绑定本运行: 查询默认只返回本次运行产出的对象
             projection = TeamProjection(self.task_store.store, run_id=run_id)
         self.projection = projection
         self.max_rounds = max(1, max_rounds)
+        if int(max_review_revisions) < 0:
+            raise ValueError("max_review_revisions must be non-negative")
+        self.max_review_revisions = int(max_review_revisions)
         if not 0 <= int(review_threshold) <= 100:
             raise ValueError("review_threshold must be between 0 and 100")
         self.review_threshold = int(review_threshold)
@@ -241,25 +242,16 @@ class TeamRun:
                                         ContextPack] | None = None
         self._cached_default_builder: Any = None
         self._source_set_rows: list[dict[str, Any]] = []
-        #: 唯一提交口 (§6.2): 懒建, 与投影共用同一研究存储。
+        #: 唯一提交口: 懒建, 与投影共用同一研究存储。
         self._commit: Any = None
-        #: 主控循环的**显式状态** (合并计划 §15.3 第 1 步)。
+        #: 主控循环的**显式状态**。
         #: 抽出来是为了让循环可以**逐轮驱动** (会话引擎需要"一步一事件 + 可中断"),
         #: 而不是把状态埋在 `run()` 的局部变量里 —— 那样外部无法在轮次之间接手。
         self.loop = TeamLoopState()
 
     # ---- 生命周期 ----
     def _supervisor_model(self):
-        """主控的角色模型 (缺省从运行时解析, 并**计入本运行用量**)。
-
-        为什么不能省这一步 (§3.1 G02 / G04): `SupervisorAgent(llm=None)` 时主控永远走
-        规则展开, 而它在界面上与"模型理解过任务"长得一模一样。审计复现过这条
-        (`llm_calls == 0`), 修完 G04 之后**接线漏在装配层**: 团队入口建 `TeamRun` 时
-        仍写死 `llm=None`, 于是模型被解析出来却从未交给主控。
-
-        用量也必须记: 主控的调用不属于任何任务, 不记就让"这次运行用了多少模型"
-        少掉一块, 而 `llm_calls == 0` 恰好是审计判断"有没有真调模型"的判据。
-        """
+        """主控的角色模型 (缺省从运行时解析, 并计入本运行用量)。"""
         model = self.runtime._resolve_llm("supervisor")
         if model is None:
             return None
@@ -292,14 +284,7 @@ class TeamRun:
         self._cached_default_builder = None
 
     def _persist_spec(self) -> None:
-        """把这次研究的**输入规格**落盘 (团队运行同样要有可查的问题规格)。
-
-        为什么团队也要写 (§6.1 "一份事实模型"): 工作台、问题列表与交付清单都按
-        `problem_id` 找规格。团队路径此前不写规格, 于是同一个项目在团队模式下
-        "没有研究问题" —— 界面读不到任何对象, 只读端点直接 404, 尽管对象就在库里。
-
-        已确认规格不覆盖。仅对同一请求的未确认空模板补全附件题面，并保存新版本。
-        """
+        """把这次研究的输入规格落盘 (团队运行同样要有可查的问题规格)。"""
         from src.research.schemas import SourcePolicy
         from src.research.store import KIND_SPEC
 
@@ -375,9 +360,7 @@ class TeamRun:
                                                   "run_id": self.run_id})
         self.loop.plan = plan
         self.outcome.plan = plan
-        # 输入规格也要落盘: 工作台、问题列表、交付清单都按 `problem_id` 找规格, 团队
-        # 运行此前不写规格 —— 于是同一个项目在团队路径下"没有研究问题", 界面读不到
-        # 对象、`resolve_problem` 直接 404 (§6.1 一份事实模型)。
+        # 工作台和交付清单按 problem_id 查找已持久化的输入规格。
         self._persist_spec()
         try:
             from src.research.progress import write_plan_progress
@@ -392,7 +375,7 @@ class TeamRun:
         except Exception as e:  # noqa: BLE001 - presentation must not block research
             self.runtime.emit("progress_export_failed", {
                 "stage": "planned", "reason": f"{type(e).__name__}: {e}"})
-        # 画像/计划一算出来就落盘: "任务落盘不等于恢复团队" (§3.3 G16) —— 只有画像
+        # 画像/计划一算出来就落盘: "任务落盘不等于恢复团队" —— 只有画像
         # 与计划也在磁盘上, 续跑才能复用**同一批任务身份与依赖边**, 而不是重新画像。
         self.save_state()
         self.runtime.emit("brief_ready", {"project_id": self.project_id,
@@ -414,6 +397,8 @@ class TeamRun:
         """
         self.prepare()
         state = self.loop
+        state.review_revisions = max(
+            state.review_revisions, _review_revisions_from_history(state.plan, state.results))
         state.rounds += 1
         self.outcome.rounds = state.rounds
         if self.cancel.cancelled:
@@ -440,8 +425,18 @@ class TeamRun:
             if not decision.tasks:
                 self._finish(state, "主控决定派工但没有给出任务")
                 return False
-            state.open_needs = []
+            needs_cleared = False
             for task in decision.tasks:
+                if _is_review_revision(task) and state.review_revisions >= self.max_review_revisions:
+                    self._finish(
+                        state,
+                        f"审稿后修订达到上限 {self.max_review_revisions} 次；当前审稿仍未通过",
+                        status=TaskStatus.partial.value,
+                    )
+                    return False
+                if not needs_cleared:
+                    state.open_needs = []
+                    needs_cleared = True
                 key = assignment_key(state.brief, task.agent, task.objective)
                 state.pending_retries.discard(key)   # 本次已放行, 不重复放行
                 state.dispatched.add(key)
@@ -452,6 +447,8 @@ class TeamRun:
                 if task.task_id not in state.plan.edges:
                     self.supervisor.adopt(state.plan, task)
                 result = self._execute_one(task, state.results)
+                if _is_review_revision(task):
+                    state.review_revisions += 1
                 state.results[task.task_id] = result
                 state.objectives[task.task_id] = task.objective
                 self.outcome.task_order.append(task.task_id)
@@ -459,20 +456,17 @@ class TeamRun:
                 state.plan = self.supervisor.replan(
                     state.plan, {task.task_id: result}, version=state.plan.version)
                 self.outcome.plan = state.plan
-            # 依据版本变了 -> 允许重试此前失败过的"角色+目标"组合。
-            #
+            # 只有依据对象的版本变化，才允许重试失败任务。
             # 判据是**该任务实际依据的对象的版本**(它自己的输入引用与 read-set),
             # 而不是全局版本计数 —— 后者每轮都因为新登记对象而变化, 等于给所有
-            # 失败任务无限重试许可 (实测: 同一件事被派 17 次)。
+            # 失败任务无限重试许可。
             self._refresh_retry_allowance(state.brief, state.results, state.objectives,
                                           state.pending_retries)
             # 每轮结束都落盘: 进程被杀时最多丢掉"本轮正在执行的那一个动作",
-            # 已交回的成果与派工历史不会重跑 (合并计划 §3.3 G16)。
+            # 已交回的成果与派工历史不会重跑。
             self.save_state()
             if state.rounds >= self.max_rounds:
-                # 轮次上限也是**一个出口**, 因此必须走同一 finalize (§3.2 G12):
-                # 此前这里直接 `return False`, 于是达到上限的运行停在 status="queued"、
-                # 没有停止原因、也没有交付评估 —— 界面与用例看到的是"没跑过"。
+                # 达到轮次上限也要写入终态和交付评估。
                 self._finish(state, f"达到轮次上限 {self.max_rounds}",
                              status=TaskStatus.partial.value)
                 return False
@@ -497,13 +491,7 @@ class TeamRun:
 
     def _finish(self, state: TeamLoopState, stop_reason: str,
                 status: str = "") -> None:
-        """收尾: 落定状态、未决报告与用量, 并发出 `run_finished`。
-
-        **交付不升级** (§3.2 G12): 主控说"交付"只是**循环该结束了**, 不等于"研究已
-        验收通过"。因此这里按研究有效性/论文表达/出版完备三道门槛评估产出, 门槛未过
-        一律把状态从 `completed` 降为 `partial`, 并把理由写进未决报告 —— 交付等级
-        由 `classify_deliverable` 给出, 绝不因为"角色都跑过"就称完整论文。
-        """
+        """收尾: 落定状态、未决报告与用量, 并发出 `run_finished`。"""
         if status:
             self.outcome.status = status
         if not stop_reason:
@@ -516,6 +504,11 @@ class TeamRun:
         self.outcome.issues = self.supervisor.review_issues(state.plan, state.results)
         self.outcome.unresolved_report = unresolved_report(
             state.brief, state.plan, state.results)
+        self.outcome.unresolved_report["stop_reason"] = stop_reason
+        if self.outcome.status == TaskStatus.partial.value and stop_reason:
+            unresolved = self.outcome.unresolved_report.setdefault("unresolved", [])
+            if stop_reason not in unresolved:
+                unresolved.append(stop_reason)
         # 用量必须含**主控自己**的模型调用: 它不属任何任务, 漏掉就会让
         # "这次运行有没有真的调模型"在用量里显示为 0 (审计判据之一)。
         self.outcome.usage = _sum_usage(state.results).merge(self._supervisor_usage)
@@ -528,7 +521,7 @@ class TeamRun:
                 "blocking": [], "unresolved": [],
                 "counts": {}, "notes": [f"运行在 {self.outcome.status} 结束, 未做交付评估"],
             }
-        # 收尾状态也落盘: 续跑据此知道"这次运行已经结束", 不会重跑一遍 (§3.3 G16)。
+        # 收尾状态也落盘: 续跑据此知道"这次运行已经结束", 不会重跑一遍。
         self.save_state(status=self.outcome.status)
         self.runtime.emit("run_finished", {
             "run_id": self.run_id, "status": self.outcome.status,
@@ -610,7 +603,7 @@ class TeamRun:
         # **把运行身份钉在任务上**: 计划任务与需求任务走的是同一个执行口, 但
         # `needs_to_tasks` 生成的补派任务没有 run_id —— 它提交的对象 `_scope.run_id`
         # 因此为空, 而按运行裁剪的视图 (交付摘要的登记对象、run 过滤的产物清单) 会
-        # 把它们算成"不是这次运行产出的" (实测: 工作台有命题, 摘要里 claim 计数为 0)。
+        # 把它们算成"不是这次运行产出的"。
         # 身份只在这一个执行口回填, 角色自己不需要 (也不应该) 关心运行身份。
         if not task.run_id:
             task.run_id = self.run_id
@@ -639,17 +632,7 @@ class TeamRun:
         return result
 
     def _persist_result(self, task: AgentTask, result: AgentResult) -> None:
-        """通过**唯一提交口**落盘任务成果 (合并计划 §3.1 G08 / §6.2)。
-
-        此前这里是 `task_store.finish()` 之后再逐条 `projection.register()` ——
-        `TaskStore.commit_result()` 的 read-set 检查与同事务提交能力完全没用上:
-        任务终态、对象、事件各自独立提交, 中断时会出现"工具完成了、对象没落盘"。
-        现在整批交给 `ResearchCommitService`, 它在**一个事务**里写任务终态、
-        接受的对象、义务/命题的判定结果与事件, 并用幂等键防止重放产生第二个对象。
-
-        拒绝理由来自 `finalize()` 已经隔离的候选 (`rejected_changes`) 与提交口自己
-        重查的能力表: 越权候选**没有**任何路径进权威对象库。
-        """
+        """通过唯一提交口落盘任务成果。"""
         service = self._commit_service()
         rejects = [dict(item) for item in (result.rejected_changes or [])]
         watched = dict(result.input_versions or {})
@@ -777,7 +760,7 @@ class TeamRun:
         """可恢复性视图: 已提交/运行中/待派 + **能否重建主控循环**。
 
         恢复的判据只有一条: 落盘的 `TeamLoopState` 能不能读回来。只报"库里有几条任务"
-        是不够的 —— 任务落盘不等于恢复团队 (合并计划 §3.3 G16): 没有画像与计划,
+        是不够的 —— 任务落盘不等于恢复团队: 没有画像与计划,
         主控只能从零重新画像并重新派工, 于是"已提交的动作"会被再做一遍。
         """
         view = self.task_store.recoverable()
@@ -786,13 +769,13 @@ class TeamRun:
                 "loop_state_restorable": restored is not None,
                 "resumable": bool(restored and restored.plan and not restored.finished)}
 
-    # ---- 持久化与恢复 (合并计划 §3.3 G16) ----
+    # ---- 持久化与恢复 ----
     def save_state(self, *, status: str = "") -> bool:
         """把主控循环状态落盘 (`KIND_TEAM_RUN`), 返回是否写入成功。
 
         存的是**可重建循环的最小充分集**: 画像、计划、已交回的成果、派工历史、
         重试许可、轮次与停止原因, 以及运行身份。不存正文 —— 正文在研究对象库与
-        交付包里, 这里只有引用与摘要 (与 §6.1 的"图状态只放引用"一致)。
+        交付包里, 这里只有引用与摘要。
         """
         from src.research.store import KIND_TEAM_RUN
 
@@ -808,8 +791,10 @@ class TeamRun:
             "attachments": list(self.attachments),
             "attachment_text": self.attachment_text,
             "max_rounds": self.max_rounds,
+            "max_review_revisions": self.max_review_revisions,
             "review_threshold": self.review_threshold,
             "rounds": state.rounds,
+            "review_revisions": state.review_revisions,
             "finished": state.finished,
             "stop_reason": state.stop_reason,
             "clarifications": state.clarifications,
@@ -904,7 +889,7 @@ class TeamRun:
         limit = int(max_rounds if max_rounds is not None else self.max_rounds)
         # **用户意见必须有它自己的轮次额度**: 恢复出来的循环已经用过 `rounds` 轮,
         # 若沿用原上限, `step()` 会因为 `rounds >= max_rounds` 立刻收尾 —— 需求根本
-        # 派不出去, 而返回结果看起来像"已处理"(实测)。因此把上限抬到"当前轮次 + 本次额度"。
+        # 派不出去, 而返回结果看起来像"已处理"。因此把上限抬到"当前轮次 + 本次额度"。
         self.max_rounds = max(self.max_rounds, self.loop.rounds + limit)
         before = self.loop.rounds
         while self.step() and (self.loop.rounds - before) < limit:
@@ -943,15 +928,7 @@ class TeamRun:
         return result
 
     def resume(self) -> TeamRunOutcome:
-        """从落盘状态继续这次运行 (已提交的动作**不重跑**)。
-
-        语义 (§9.1 的 start/resume/fork): `resume` = 同一 run 接着跑。因此恢复后:
-        - 画像与计划**原样复用**(不重新画像 —— 那会换掉任务身份与依赖边);
-        - `results` / `dispatched` / `objectives` / `pending_retries` 一并恢复,
-          主控因此不会把已经交回过的那件事再派一次;
-        - 已经收尾的运行不再重跑, 直接按**落盘时记下的状态**返回结论
-          (不能拿默认状态覆盖它, 否则一次"已完成"会显示成"未跑过")。
-        """
+        """从落盘状态继续这次运行 (已提交的动作不重跑)。"""
         if not self.restore_state():
             self.runtime.emit("run_state_missing", {"run_id": self.run_id})
             return self.run()
@@ -985,11 +962,16 @@ class TeamRun:
         if restored is None:
             return False
         self.loop = restored
+        self.max_review_revisions = int(payload.get(
+            "max_review_revisions", self.max_review_revisions))
         self.review_threshold = int(payload.get("review_threshold", self.review_threshold))
         self.outcome.brief = restored.brief
         self.outcome.plan = restored.plan
         self.outcome.results = restored.results
         self.outcome.open_needs = restored.open_needs
+        self.outcome.task_order = [str(task_id) for task_id in
+                                   (payload.get("task_order") or restored.results)
+                                   if str(task_id) in restored.results]
         self.outcome.rounds = restored.rounds
         self.outcome.status = str(payload.get("status", "") or "")
         self.outcome.stop_reason = restored.stop_reason
@@ -1073,6 +1055,10 @@ def rebuild_loop_state(payload: dict[str, Any]) -> TeamLoopState | None:
         state.open_needs = [ResearchNeed.model_validate(row)
                             for row in (payload.get("open_needs") or [])]
         state.rounds = int(payload.get("rounds", 0) or 0)
+        state.review_revisions = max(
+            int(payload.get("review_revisions", 0) or 0),
+            _review_revisions_from_history(state.plan, state.results),
+        )
         state.clarifications = int(payload.get("clarifications", 0) or 0)
         state.finished = bool(payload.get("finished", False))
         state.stop_reason = str(payload.get("stop_reason", "") or "")
@@ -1089,7 +1075,7 @@ def make_context_builder(*, brief_getter: Callable[[], ResearchBrief | None],
                          request: str = "") -> Callable[[AgentTask,
                                                          dict[str, AgentResult]],
                                                         ContextPack]:
-    """构造"按任务裁剪的角色视图"组装器 (合并计划 §6.1: 角色视图由 context 层组装)。
+    """构造"按任务裁剪的角色视图"组装器。
 
     只放**引用与摘要**: 每条对象的 `text/abstract/excerpt` 截断到展示长度, 正文留在
     存储与产物里。这样图状态与提示词都不会出现"复制一份可写状态"。

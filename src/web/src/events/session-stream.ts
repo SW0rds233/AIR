@@ -1,19 +1,4 @@
-/**
- * 会话事件流 (SSE) 的独立消费 (合并计划 §9.5: `app.ts::connectSSE/handleEvent/lastEventId`
- * 迁到 `events/` 之上)。
- *
- * 与 `events/session-events.ts` 的分工
- * --------------------------------
- * - `session-events.ts` 是**协议层**: 事件类型、解析、去重、缺口与退避策略 (已有单测);
- * - 本模块是**连接层**: EventSource 的建立/关闭、按会话游标续订、断线补偿、把事件
- *   交给页面的 `handleEvent`, 并且**不直接操作 DOM** (页面出口经 `deps` 注入)。
- *
- * 迁移时保持的行为 (逐条对应, 不允许"顺手改"):
- * 1. 只有收到过事件(`last_event_id > 0`)才带 `?last_event_id=`, 否则 URL 与旧版一致;
- * 2. 游标是**每个会话一份** (旧版是全局 `lastEventId`, 切换会话会串号);
- * 3. 断线先查 `/state` 补偿, 再重连; 连接被显式关闭(silent)或换了线程就不再重连;
- * 4. 重连不再无限: 用 `nextReconnectDelay` 的上限退避 (用户可手动刷新继续)。
- */
+/** 消费 SSE 会话事件，并在断线后恢复状态。 */
 
 import { nextReconnectDelay } from './session-events';
 import {
@@ -41,7 +26,7 @@ export interface SessionStreamDeps {
   onFinished(): void;
   /** 重连次数上限 (默认 6)。 */
   maxReconnectAttempts?: number;
-  /** HTTP 出口 (§9.5): 断线补偿的状态查询也走 api/ 层, 不在事件层拼 URL。 */
+  /** HTTP 出口: 断线补偿的状态查询也走 api/ 层, 不在事件层拼 URL。 */
   api?: ResearchClient;
 }
 
@@ -128,7 +113,7 @@ export function createSessionStream(deps: SessionStreamDeps): SessionStream {
       }
     };
     // F2: 断线不能静默 —— 先查会话状态做补偿, 再重连并回放缺失事件。
-    // 补偿查询也走统一客户端 (§9.5): 但**不重试**(这里本身就是重连路径, 叠加重试
+    // 补偿查询也走统一客户端: 但**不重试**(这里本身就是重连路径, 叠加重试
     // 会让补偿请求成倍增长); 失败也继续按退避重连。
     source.onerror = () => {
       if (es !== source) return;

@@ -1,26 +1,6 @@
 from __future__ import annotations
 
-"""FigureAgent 配图 (合并计划 §3.1 / §7.3 / §3.3 G18)。
-
-职责: 按论证结构、来源数据、公式/模型与版面要求**选图**、绘图、修正。
-提交 `FigureSpec` 与产物: 数据与脚本引用、图注、核查结果。
-
-G18 的三条硬约束 (修复前都缺):
-
-1. **唯一 FigureSpec/产物服务**: 一切图都经 `render_figure_spec()` 落到
-   `figures/<run>/<task>/v<artifact_version>/`; 多 run、以及同一次运行里的多张图
-   都不会互相覆盖。修复前默认写 `OUTPUT_DIR/figures` 且只按 `kind-purpose` 命名,
-   两次运行会覆盖同一张图。
-2. **先校验再渲染**: 来源引用、模型域 (公式变量)、单位与权限 (令牌的
-   `tools:figure` 读范围 + `propose_figure` 能力) 全部在渲染**之前**检查; 任一项
-   不通过就**不渲染**, 并把结构化失败交回主控 —— "不支持/绘制失败可见", 而不是
-   修复前的"记录校验问题后照样画"。
-3. **公式只走白名单解析 + 受限执行**: 见 `src.rag.figure_formula`; 任意 Python
-   (`__import__('os').system('echo x')`) 在解析阶段就被显式拒绝, 不再经 `parse_expr`。
-
-另外每张图都记录 `input_versions` (它由哪些对象的哪个版本产出), 并以 `ArtifactRef`
-指向**真实存在**的文件; 自由绘图脚本题材不再执行 (进程隔离不等于权限隔离)。
-"""
+"""FigureAgent 配图。"""
 
 import csv
 import hashlib
@@ -183,7 +163,7 @@ class FigureAgent(AgentBase):
                                              grant=context.grant)
             problems = list(outcome.get("problems") or []) or \
                 [str(outcome.get("message", "") or "渲染未成功")]
-            # 绝对路径不进共享状态 (§13.3): 载荷里只留产物根下的相对 uri。
+            # 绝对路径不进共享状态: 载荷里只留产物根下的相对 uri。
             spec["render"] = {key: value for key, value in outcome.items() if key != "path"}
             if not outcome.get("ok"):
                 spec["rejected"] = True
@@ -356,9 +336,7 @@ def _artifact_version(spec: dict[str, Any], index: int) -> str:
     return str(raw).strip()
 
 
-# ----------------------------------------------------------------------
 # 来源登记表
-# ----------------------------------------------------------------------
 def figure_source_index(context: ContextPack | None) -> dict[str, int]:
     """本任务可引用的来源登记表: `{对象 id: 版本}`。
 
@@ -411,24 +389,12 @@ def _model_domain(context: ContextPack | None, data_source: str) -> set[str]:
     return domain
 
 
-# ----------------------------------------------------------------------
 # 渲染前校验 (来源 / 模型域 / 单位 / 权限)
-# ----------------------------------------------------------------------
 def validate_figure_spec(spec: dict[str, Any], *,
                          context: ContextPack | None = None,
                          sources: dict[str, int] | None = None,
                          grant: CapabilityGrant | None = None) -> list[str]:
-    """渲染前的确定性校验; 返回问题列表 (**非空即不得渲染**)。
-
-    四类必查项 (合并计划 §3.3 G18: "来源、模型域、单位、权限先校验再渲染"):
-
-    - **来源**: `data_source` 必须出现在本任务的来源登记表里 (没有登记表就拒绝);
-    - **模型域**: `curve` 图的方程必须在模型声明的符号域内, 且只使用白名单语法;
-    - **单位**: 定量图与曲线图必须声明轴单位, 或显式 `unitless: true`;
-    - **权限**: 令牌必须授权读范围 `tools:figure` 与可写能力 `propose_figure`。
-
-    此外保留原有的图种/用途/图注/数值系列检查。本函数不修改 `spec`。
-    """
+    """渲染前的确定性校验; 返回问题列表 (非空即不得渲染)。"""
     problems: list[str] = []
     kind = str(spec.get("kind", "") or "")
     if kind not in SUPPORTED_FIGURE_KINDS:
@@ -519,9 +485,7 @@ def permission_problems(grant: CapabilityGrant | None) -> list[str]:
     return problems
 
 
-# ----------------------------------------------------------------------
 # 确定性绘图入口 (唯一)
-# ----------------------------------------------------------------------
 def render_figure_spec(spec: dict[str, Any], *,
                        output_dir: str | Path | None = None,
                        context: ContextPack | None = None,
@@ -653,7 +617,7 @@ def _sha256(path: Path) -> str:
 
 
 def _artifact_uri(path: Path) -> str:
-    """产物根下的相对 uri (绝对路径不进共享状态, §13.3)。"""
+    """产物根下的相对 uri。"""
     from src import config
 
     try:

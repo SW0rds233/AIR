@@ -1,14 +1,6 @@
 from __future__ import annotations
 
-"""ModelingAgent 问题建模 (合并计划 §3.1 / §7.1)。
-
-职责: 从研究契约与可定位资料提取变量、量纲、域、约束、机制与假设, 比较候选模型。
-提交 `ModelProposal`: 数学/概念模型、形式化映射、假设来源、模型比较、待核查条件。
-
-合并要点 (§7.1): `loop._act_propose_model` + `modeling.py` + `problem_formulator.py`
-的能力归属这里 —— 由 LLM 形成模型提案, 由规则/形式解析检验**忠实度与结构**。
-因此 `validate_model_payload()` 是独立的确定性检查, 不依赖模型自述。
-"""
+"""ModelingAgent 问题建模。"""
 
 import json
 from typing import Any
@@ -95,7 +87,22 @@ class ModelingAgent(AgentBase):
         candidates: list[dict[str, Any]] = []
         unknowns: list[str] = []
         parse_note = ""
-        # 有已读原文时先走**抽取出来的**建模内核 (合并计划 M2): 它从证据构造互相竞争的
+        from src.research.classification import is_formal_question
+
+        question = str((context.objects.get("brief") or [{}])[0].get("main_question")
+                       or context.request)
+        grounded_evidence = _model_grounding_evidence(context)
+        if task.source_policy in {"both", "user_kb", "autonomous"} \
+                and not is_formal_question(question) and not grounded_evidence:
+            return self.blocked(
+                task, "授权资料尚无可用于应用建模的已判定来源",
+                needs=[ResearchNeed(
+                    kind=NeedKind.more_sources,
+                    statement="补充与研究问题和候选机制直接相关的原文",
+                    why="现有检索命中均为 insufficient 或不可定位，不能充当模型框架依据",
+                    acceptance=["登记可定位片段并判定与研究问题的支持或背景关系"],
+                    blocking=False)], usage=usage)
+        # 有已读原文时先走**抽取出来的**建模内核: 它从证据构造互相竞争的
         # 候选机制并显式选中一个, 与旧引擎路径共用同一份实现 (差异测试见
         # tests/test_reasoning_kernel.py)。没有可用原文时内核返回
         # `requires_evidence`, 角色据此提出补检索需求而**不编模型**。
@@ -112,7 +119,7 @@ class ModelingAgent(AgentBase):
                 f"{clip(str(row.get('title', '')), 140)} | "
                 f"{clip(str(row.get('excerpt', '')), 350)} | "
                 f"定位 {row.get('locator') or '无'}"
-                for row in (context.objects.get("evidence") or [])[:20])
+                for row in grounded_evidence[:20])
             prompt = (
                 f"# 原始研究问题\n{clip(str(brief.get('main_question') or context.request), 2000)}\n"
                 f"# 已识别对象与边界\n"
@@ -162,8 +169,16 @@ class ModelingAgent(AgentBase):
                       if row.get("id")]
         known_source_ids = {
             str(row.get("source_id") or row.get("id") or "")
-            for row in (context.objects.get("evidence") or [])
+            for row in grounded_evidence
             if row.get("source_id") or row.get("id")
+        }
+        known_source_ids.update(str(row.get("id")) for row in grounded_evidence
+                                if row.get("id"))
+        supporting_source_ids = {
+            str(row.get(key)) for row in grounded_evidence
+            if str(row.get("relation") or row.get("support") or "")
+            in {"supports", "partially_supports"}
+            for key in ("source_id", "id") if row.get(key)
         }
         from pathlib import PureWindowsPath
         known_input_ids = {str(value) for item in context.attachments if isinstance(item, dict)
@@ -187,10 +202,17 @@ class ModelingAgent(AgentBase):
                 unknowns.append(
                     f"候选模型 {index + 1} 未提交：字段不符合入库契约 ({error.errors()[0]['msg']})")
                 continue
-            accepted_candidates.append(model)
             problems = validate_model_payload(model, known_source_ids=known_source_ids,
+                                              supporting_source_ids=supporting_source_ids,
                                               known_input_ids=known_input_ids)
             checks.extend(problems)
+            if any("未登记来源" in problem or "未关联来源" in problem
+                   or "缺少支持关系" in problem
+                   for problem in problems):
+                rejected_models += 1
+                unknowns.append(f"候选模型 {index + 1} 未提交：框架或外部假设缺少有效来源")
+                continue
+            accepted_candidates.append(model)
             changes.append(build_proposal(
                 "model",
                 payload={**model, "index": index, "validation_problems": problems,
@@ -246,6 +268,10 @@ class ModelingAgent(AgentBase):
             anchors = domain_terms.strong_in_domain or domain_terms.in_domain
             evidence = [item for item in evidence
                         if mentions(anchors, f"{item.title} {item.excerpt}")]
+        grounded_ids = {str(row.get("id")) for row in _model_grounding_evidence(context)
+                        if str(row.get("relation") or row.get("support") or "")
+                        in {"supports", "partially_supports"}}
+        evidence = [item for item in evidence if item.id in grounded_ids]
         if is_theoretical_claim(claim) or (is_formal_question(question) and not has_empirical_context(claim)):
             return None  # Mathematical encoding must not be selected by an empirical mechanism template.
         if not evidence:
@@ -328,6 +354,7 @@ class ModelingAgent(AgentBase):
 
 def validate_model_payload(model: dict[str, Any], *,
                            known_source_ids: set[str] | None = None,
+                           supporting_source_ids: set[str] | None = None,
                            known_input_ids: set[str] | None = None) -> list[str]:
     """忠实度与结构检查 (零 LLM)。
 
@@ -340,6 +367,11 @@ def validate_model_payload(model: dict[str, Any], *,
         problems.append("候选模型缺少名称")
     if not str(model.get("mechanism", "") or "").strip():
         problems.append(f"模型 {name or '(未命名)'} 没有说明机制/方程形式")
+    if known_source_ids is not None:
+        unknown_refs = sorted(set(as_list_of_str(model.get("source_refs")))
+                              - known_source_ids - (known_input_ids or set()))
+        if unknown_refs:
+            problems.append(f"模型 {name} 引用了未登记来源: {unknown_refs}")
     variables = model.get("variables") or []
     if not isinstance(variables, list):
         problems.append(f"模型 {name or '(未命名)'} 的 variables 不是列表")
@@ -365,6 +397,10 @@ def validate_model_payload(model: dict[str, Any], *,
             source_ids = as_list_of_str(assumption.get("source_ids"))
             if assumption.get("origin") == "external" and not source_ids:
                 problems.append(f"模型 {name} 的外部假设 {index} 未关联来源")
+            if (supporting_source_ids is not None
+                    and assumption.get("origin") == "external"
+                    and not set(source_ids) & supporting_source_ids):
+                problems.append(f"模型 {name} 的外部假设 {index} 缺少支持关系")
             if known_source_ids is not None:
                 permitted = set(known_source_ids)
                 if assumption.get("origin") == "user_assumption":
@@ -373,6 +409,16 @@ def validate_model_payload(model: dict[str, Any], *,
                 if unknown:
                     problems.append(f"模型 {name} 的假设 {index} 引用了未登记来源: {unknown}")
     return problems
+
+
+def _model_grounding_evidence(context: ContextPack) -> list[dict[str, Any]]:
+    allowed = {"supports", "partially_supports", "background"}
+    return [row for row in context.objects.get("evidence") or []
+            if isinstance(row, dict)
+            and str(row.get("relation") or row.get("support") or "") in allowed
+            and str(row.get("excerpt") or "").strip()
+            and str(row.get("locator") or row.get("location") or "").strip()
+            and str(row.get("content_level") or "").lower() != "metadata"]
 
 
 def _modelling_subject(context: ContextPack, task: AgentTask | None = None):

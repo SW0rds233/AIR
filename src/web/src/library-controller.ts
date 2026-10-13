@@ -1,16 +1,4 @@
-/**
- * 资料接入控制器: 「从本机路径添加资料」的**先预览再确认**流程。
- *
- * 为什么需要它而不是把逻辑塞进 `app.ts`: §9.5 要求新功能按 controller/view 分层,
- * 而且这里的流程有真实状态 (扫描报告 -> 待导入请求 -> 导入报告), 必须能单测。
- *
- * 三条不可让步的行为:
- * 1. **先扫描后导入**: 没有扫描结果不允许导入, 避免用户在没看到拒绝清单时就把
- *    一整棵目录树塞进库;
- * 2. **部分失败不报成功**: 导入报告的 `denied/failed/truncated` 一律进入界面,
- *    并被调用方当成"需要用户处理"的结论;
- * 3. **只读**: 不复制、不改名用户文件;删除只解除登记。
- */
+/** 资料接入控制器: 「从本机路径添加资料」的先预览再确认流程。 */
 
 import {
   emptyPathRequest,
@@ -59,7 +47,7 @@ export interface LibraryController {
 }
 
 async function defaultFetchJson(url: string, init?: RequestInit): Promise<any> {
-  // 统一走 HTTP 客户端 (§9.5): URL/错误/取消/重试语义只在一处。
+  // 统一走 HTTP 客户端: URL/错误/取消/重试语义只在一处。
   // 导入是**变更类**请求, 因此带上幂等键 —— 那也正是"允许自动重试"的前提。
   const { client } = await import('./api/research-client');
   const method = (init?.method ?? 'GET').toUpperCase() as 'GET' | 'POST' | 'DELETE';
@@ -149,7 +137,7 @@ export function createLibraryController(deps: LibraryControllerDeps = {}): Libra
         const merged = Boolean(imported?.library_existed);
         const binding = imported?.binding_error
           ? ` 当前对话未绑定：${imported.binding_error}`
-          : imported?.bound_session_id ? ' 已绑定当前对话。' : '';
+          : imported?.bound_session_id ? ' 已绑定当前对话。' : ' 已为下一次研究选中该库。';
         notify(
           cached
             ? `资料库「${label}」命中幂等缓存（目录内容未变，本次未重新导入）。` +
@@ -200,9 +188,7 @@ export function createLibraryController(deps: LibraryControllerDeps = {}): Libra
   };
 }
 
-// ----------------------------------------------------------------------
-// 页面接入 (§9.5: `app.ts` 只做装配 —— 扫描/确认/刷新/删除的编排在这一层)
-// ----------------------------------------------------------------------
+// 页面接入
 export interface LibrarySectionDeps {
   /** 用户可见提示。 */
   notify(text: string, cls?: string): void;
@@ -217,8 +203,7 @@ export interface LibrarySectionDeps {
   renderWorkspace(sources: any[]): void;
   /** 库列表变化后刷新资料源下拉框。 */
   refreshSourceSets(): void;
-  /** 选中资料库; `announce` 为真时由实现方给出选中结果提示。返回是否选中成功。 */
-  selectSourceSet(sourceSetId: string, announce?: boolean): Promise<boolean>;
+  selectSourceSet(sourceSetId: string): Promise<void>;
   currentSessionId(): string;
   writePaths(text: string): void;
   pickFolder?(): Promise<{ path: string; cancelled: boolean; grant_token: string }>;
@@ -241,7 +226,7 @@ export interface LibrarySection {
 }
 
 /**
- * 「从本机路径添加资料」的页面接入 (§13.4)。
+ * 「从本机路径添加资料」的页面接入。
  *
  * 两条行为是硬要求, 与 `createLibraryController` 一起保证: **未扫描不得导入**;
  * **部分失败不报成功**。这里只做编排与 DOM 出口, 不在调用方重复判断。
@@ -275,9 +260,7 @@ export function createLibrarySection(deps: LibrarySectionDeps): LibrarySection {
     const sessionId = deps.currentSessionId();
     const result = await getController().commit(sessionId);
     if (result && !result.binding_error && deps.currentSessionId() === sessionId) {
-      // 必须用**规范 id**：`topic` 是回显用的原文（可能含空格），而下拉框里是
-      // 目录名（`星网 星链` → `星网_星链`）。用原文选不中，还会让下一次运行无绑定。
-      await deps.selectSourceSet(result.source_set_id || result.topic, true);
+      await deps.selectSourceSet(result.topic);
     }
     deps.setImportDisabled(!getController().canImport());
   }
@@ -308,7 +291,7 @@ export function createLibrarySection(deps: LibrarySectionDeps): LibrarySection {
       const sources = await deps.loadSources();
       deps.renderWorkspace(sources);
     } catch (error) {
-      // 读不到就保留已有内容并说明原因, 不显示成"没有资料库" (§9.6)
+      // 读不到就保留已有内容并说明原因, 不显示成"没有资料库"
       deps.notify('读取资料工作区失败: ' + String(error), 'msg-error');
     }
   }

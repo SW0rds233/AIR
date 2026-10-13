@@ -1,20 +1,6 @@
 from __future__ import annotations
 
-"""新颖性对照服务 (合并计划 §5.4 `_act_compare_novelty` 的能力抽取)。
-
-判定规则本身在内核/`research.novelty`(零 LLM): 检索命中**不等于**结论已被别人做过,
-因此 `assess` 只给候选对照行与 `unchecked` 状态, 由人/独立审查确认等价性。
-
-这一层只解决"**拿什么去比**":
-
-- 有可用知识底座 → `kb.bridge.novelty_lookup`(本地库内检索);
-- 否则 → `research.retrieval.build_lookup()`(外部文献检索), 并把实际覆盖的资料源
-  写进记录 —— 未检索到等价结果 ≠ 世界首次, 必须能说清"比的是哪些范围"。
-
-为什么要抽出来: 这段选择逻辑原本在 `graph/theory_pipeline._novelty_lookup_for` 里,
-于是团队路径要么没有新颖性对照, 要么得自己再写一份"用什么比"的判据 —— 后者会让
-两条路径给出不同的检索边界, 而"新颖性"恰恰是最不该有第二种口径的结论。
-"""
+"""新颖性对照服务。"""
 
 from typing import Any, Callable
 

@@ -1,27 +1,6 @@
 from __future__ import annotations
 
-"""任务画像: 决定文稿结构与领域措辞的**唯一依据** (合并计划 §7.3 / P0-3)。
-
-为什么需要它
-------------
-合并计划 §7.3 明确要求"改成任务画像和稿件角色驱动", P0-3 点名了现场缺陷:
-**通用入口输出了组合设计专用内容**。取证结果 (抽取前的实际代码):
-
-- `publication_paper._keywords()` 无条件追加 `"组合设计存在性"`、`"必要条件核验"`;
-- `publication_paper._introduction()` 无条件以"组合设计的存在性判定是组合数学中的
-  经典问题…"开头, 并在 `else` 分支里声称"本文采用必要条件路线" —— 即使根本没有
-  设计参数;
-- `publication_paper._english_abstract()` 无条件写 "counting/combinatorial structure";
-- 摘要无条件写"本文结论为纯数学判定, 不含实验或仿真数据" —— 对经验类研究是**假陈述**。
-
-这些不是措辞瑕疵: 它们让一篇关于信道可分性的报告声称自己在做组合设计判定。
-根因是**文稿生成没有任务画像可依**, 只能靠"猜领域"或"写死模板"。
-
-本模块提供那个画像, 并给出两个纯函数:
-- `task_profile_from_brief()`: 从 `ResearchBrief` 的交付形态与子问题类型推导;
-- 画像字段是**封闭集合** (与 `agents/supervisor.py` 的 DELIVERABLES/SUBQUESTION_KINDS
-  一致), 因此不会因为措辞漂移而静默退化成"通用模板"。
-"""
+"""任务画像: 决定文稿结构与领域措辞的唯一依据。"""
 
 from dataclasses import dataclass, field
 from typing import Any
@@ -54,7 +33,7 @@ class TaskProfile:
     """一份文稿的任务画像。
 
     `subquestion_kinds` 与 `deliverables` 直接来自主控的 `ResearchBrief`
-    (参见 `agents/supervisor.py` 的 §4.1 三个维度), 因此文稿结构与"主控怎么理解任务"
+, 因此文稿结构与"主控怎么理解任务"
     是同一份事实, 不再各写一套。
     """
 

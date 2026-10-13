@@ -1,23 +1,6 @@
 from __future__ import annotations
 
-"""统一研究状态: 只保存身份、任务与引用 (合并计划 §6.1 / §8)。
-
-为什么状态必须"小"
-------------------
-合并计划 §6.1: "LangGraph 状态保存身份、计划版本、任务 ID/状态、对象版本与产物指针;
-全文、论文正文、代码和大批检索结果**不平铺进入图状态**。"
-
-这不是风格问题: 初版方案的"信封+载荷"如果让载荷复制一份可写的 claims/evidence,
-而 SQLite 再保存另一份, 就会出现两个真相源 —— 同一条结论在两边版本不一致时,
-判定层读哪一个都不对。因此这里只放**引用**。
-
-与旧状态的关系 (§7.4 / R5 清仓)
--------------------------------
-旧综述流水线的状态 (`graph/state.py::PipelineState`) **已随该流水线删除** —— 它最后的使用者
-是引用守门/预检的旧 Agent, 那些能力已迁到 `publication/citation_checks` 与
-`publication/evidence_ledger`。旧理论图及其状态已经退役；当前执行状态由团队会话
-保存，历史交付包只读，不再恢复旧图 checkpoint。
-"""
+"""研究图状态只保存身份、任务状态和对象引用。"""
 
 from typing import Any, TypedDict
 
@@ -31,7 +14,7 @@ __all__ = [
 
 
 class UnifiedState(TypedDict, total=False):
-    """统一研究状态的键 (合并计划 §6.2 的身份链)。
+    """统一研究状态的键。
 
     身份关系: `project_id -> problem_id -> run_id -> branch_id/task_id/agent_run_id`。
     `session_id/thread_id` 管理用户交互与 checkpoint, 必须映射到明确 run。

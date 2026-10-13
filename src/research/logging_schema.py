@@ -1,30 +1,6 @@
 from __future__ import annotations
 
-"""统一事件键与可聚合指标 (研究日志契约)。
-
-为什么需要这个模块
-------------------
-研究日志此前是"各处随手 `("kind", {...})`": 同一个概念在不同地方可能用不同键名
-(`claim` / `claim_id` / `target`), 也可能少写关键字段, 于是:
-
-- 工作台无法可靠聚合"这次研究发生了什么"（只能靠字符串猜）;
-- 少字段时是**静默**的: 事件照样落盘, 但下游读不到, 表现为"界面显示 0"。
-
-本模块把事件类型与**必需键**写成一份目录 (`EVENT_SPECS`), 由
-`ResearchStore.append_event` 在唯一入口校验:
-
-- 未登记的事件类型: 仍入库（不丢证据）, 但计入 `anomalies` 并写一条
-  `log_anomaly` 事件 —— **记录而不是阻断**, 与注入扫描的处理原则一致;
-- 缺必需键: 同上, 异常里说明缺哪几个键。
-
-因此"统一日志键"不是靠纪律, 而是每次写入都会被检查, 且异常本身可被查询。
-
-指标
-----
-`metrics_from_store(store)` 给出可聚合的运行指标: 动作/工具调用与失败、提议采用与
-拒绝、义务与结论计数、换路次数、缺口、异常, 以及资源用量与停止原因。它只读日志与
-账本, 不触发任何研究动作, 也不改变任何结论状态。
-"""
+"""统一事件键与可聚合指标 (研究日志契约)。"""
 
 from dataclasses import dataclass, field
 from typing import Any
@@ -49,9 +25,7 @@ def _spec(kind: str, required: tuple[str, ...] = (), summary: str = "",
     return kind, EventSpec(kind=kind, required=required, summary=summary, surface=surface)
 
 
-# ----------------------------------------------------------------------
 # 事件目录 (唯一权威)
-# ----------------------------------------------------------------------
 EVENT_SPECS: dict[str, EventSpec] = dict([
     # 生命周期
     _spec("run_start", ("project_id", "problem_id"), "研究运行开始", surface=True),
@@ -142,8 +116,7 @@ EVENT_SPECS: dict[str, EventSpec] = dict([
     _spec("ingest_manual", ("doc_id",), "摄入人工资料"),
     _spec("ingest_machine", ("doc_id", "title"), "摄入机读资料"),
 
-    # 团队任务与唯一提交口 (合并计划 §6.2 / §3.1 G08)
-    #
+    # 团队任务与唯一提交口
     # 这几个事件由 `ResearchCommitService` 在**同一事务**里写入。不登记它们会让
     # `_anomaly_of` 每次都生成同一条 `log_anomaly` (键相同), 于是第二次提交直接撞
     # 唯一索引并整步回滚 —— 表现为"提交失败但看不出为什么"。因此新事件类型必须
@@ -191,9 +164,7 @@ def is_registered(kind: str) -> bool:
     return kind in EVENT_SPECS
 
 
-# ----------------------------------------------------------------------
 # 指标聚合
-# ----------------------------------------------------------------------
 @dataclass
 class RunMetrics:
     """可聚合的运行指标 (只读日志与账本, 不改动任何研究状态)。"""
@@ -304,7 +275,7 @@ def metrics_from_store(store, problem_id: str = "", *,
         claims = [c for c in all_claims if str(c.get("id", "")) in claim_ids]
     # 验证记录必须**按对象数**, 不能只数 `verification_recorded` 事件: 那个事件是旧引擎
     # 发出的, 团队走唯一提交口时不会发它 —— 于是工作台对每一次团队运行都显示"验证记录 0",
-    # 而库里其实有记录 (实测: 快照 2 条、指标 0 条)。指标与快照必须同源。
+    # 而库里其实有记录。指标与快照必须同源。
     verifications = [v for v in store.list_latest(KIND_VERIFICATION)
                      if _mine(v.get("claim_id", ""))]
     closed = ObligationStatus.closed.value

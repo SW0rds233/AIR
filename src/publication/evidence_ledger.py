@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""证据台账与已核实文献表 (计划书 §5.3 D1 的通用件)。
+"""证据台账与已核实文献表。
 
 逐字迁出自 `agents/citation_checker.build_evidence_ledger` 与
 `agents/citation_prechecker.build_verified_reference_sheet`: 两者都是"把结构化结果写成人

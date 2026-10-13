@@ -1,27 +1,6 @@
 from __future__ import annotations
 
-"""用户数据源的**只读**适配器 (计划书 §3 R0 / §6.3)。
-
-研究的输入不只是文献: 用户会给出结构化数据 (CSV / SQLite)。本模块把这类数据
-收敛成一个受限接口, 并在**同一处**实现权限与只读约束:
-
-```text
-describe(path, table="") -> {"kind", "schema", "rows", "snapshot_hash", ...}
-query(path, sql|table, ...) -> {"columns", "rows", "row_count", "truncated", ...}
-```
-
-硬约束 (计划书 §6.3 / §9.4)
---------------------------
-1. **路径必须在授权根目录内** (`DATA_DIR` / `OUTPUT_DIR` / `DATA_READ_ROOTS`),
-   `data_ref` 可能来自模型输出, 属于不可信输入;
-2. **SQLite 一律以 `mode=ro` 打开**, 并且只接受单条 `SELECT`;
-   任何写语句 (INSERT/UPDATE/DELETE/ATTACH/PRAGMA 等) 都被拒绝;
-3. **表名白名单**: 只允许查询 `describe` 列出的真实表/视图, 不接受拼接出来的表名;
-4. **行/列上限**: 任何查询都返回 `truncated` 标记, 不把整库塞进上下文;
-5. **快照 hash**: 记录读取时的文件摘要, 结果可复现 —— 文件变了 hash 就变。
-
-本模块只做"读取与描述", 不做统计推断 (那是 `verification/stats_adapter` 的职责)。
-"""
+"""以只读方式读取用户提供的数据源。"""
 
 import csv
 import hashlib
@@ -109,9 +88,7 @@ class SourceSchema:
         return head + "; " + " | ".join(t.describe() for t in self.tables)
 
 
-# ----------------------------------------------------------------------
 # 授权路径 (与 stats 适配器共用同一实现, 避免两套规则漂移)
-# ----------------------------------------------------------------------
 def authorized_roots() -> list[Path]:
     """允许读取的根目录: data/ 、outputs/ 与 DATA_READ_ROOTS 显式放行项。"""
     import os
@@ -190,9 +167,7 @@ def detect_kind(path: Path) -> str:
     return "csv" if b"," in head or b"\n" in head else "unknown"
 
 
-# ----------------------------------------------------------------------
 # 字段类型/单位推断
-# ----------------------------------------------------------------------
 # 字段名里出现的单位关键词 -> 规范单位名。
 # 用"关键词是否作为片段出现"判断, 避免 ^/$ 与中英文边界 (\b 对中文字符不成立)。
 # 顺序敏感: 长的/更具体的写法必须排在前面 (亿元 先于 元, 万元 先于 元)。
@@ -252,9 +227,7 @@ def infer_dtype(values: list) -> str:
     return "empty"
 
 
-# ----------------------------------------------------------------------
 # CSV
-# ----------------------------------------------------------------------
 def _csv_delimiter(path: Path) -> str:
     try:
         head = path.read_text(encoding="utf-8-sig", errors="replace")[:4096]
@@ -315,9 +288,7 @@ def describe_csv(path: Path) -> SourceSchema:
                         snapshot_hash=file_digest(path), size_bytes=path.stat().st_size)
 
 
-# ----------------------------------------------------------------------
 # SQLite (只读)
-# ----------------------------------------------------------------------
 def _sqlite_connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(_SQLITE_RO_URI.format(path=Path(path).as_posix()),
                            uri=True, check_same_thread=False)
@@ -371,9 +342,7 @@ def describe_source(data_ref: str,
         return SourceSchema(path=str(path), kind=kind, error=f"数据源解析失败: {e}")
 
 
-# ----------------------------------------------------------------------
 # 只读查询
-# ----------------------------------------------------------------------
 @dataclass
 class QueryResult:
     """一次只读查询的结果 (含可复现信息)。"""

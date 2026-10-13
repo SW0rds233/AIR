@@ -1,14 +1,6 @@
 from __future__ import annotations
 
-"""文档解析: 保留页码与章节结构, 与 embedding 解耦。
-
-支持 PDF (pymupdf, 逐页)、txt/md、docx (zip 内 document.xml, 无需额外依赖)。
-扫描版/无文本 PDF 标记 parse_quality=failed/ocr, 不静默丢弃。
-
-P1-4: PDF 解析同时保存**可见性元数据** (字号/颜色/坐标) 并标出视觉异常片段
-(接近白字、极小字、页外字、被图形覆盖), 供上层标"需核对"; 文本本身保留,
-但默认不作为问题要求、研究行动或强证据。
-"""
+"""文档解析: 保留页码与章节结构, 与 embedding 解耦。"""
 
 import re
 import zipfile

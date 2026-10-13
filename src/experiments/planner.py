@@ -1,14 +1,6 @@
 from __future__ import annotations
 
-"""实验/仿真规格生成 (计划书 §8.1)。
-
-只生成**可审核的规格**, 不执行、不产生数值结果。
-
-设计原则:
-- 建议必须绑定具体未决问题/模型假设/理论边界; 没有要区分的解释就不算交付;
-- 样本量与重复次数依目标区间宽度/效应量设计; 信息不足时给出估计流程;
-- 只允许 `proposed / spec_validated`; `executed / analyzed` 需真实产物。
-"""
+"""实验/仿真规格生成。"""
 
 
 from src.experiments.schemas import (

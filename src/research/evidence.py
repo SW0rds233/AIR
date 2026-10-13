@@ -1,17 +1,6 @@
 from __future__ import annotations
 
-"""公开证据采集与分级 (因果影响分析, B)。
-
-把文献/报告/数据统一为 SourceEvidence, 严格分离三件事 (计划书 §6.2):
-1. 来源真实性: existence_verified / credibility / file_hash;
-2. 内容支持关系: `support` 字段 —— 默认 `insufficient`, 检索命中不构成支持;
-3. 当前适用性: reference_status / applicability_conditions。
-
-同时保证 (计划书 §6.2 末段):
-- 规则抽取的卡片只用于候选发现, 不暗示已验证;
-- 多篇转引同一原始研究不被算成多个独立支持 (`independence_key`);
-- 高可信来源 ≠ 多源汇合证据 (`converging` 需要 ≥2 个独立支持来源)。
-"""
+"""公开证据采集与分级 (因果影响分析, B)。"""
 
 import json
 import re
@@ -194,7 +183,7 @@ def detect_contradictions(evidence: list[SourceEvidence]) -> list[SourceEvidence
 
 
 def independent_supporters(evidence: list[SourceEvidence]) -> list[SourceEvidence]:
-    """按原始记录去重后的支持来源 (计划书 §6.2: 多篇转引同一来源只算一个)。"""
+    """按原始记录去重后的支持来源。"""
     seen: set[str] = set()
     out: list[SourceEvidence] = []
     for item in evidence:
@@ -263,13 +252,7 @@ gather_evidence = collect_evidence
 
 
 def build_support_judge(llm) -> Callable[[Claim, SourceEvidence], SourceEvidence] | None:
-    """构造**带条件的语义支持判定器** (计划书 §6.2 第二项检查)。
-
-    - 判定必须给出 relation + 依据原句 + 审查理由;
-    - 模型自报置信度不作为客观依据: 输出不合规/解析失败一律回落到规则判定,
-      并且**规则判定永不产生 `supports` 之外的新等级升级**;
-    - 判定器只写证据对象, 不直接改命题状态 (状态由引擎的中央规则计算)。
-    """
+    """构造带条件的语义支持判定器。"""
     if llm is None:
         return None
 

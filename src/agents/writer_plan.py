@@ -6,7 +6,7 @@ import math
 import re
 from typing import Any
 
-from src.publication.references import citation_eligible
+from src.publication.references import research_citation_eligible
 from src.publication.schemas import WritingPacket
 
 
@@ -73,7 +73,7 @@ def linked_source_ids(packet: WritingPacket) -> set[str]:
 def rank_sources(rows: list[dict[str, Any]], limit: int = 20,
                  priority_ids: set[str] | None = None) -> list[dict[str, Any]]:
     """Prioritise readable, relevant and recent registered publications."""
-    eligible = [row for row in rows if citation_eligible(row)]
+    eligible = [row for row in rows if research_citation_eligible(row)]
 
     def score(row: dict[str, Any]) -> float:
         source_id = str(row.get("source_id") or row.get("id") or "")

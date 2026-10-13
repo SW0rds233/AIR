@@ -1,29 +1,6 @@
 from __future__ import annotations
 
-"""SupervisorAgent 主控: 理解任务、组队、派工、复盘、交付 (合并计划 §3.1 / §4, M1)。
-
-与旧 `TheoryEngine` 的分工
---------------------------
-旧实现里 `TheoryEngine` 同时承担编排、研究对象变更、动作实现、记账、验证与冻结
-—— 合并计划 §2 明确说它"不能继续作为主控下面第二个全权总控"。这里把**科研决策**
-抽出来: 主控只产出 `ResearchBrief` / `TeamPlan` / `AgentTask` / `SupervisorDecision`,
-执行与状态写入交给运行时与判定层。
-
-主控循环 (§4.2)
----------------
-每轮读取当前画像、相关对象、待办/运行中任务、结果与缺口、剩余预算, 给出以下之一:
-`dispatch` / `request_clarification` / `wait` / `deliver` / `stop_with_report`。
-每次派工必须说明: 要回答哪个子问题、预期获得什么新信息、依赖哪些结果、什么算完成、
-失败如何处理 —— 因此 `AgentTask` 上这些字段是**契约**, 不是可选说明。
-
-离线可用
---------
-`brief()` 与 `decide()` 在无 LLM 时走确定性规则 (题面解析 + 缺口规则), 且**如实标注
-依据** (`basis`); 有 LLM 时由模型提议任务类型与子问题, 但提议必须通过同一契约校验
-(合并计划 §4.1: "LLM 不能绕过量词/域/方法限制")。
-
-澄清只在"不同答案会改变目标、方法或授权"时提出 (§4.1); 其余在已声明的假设下推进。
-"""
+"""主控负责理解研究问题、派工和复盘；运行时执行任务，判定层更新结论。"""
 
 import json
 import re
@@ -65,9 +42,7 @@ __all__ = [
 ]
 
 
-# ----------------------------------------------------------------------
-# 可组合任务画像 (§4.1 的三个维度)
-# ----------------------------------------------------------------------
+# 可组合任务画像
 #: 子问题类型。一个任务可以有多类子问题, 因此这里是列表而不是单一枚举 ——
 #: 这正是"用一个 survey/theory/hybrid 枚举决定所有行为"要避免的。
 SUBQUESTION_KINDS: tuple[str, ...] = (
@@ -118,7 +93,7 @@ class SubQuestion(BaseModel):
 
 
 class ResearchBrief(BaseModel):
-    """主控对任务的理解 (§4.1)。
+    """主控对任务的理解。
 
     必须分开记录三个维度, 并**显式保留未知字段** —— 不因一个关键词强行设成因果研究。
     """
@@ -233,7 +208,7 @@ class TeamPlan(BaseModel):
 
 
 class DecisionKind(str, Enum):
-    """主控每轮的结构化决策 (§4.2)。"""
+    """主控每轮的结构化决策。"""
 
     dispatch = "dispatch"
     request_clarification = "request_clarification"
@@ -262,9 +237,7 @@ class SupervisorDecision(BaseModel):
                 "created_at": self.created_at}
 
 
-# ----------------------------------------------------------------------
 # 题面解析 (规则部分; LLM 提议必须通过同一校验)
-# ----------------------------------------------------------------------
 _PROOF_MARKERS = ("证明", "是否存在", "存在性", "不存在", "判定", "prove", "exists",
                   "nonexistence", "是否可能")
 _MECHANISM_MARKERS = ("机理", "机制", "为什么", "原因", "如何影响", "影响", "mechanism",
@@ -297,8 +270,7 @@ _QUANTIFIER_PATTERNS: tuple[tuple[str, str], ...] = (
 def classify_request(text: str) -> tuple[list[str], list[str], str]:
     """规则识别 (子问题类型, 交付形态, 依据说明)。
 
-    合并计划 §4.1 要求: 规则分类作为**检查与回退**, 主控语义提议必须通过同一契约。
-    因此这里的返回值不直接决定执行, 而是作为 brief 的初始值与校验基线。
+    规则分类只作为主控语义提议的回退和校验基线，不直接决定执行。
     识别不出领域时**不做任何领域假设**。
     """
     body = (text or "").strip()
@@ -358,19 +330,9 @@ def _compose_main_question(request: str, attachment_text: str = "") -> str:
     return "\n\n".join(parts)
 
 
-# ----------------------------------------------------------------------
 # 主控
-# ----------------------------------------------------------------------
-#: 每种交付形态对主控的"必须完成的角色"要求 (§3.1 的成果归属)。
-#:
-#: §3.2 G12: 交付**必须有正文**。此前 `problem_report` / `theoretical_conclusion` 只要求
-#: `reasoning` —— 于是一次只提出了命题、没有任何正文的运行也会被判成"交付形态所需
-#: 的角色成果齐备", 而交付门槛随后报"研究稿过短或为空"。要求与门槛必须一致:
-#: 需要交东西的形态一律包含唯一正文生产者 (writing)。
-#: 兜底子问题: 交付形态要求的角色在计划里没有对应子问题时补上 (`_ensure_required_roles`)。
-#:
-#: 取值 = (默认措辞, 子问题类型, 验收要什么)。措辞刻意朴素 —— 它是**兜底**, 不是
-#: 替代品: 正常路径由任务分类或模型提议给出更贴合问题的说法。
+#: 交付形态要求的角色；需要正文的形态必须包含 writing。
+#: 缺少角色子问题时，使用下列默认措辞和验收条件补齐。
 _DEFAULT_ROLE_SUBQUESTION: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "reasoning": ("形式化并核验候选结论", "existence_proof",
                   ("给出可核验的命题、义务与验证记录",
@@ -425,7 +387,7 @@ class SupervisorAgent:
         """产出 `ResearchBrief`。
 
         输入精确时保持用户的定义与边界; 输入仅是方向时提出少量有区别的路线
-        (§4.1)。未知字段**保留为未知**并列出 —— 不因一个关键词强行设定类型。
+。未知字段**保留为未知**并列出 —— 不因一个关键词强行设定类型。
         """
         main_question = _compose_main_question(request, attachment_text)
         attachment_question = _compose_main_question("", attachment_text)
@@ -451,11 +413,7 @@ class SupervisorAgent:
             brief.unknown_fields.append("source_set_ids")
         brief.basis = basis + (f"; 预算说明: {budget_note}" if budget_note else "")
 
-        # 子问题: **优先让模型提** (§3.1 G04), 规则展开作为降级路径。
-        #
-        # 主控此前"保存了 llm 却从不调用", 于是理解任务退化成关键词分类 ——
-        # 同义改写、否定条件、跨领域说法都会走样。这里把模型提议接上, 并保留规则
-        # 展开作为**离线/失败**时的路径; 用了哪条会如实写进 brief.basis / unknown_fields。
+        # 优先使用模型提议子问题；离线或失败时使用规则，并记录依据。
         owner_map = {
             "literature_synthesis": "reasoning",
             "existence_proof": "reasoning",
@@ -507,7 +465,7 @@ class SupervisorAgent:
                        "区分题目给定、文献支持与本研究引入的假设",
                        "列出变量的域、约束和仍未知的条件"],
             )
-        # 资料需求: 只要需要检索就必须有一条独立子问题 (§3.1: 检索覆盖文献/案例/数据)
+        # 资料需求: 只要需要检索就必须有一条独立子问题
         if "existence_proof" in kinds or "literature_synthesis" in kinds \
                 or "mechanism" in kinds or autonomous_retrieval:
             brief.add_subquestion(
@@ -517,7 +475,7 @@ class SupervisorAgent:
             )
         # 交付需要写作时, 写作与审阅各自成为子问题 (而不是藏在某一步里)。
         # 判据直接取 `_DELIVERABLE_ROLES` —— 两张表分开写就会出现"要求写作却从不派工"
-        # (实测: 交付形态要求 writing, 计划里却没有写作任务, 运行以"未满足交付形态"收尾)。
+        #。
         needs_writing = any("writing" in _DELIVERABLE_ROLES.get(d, ())
                             for d in deliverables)
         if needs_writing:
@@ -525,7 +483,7 @@ class SupervisorAgent:
                 statement="把结论与依据写成连贯稿件", kind="mechanism", owner="writing",
                 priority=20, needs=["段落可回溯到来源或推导"])
         if needs_writing:
-            # 独立审阅 (§3.1): 论文类交付必须过一遍独立检查, 而不是作者自评
+            # 独立审阅: 论文类交付必须过一遍独立检查, 而不是作者自评
             brief.add_subquestion(
                 statement="从原始任务与证据独立审阅稿件与图表",
                 kind="literature_synthesis", owner="review", priority=30,
@@ -537,17 +495,7 @@ class SupervisorAgent:
     @staticmethod
     def _ensure_required_roles(brief: ResearchBrief,
                                deliverables: Sequence[str]) -> None:
-        """交付形态要求的**每个角色**都必须有子问题 (与 `needs_writing` 同一判据来源)。
-
-        为什么必须兜这一道: 子问题来自任务分类或模型提议, 而"交付形态需要哪些角色"
-        来自 `_DELIVERABLE_ROLES` —— 两张表一旦对不上, 计划里就没有那个角色的任务,
-        而 `_missing_roles()` 仍然会要求它, 于是主控在"没有可派发的任务, 且交付形态
-        要求未满足"处收尾: **任务全跑完却一条结论都没有** (实测: 带"问题说明附件"的
-        研究请求, 4 个任务跑完, 命题数为 0, 交付等级掉到研究备忘录)。
-
-        这里只补**缺失的角色**, 措辞用各角色的默认说法; 已有子问题 (含模型提议的)
-        一律保留 —— 兜底不得覆盖更好的措辞。
-        """
+        """交付形态要求的每个角色都必须有子问题 (与 `needs_writing` 同一判据来源)。"""
         have = {str(sq.owner) for sq in brief.subquestions}
         priority = 40
         for deliverable in deliverables:
@@ -632,9 +580,7 @@ class SupervisorAgent:
             kind = str(item.get("kind", "")).strip()
             if not statement or kind not in SUBQUESTION_KINDS:
                 continue
-            # owner 的解析顺序: 模型给的合法角色 → 该类型的默认角色。
-            # 注意要校验**最终**结果 (早先版本的检查写在兜底之前, 于是"类型已知 +
-            # 角色非法"会带着兜底角色通过 —— 实测 `owner="hacker"` 被放行)。
+            # 先验证模型指定角色，再使用该类型的默认角色。
             proposed_owner = str(item.get("owner", "")).strip()
             owner = role_of(proposed_owner) or owner_map.get(kind, "")
             if not owner or owner == "supervisor":
@@ -657,22 +603,9 @@ class SupervisorAgent:
              budget: TaskBudget | None = None,
              depends_on: dict[str, list[str]] | None = None,
              run_identity: dict[str, str] | None = None) -> TeamPlan:
-        """把画像变成**版本化**团队计划。
-
-        每个子问题一条 `AgentTask`, 带上子问题目标、预期收益、验收标准、依赖与预算。
-        第一阶段串行执行, 因此依赖关系如实写出, 由运行时决定何时可跑。
-
-        `run_identity` (`project_id`/`problem_id`/`run_id`) 会写进**每条**任务:
-        审计复现过"计划的 `run_id` 全为空"(§3.3 G14), 于是
-        `team_projection()` 只能把无 run 的任务算进任意一次运行 —— 同项目两次运行
-        的对象会互相串。身份由**运行时统一注入** (而不是要求每个调用点都记得传),
-        只在任务自己已显式写了该字段时才保留任务的值。
-        """
+        """把画像变成版本化团队计划。"""
         plan_version = version if version is not None else (brief.version or 1)
-        # 交付形态要求的角色必须在计划里有任务 —— **在这里再兜一次**, 因为交付形态可能
-        # 在画像之后才定下来 (模型提议/调用方覆写), 只在 `brief()` 里兜会漏 (实测:
-        # `problem_report` 之外的形态在计划里缺少 review/validation/figures 角色,
-        # 而交付判定仍要求它们)。这个函数是幂等的: 只补缺失角色, 不动已有措辞。
+        # 交付形态可能在画像后变化；幂等地补齐其必需角色。
         self._ensure_required_roles(brief, list(brief.deliverables))
         plan = TeamPlan(version=plan_version, brief_id=brief.brief_id,
                         rationale=brief.basis)
@@ -745,22 +678,7 @@ class SupervisorAgent:
                objectives: dict[str, str] | None = None,
                pending_retries: Iterable[str] = (),
                dispatched: Iterable[str] = ()) -> SupervisorDecision:
-        """给出本轮的**一种**结构化判断 (§4.2)。
-
-        顺序有讲究:
-        1. 停止/已交付 -> 直接收尾, 不再派工;
-        2. 有跨职责需求 -> 转成新任务 (这是"受阻处理"的实现, 不是让子智能体自己找活);
-        3. 依赖已满足的任务 -> 派发 (按计划顺序, 本轮有上限, 避免一次全放出去);
-        4. 有任务在跑 -> wait;
-        5. 一切都完成 -> deliver;
-        6. 无事可做且无进展 -> stop_with_report (诚实交付未决)。
-
-        **不重复派工** (两条闸门, 缺一个就会烧光预算 —— 都实测过):
-        - 同一"角色 + 目标"组合只派一次, 除非 `pending_retries` 明确允许重试
-          (依据版本变了才允许)。否则"受阻 → 上报同一需求 → 再派 → 再受阻"会循环;
-        - 未尝试过的任务按"角色 + 目标"键判定, 而不是按 task_id —— 补派任务会拿新 id,
-          用 id 判会让同一件事被反复派出去。
-        """
+        """给出本轮的一种结构化判断。"""
         results = results or {}
         pending_set = {p for p in pending if p}
         running_set = {r for r in running if r}
@@ -792,8 +710,7 @@ class SupervisorAgent:
                                 if key and key in satisfied_keys}
         # 已派工过的"角色 + 目标"组合与需求键: 计划里已有的, 以及**本运行已尝试过的
         # 任务**。后者必须一起算 —— 否则"某角色受阻后重复上报同一条需求"会每轮派一个
-        # 新任务 (实测: 同一句需求被派 10 次直到轮次上限)。
-        #
+        # 新任务。
         # 用**与计划版本无关**的键: 升版会改变 `idempotency_key`, 拿它去重会让
         # "升版后的同一条需求"重新变成新任务, 循环照旧。
         known_keys = {str(t.get("idempotency_key", "")) for t in plan.tasks
@@ -803,7 +720,7 @@ class SupervisorAgent:
                        if result.agent and _objective_of(task_id)}
         # 本运行已派发过的键: 计划任务、补派任务、需求任务共用这一份记录。
         # 缺了它, `replan()` 克隆出的计划任务会与原任务"不同 id、同键", 于是被
-        # 反复派发 (实测: 写作任务被派出去后又判成"未尝试", 同一件事做多遍)。
+        # 反复派发。
         dispatched_keys = {str(k) for k in (dispatched or ()) if k}
         known_keys |= dispatched_keys
         # 需求类型键: 措辞里的计数会变, 用类型键才能挡住"同一类需求反复上报"
@@ -835,26 +752,20 @@ class SupervisorAgent:
                     note="; ".join(f"{n.kind.value}: {n.statement}" for n in needs[:3]))
 
         # 3. 可派发。
-        #
         # 过滤用**"角色+目标"键**而不是任务 id: 补派任务会拿到新 task_id, 用 id 过滤
         # 会把"已尝试过的那件事"再派一遍, 同时把"已完成"误判成"没做过"。
-        # 依赖判定也按同一把尺子 —— 否则补派成功解锁不了下游 (实测过).
+        # 依赖判定也按同一把尺子 —— 否则补派成功解锁不了下游.
         retry_keys = {str(k) for k in pending_retries if k}
         attempted_keys = {_assignment_key(brief, result.agent, _objective_of(task_id))
                           for task_id, result in results.items()
                           if result.agent and _objective_of(task_id)}
         # 依赖判定用 `settled`: **已尝试过**的任务不再阻塞下游。
-        #
         # 与"完成"不同: 任务失败/受阻后它自己不会被重派 (由上面的闸门保证), 但下游
         # 不能永远等一个已经确定失败的前置。否则"补检索受阻 → 写作永不派发"会让整个
-        # 交付卡死 (实测)。依赖阻塞只针对**还没跑过**的任务。
+        # 交付卡死。依赖阻塞只针对**还没跑过**的任务。
         settled = completed | {tid for tid, key in plan_keys.items()
                                if key and key in attempted_keys}
-        # **有成果行的任务一定算"已跑过"**: 上面那条按"角色+目标"文本键匹配, 而目标
-        # 文本里可能带会变的内容 (附件正文、计数、措辞微调), 键一旦对不上, 一个**已经
-        # 受阻返回**的前置就永远"未 settled", 下游据此永不就绪 —— 症状是"没有任何可派发
-        # 的任务", 而交付形态还差推理/写作 (实测: 带问题说明附件运行, 4 个任务跑完却一条
-        # 结论都没有)。依赖满足的语义本来就是"前置已经尝试过", 成果行正是这件事的直接证据。
+        # 目标文本可能变化；有成果记录即表示前置任务已经尝试过。
         settled |= {tid for tid in results if tid in plan_keys}
         ready = [t for t in plan.ready(settled, running_set)
                  if t not in completed
@@ -887,7 +798,7 @@ class SupervisorAgent:
                 decision=DecisionKind.wait,
                 reason=f"{len(running_set)} 个任务运行中, {len(pending_set)} 个待派")
 
-        # 5. 交付判定: 交付形态要求的角色都**交回过**成果 (§3.2 G12)。
+        # 5. 交付判定: 交付形态要求的角色都**交回过**成果。
         # 这里只决定"循环可以结束、进入交付评估"; 交付等级由门槛算 (见 _finish)。
         missing = self._missing_roles(brief, results, completed_ids=completed)
         if not missing:
@@ -938,17 +849,7 @@ class SupervisorAgent:
     @staticmethod
     def _missing_roles(brief: ResearchBrief, results: dict[str, AgentResult],
                        completed_ids: Iterable[str] | None = None) -> list[str]:
-        """交付形态要求哪些角色的成果**还没交回**。
-
-        `completed` 与 `partial` 都算"交回过": 这个判据回答的是"还要不要再派人做",
-        不是"能不能交付"。**验收**由交付门槛给出 (`research/delivery.py`: 研究有效性 +
-        论文表达 + 出版完备, 见 §3.2 G12) —— 让两件事共用一把尺子, 就会出现
-        "角色交回部分成果 → 永远判成未满足 → 什么也不交付"或者反过来
-        "角色跑过就算交付"这两种错误。因此这里只管派工完备性, 交付等级另算。
-
-        `completed_ids` 是**等价完成**的任务集合 (含"补派任务已成功"的原任务),
-        没有它时补派成功也不会让交付判定通过 —— 原任务仍留在 `results` 里是 blocked。
-        """
+        """交付形态要求哪些角色的成果还没交回。"""
         required: set[str] = set()
         for deliverable in brief.deliverables:
             required.update(_DELIVERABLE_ROLES.get(deliverable, ()))
@@ -975,12 +876,7 @@ class SupervisorAgent:
     @staticmethod
     def _equivalent_done(brief: ResearchBrief, plan: TeamPlan,
                          results: dict[str, AgentResult]) -> set[str]:
-        """**等价完成**的任务 id 集合 (补派成功即视为原任务已解决)。
-
-        判据是 `(agent, objective)` 派生的版本无关键: 角色按同一目标重新做过并成功,
-        就等于那件事完成了 —— 否则下游依赖永远等不到就绪 (实测: 补检索成功、写作
-        一直不派发, 运行以 "未满足交付形态" 收尾)。
-        """
+        """按角色和目标识别等价任务，补派成功即视为原任务完成。"""
         plan_keys: dict[str, str] = {}
         for record in plan.tasks:
             agent = str(record.get("agent", ""))
@@ -996,16 +892,7 @@ class SupervisorAgent:
     def replan(self, plan: TeamPlan, results: dict[str, AgentResult], *,
                version: int | None = None,
                max_plan_version: int | None = None) -> TeamPlan:
-        """按结果**升版**重规划。
-
-        关键不变量: **不能动计划里已有的任务身份**。`TeamPlan.ready()` 按**任务 id**
-        比对依赖边, 所以一旦重规划时把任务换成新 id (例如重新跑一次 `plan()`),
-        所有依赖边就会指向不存在的任务, 下游永远等不到就绪 —— 实测表现为"补派成功,
-        写作却一直不派发, 运行以 '未满足交付形态' 收尾"。
-
-        因此这里只做两件事: 升版本号, 给失败任务的新 attempt 记录原因。任务记录与
-        依赖边原样保留 (补派任务是**另外**加入的新条目)。
-        """
+        """按结果升版重规划。"""
         limit = max_plan_version or self.max_plan_version
         next_version = (version if version is not None else plan.version + 1)
         if next_version > limit:
@@ -1059,7 +946,7 @@ class SupervisorAgent:
     def rework_tasks(self, issues: Iterable[ReviewIssueRef], *,
                      brief: ResearchBrief, plan_version: int,
                      limit: int = 3) -> list[AgentTask]:
-        """按审阅问题派返工任务 (§7.3: 科学问题派研究角色, 文字问题派 Writer)。
+        """按审阅问题派返工任务。
 
         **问题账本可关闭且有修复证据**: 每条返工任务的 `acceptance` 就是该问题的
         验收标准, 因此不能靠"总分上升"结束。
@@ -1146,9 +1033,9 @@ def assignment_key(brief: ResearchBrief, agent: str, objective: str) -> str:
 
 def needs_to_tasks(needs: Iterable[ResearchNeed], *, brief: ResearchBrief,
                    plan_version: int, limit: int = 3) -> list[AgentTask]:
-    """把跨职责需求转成新任务 (§4.2 受阻处理)。
+    """把跨职责需求转成新任务。
 
-    这是"主控转换需求"的唯一入口: 子智能体之间不互相派工 (§5.1)。
+    这是"主控转换需求"的唯一入口: 子智能体之间不互相派工。
     需求若没有明确承接角色, 如实记为无法派发, 而不是猜一个。
     """
     out: list[AgentTask] = []
@@ -1157,7 +1044,6 @@ def needs_to_tasks(needs: Iterable[ResearchNeed], *, brief: ResearchBrief,
         if not owner or owner == "supervisor":
             continue
         # 目标文本用**需求措辞**: 它既进提示词, 也进"角色+目标"派工键。
-        #
         # 措辞里可能含会变的计数, 因此去重不能只靠它 —— `decide()` 另外用需求类型键
         # (`ResearchNeed.assignment_key`) 挡"同一类需求反复上报"。两条闸门合起来才能
         # 既让措辞可读, 又不至于每轮重派。
@@ -1186,7 +1072,7 @@ def needs_to_tasks(needs: Iterable[ResearchNeed], *, brief: ResearchBrief,
 
 def unresolved_report(brief: ResearchBrief, plan: TeamPlan,
                       results: dict[str, AgentResult]) -> dict[str, Any]:
-    """未决报告: 诚实交付部分结果 (§12 完成标准)。
+    """未决报告: 诚实交付部分结果。
 
     主控**允许降低交付等级**: 纠正合并前的误判不以"等级不得低于旧版"维持错误结论。
     """

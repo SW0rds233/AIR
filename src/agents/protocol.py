@@ -1,39 +1,6 @@
 from __future__ import annotations
 
-"""统一智能体协议: 派工、成果、研究需求与权限 (合并计划 §5, M0)。
-
-为什么需要这个模块
-------------------
-合并前系统里"让某个环节干活"的方式至少有四种: 综述图按 `stages` 顺序调用节点、
-理论图由 `TheoryEngine._dispatch()` 按 `ActionType` 派发、`literature_reviewer`
-自己跑一个工具循环、写作/审阅则是一次单趟 LLM 调用。四者之间没有共同契约, 于是:
-
-- 无法回答"这条结论是哪次派工、依据哪些输入版本产生的";
-- 子智能体受阻时只能把字符串塞回上游, 主控看不出"缺什么", 也就无法补派工;
-- 权限约束散落在提示词与布尔标记里 (`may_change_conclusion=False`),
-  模型自己写一个 `True` 就绕过了。
-
-本模块把这几件事固定成**数据契约**:
-
-1. `AgentTask` —— 主控派什么活, 依据哪些**版本化**对象, 什么算完成, 花多少预算;
-2. `AgentResult` —— 子智能体交回什么: 成果、候选变更、验证引用、**后续需求**、未决项;
-3. `ResearchNeed` —— 跨职责的需求 (缺来源 / 缺模型条件 / 缺验证), 由主控转成新任务,
-   子智能体之间不互相派工 (第一版不开放任意再生成团队);
-4. `CapabilityGrant` —— 由**运行时签发**的权限令牌。模型能拿到它, 但造不出它:
-   构造入口带 `issued_by` 签名, `is_valid()` 校验签发者。写权限 (提交候选变更) 与
-   读范围 (可读的资料源/工具) 分开, 缺权限时不静默放行, 直接判无效;
-5. `TaskBudget` —— 派发前**预留**的额度。并发任务是各自预留, 因此
-   `reserve()` 之后 `remaining` 就变小, 不会出现"每个并发任务都以为自己有全额余额"。
-
-设计约束 (来自合并计划 §5.2 与 §14.3)
-------------------------------------
-- 结论等级只能由证书链、工具重算与中央状态规则产生。这里的 `ChangeProposal`
-  只是**候选**: 它带 `may_change_conclusion`, 但该字段的用途是"运行时据此决定是否
-  送入判定层", 不是"布尔为真就改写状态"。
-- 智能体只提交候选与解释; 审阅只能降级, 不能升级 —— 这条由 `registry` 的
-  能力表与运行时校验共同保证, 不靠提示词。
-- 判定层 (`src/verification/**`、`acceptance.py`) 保持零 LLM; 本模块不引入 LLM 调用。
-"""
+"""统一智能体的派工、成果、研究需求、预算与权限契约。运行时签发权限，判定层负责结论状态。"""
 
 import hashlib
 import hmac
@@ -95,11 +62,8 @@ __all__ = [
     "writable_kinds",
 ]
 
-# ----------------------------------------------------------------------
 # 角色
-# ----------------------------------------------------------------------
-#: 合并计划 §3 的团队: 1 个主控 + 7 类功能子智能体。
-#: 角色数不等于进程数, 也不要求七个不同模型 —— 这里只是**契约身份**。
+#: 角色是契约身份，不要求独立进程或模型。
 AGENT_ROLES: tuple[str, ...] = (
     "supervisor",
     "evidence",
@@ -191,9 +155,7 @@ _LEGACY_ROLE_ALIASES: dict[str, str] = {
 }
 
 
-# ----------------------------------------------------------------------
 # 预算与用量
-# ----------------------------------------------------------------------
 class UsageRecord(BaseModel):
     """一次派工实际发生的用量。
 
@@ -381,9 +343,7 @@ class RunBudget(BaseModel):
         }
 
 
-# ----------------------------------------------------------------------
 # 权限
-# ----------------------------------------------------------------------
 class GrantError(RuntimeError):
     """权限不足或令牌无效 (不静默放行)。"""
 
@@ -419,12 +379,8 @@ CAPABILITY_TOOLS: frozenset[str] = frozenset({
 })
 
 #: 资料策略 → **只有这些策略才允许**的外部取数能力。
-#:
-#: 角色能力表 (`AGENT_CAPABILITIES`) 说的是"这个角色**能**做什么", 用户授权说的是
-#: "这次**准**做什么"。两者必须求交: 此前 `grant_for()` 只看角色表, 于是一个
-#: `source_policy="user_kb"` 的任务照样拿到 `tools:search` —— 也就是"只用本地库"
-#: 的任务可以联网外搜。这不只是越权, 还会把外部来源混进本该受控的证据链。
-#:
+#: 实际权限取角色能力、用户授权和任务范围的交集。
+#: 仅授权本地库的任务不得使用联网搜索。
 #: `both` 同时包含本地与外部; 空策略 (未声明) 按**最保守**处理 (只给本地), 因为
 #: "没说要联网"不等于"可以联网"。
 SOURCE_POLICY_SCOPES: dict[str, frozenset[str]] = {
@@ -498,7 +454,7 @@ class CapabilityGrant(BaseModel):
 
         **未指定集合时按"未授权"处理**: 令牌里 `source_set_ids` 为空意味着这次派工
         没有携带任何用户资料库授权 (例如纯自足的形式化任务), 而不是"任意资料源都行"。
-        这一条正是 G09 的修复点 —— 此前工具可以拿任意 `source_id` 去读。
+        工具只能读取令牌明确授权的资料源。
         """
         if not self.is_valid():
             return False
@@ -594,12 +550,10 @@ AGENT_CAPABILITIES: dict[str, dict[str, Any]] = {
 }
 
 
-#: 每个角色**可以**提交的对象种类。超出即被运行时拦下 (合并计划 §5.2:
-#: "不能只靠 `may_change_conclusion=False` 布尔标记", 工具注册与存储入口必须
-#: 实际限制写入)。放在协议层是为了让角色实现与运行时校验引用同一份真相源。
+#: 各角色允许提交的对象种类；运行时据此拒绝越权写入。
 WRITABLE_KINDS: dict[str, frozenset[str]] = {
     # `evidence_link` 也是检索/证据角色的可写种类: 它登记的是"材料与本命题的关系"
-    # (§6.1 EvidenceLink), 与材料本身同属证据侧职责。缺了它就只剩"一堆材料",
+    #, 与材料本身同属证据侧职责。缺了它就只剩"一堆材料",
     # "这条来源支持哪个结论、适用条件是什么"无从回答。
     "evidence": frozenset({"evidence", "source", "card", "case", "dataset",
                            "evidence_link", "novelty"}),
@@ -629,7 +583,7 @@ def grant_for(task: AgentTask, *, extra_reads: tuple[str, ...] = (),
               allowed_paths: Sequence[str] | None = None) -> CapabilityGrant:
     """按 **角色能力 ∩ 用户授权 ∩ 本次任务范围** 为一个任务签发令牌。
 
-    三者的分工 (§3.2 G09):
+    三者的分工:
     - **角色能力** (`AGENT_CAPABILITIES`): 这个角色能做什么 (静态);
     - **用户授权** (`source_policy` + `authorized_source_sets`): 这次准做什么
       (例如"只用本地库"的任务**不得**获得联网检索能力);
@@ -727,9 +681,7 @@ def agent_capability(agent: str) -> AgentContract | None:
     return AgentContract(agent=role)
 
 
-# ----------------------------------------------------------------------
 # 对象与产物身份
-# ----------------------------------------------------------------------
 #: 权威对象的种类。**一次迁移中每种对象只能有一个权威写入口**,
 #: 因此这里是封闭集合: 拼错种类会在构造 `ObjectRef` 时被拒, 而不是静默建出
 #: 第二份真相源。
@@ -747,13 +699,13 @@ OBJECT_KINDS: frozenset[str] = frozenset({
     "card",
     "case",
     "dataset",
-    # 证据归属 (§6.1 EvidenceLink): "材料 × 命题"的关系对象。它是一个如实存在的
+    # 证据归属: "材料 × 命题"的关系对象。它是一个如实存在的
     # 研究对象 (带版本、可查询、可追溯), 因此必须在这个封闭集合里 —— 否则
     # `ChangeProposal` 会在构造时把它当成拼错种类拒掉, 而症状是**整条推理任务失败**。
     "evidence_link",
-    # 新颖性对照记录 (§5.4): 交付包与出版层按它决定"能否宣称原创"。不登记这个种类就
+    # 新颖性对照记录: 交付包与出版层按它决定"能否宣称原创"。不登记这个种类就
     # 无法把"还没比过"写进交付物 —— 省略记录会让成果看起来没有新颖性问题; 而构造
-    # 候选时它会被当成拼错种类**整条拒掉** (证据任务因此失败, 实测)。
+    # 候选时它会被当成拼错种类**整条拒掉**。
     "novelty",
     "snapshot",
     "manuscript",
@@ -853,11 +805,9 @@ class ArtifactRef(BaseModel):
         }
 
 
-# ----------------------------------------------------------------------
 # 研究需求与候选变更
-# ----------------------------------------------------------------------
 class NeedKind(str, Enum):
-    """跨职责需求的种类 (合并计划 §4.2「受阻处理」的机器可读形式)。"""
+    """跨职责需求的种类。"""
 
     more_sources = "more_sources"            # 缺来源 -> 派检索
     source_locator = "source_locator"        # 有来源但定位不到原文 -> 派检索
@@ -866,7 +816,7 @@ class NeedKind(str, Enum):
     counterexample = "counterexample"        # 出现反例 -> 派推理修订
     empirical_support = "empirical_support"  # 缺经验支持 -> 派验证方案
     derivation = "derivation"                # 缺推导 -> 派推理
-    clause = "clause"                        # 引理缺适用条件 (计划 §4.3 的例子)
+    clause = "clause"                        # 引理缺适用条件
     figure_data = "figure_data"              # 图表发现数据缺口
     manuscript_revision = "manuscript_revision"
     review = "review"
@@ -927,7 +877,7 @@ class ResearchNeed(BaseModel):
 
         为什么不用 `statement`: 需求措辞常含**会变的计数** ("3 条命中缺少定位" ->
         "2 条…"), 拿它当键会让同一条需求每轮都变成新任务, 主控于是反复派工直到烧光
-        预算 (实测过)。需求类型 + 角色才是"这件事"的身份; 措辞只作为任务描述。
+        预算。需求类型 + 角色才是"这件事"的身份; 措辞只作为任务描述。
         """
         # 系统自动发现的同类缺口应合并；人工连续提出的两次不同修订却不能合并。
         # 由客户端给出的 feedback_id 同时是网络重试的幂等键。
@@ -1064,9 +1014,7 @@ class ReviewIssueRef(BaseModel):
         }
 
 
-# ----------------------------------------------------------------------
 # 任务
-# ----------------------------------------------------------------------
 class TaskStatus(str, Enum):
     """任务生命周期。"""
 
@@ -1106,8 +1054,7 @@ def idempotency_key_for(project_id: str, problem_id: str, plan_version: int,
     无限重派。措辞变化会改变键 —— 这是有意的: 目标变了就是新任务。
 
     `plan_version` 只作为审计字段参与签名之外的记录, **不进入键**: 计划升版不代表
-    要做新东西, 把版本算进键会让"同一句需求"每升一版就变成新任务 (实测: 同一件事
-    被派十几次直到预算耗尽)。
+    要做新东西；版本升高不应让同一目标变成新任务。
     """
     del plan_version                        # 有意不参与键; 见 docstring
     return stable_id("taskkey", project_id, problem_id, role_of(agent) or agent,
@@ -1115,10 +1062,10 @@ def idempotency_key_for(project_id: str, problem_id: str, plan_version: int,
 
 
 class AgentTask(BaseModel):
-    """主控派给某个子智能体的一次任务 (合并计划 §5 的接口示意, 已补齐默认值)。
+    """主控派给某个子智能体的一次任务。
 
     每次派工必须能回答: 要回答哪个子问题、预期获得什么新信息、依赖哪些结果、
-    什么算完成、失败如何处理 (§4.2)。因此 `objective`/`acceptance_criteria`/
+    什么算完成、失败如何处理。因此 `objective`/`acceptance_criteria`/
     `depends_on` 不是可选说明, 而是契约字段。
     """
 
@@ -1151,7 +1098,7 @@ class AgentTask(BaseModel):
     attempt: int = 1
     #: 失败如何处理 (主控在派工时声明, 而不是让子智能体自己决定重试无限次)。
     on_failure: str = ""
-    #: 是否需要人工判断才能继续 (主控按 §4.1 判断)。
+    #: 是否需要人工判断才能继续。
     needs_human: bool = False
 
     @field_validator("agent")
@@ -1212,7 +1159,7 @@ class AgentTask(BaseModel):
 
 
 class ContextPack(BaseModel):
-    """按任务组装的**只读**上下文 (合并计划 §6.1: 角色视图由 context 层组装)。
+    """按任务组装的**只读**上下文。
 
     图状态只保存身份与引用; 这里携带的是已裁到任务范围的快照与令牌。
     绝不将评测答案、人工标注的预期结论放入任何子智能体上下文。
@@ -1271,11 +1218,7 @@ class AgentResult(BaseModel):
     artifact_refs: list[ArtifactRef] = Field(default_factory=list)
     proposed_changes: list[ChangeProposal] = Field(default_factory=list)
     #: 被运行时**拒绝**的候选 (越权 / 越界 / 令牌不允许)。
-    #:
-    #: 它们只进审计记录, **绝不进权威对象库** (§3.2 G07)。此前 `finalize()` 只把整条
-    #: 结果降级为 partial, 候选仍留在 `proposed_changes` 里, 于是投影层照样登记 ——
-    #: 实测一个 evidence 角色提交的 claim 被判违规后, 库里仍出现 `status=supported`。
-    #: 保留(而不是丢弃)是为了让"模型提了什么、为什么被拒"可追溯。
+    #: 被拒候选仅供审计，不进入权威对象库。
     rejected_changes: list[dict[str, Any]] = Field(default_factory=list)
     verification_refs: list[ObjectRef] = Field(default_factory=list)
     followup_needs: list[ResearchNeed] = Field(default_factory=list)

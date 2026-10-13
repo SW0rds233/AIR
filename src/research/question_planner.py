@@ -437,7 +437,7 @@ def _clarification_for(summary: SourceSummary, kind: TaskKind) -> str:
 
 def formulate(request: str, topic: str = "", source_summary: SourceSummary | None = None,
               llm=None) -> ProblemContract:
-    """请求 → 问题契约 (计划书 P0-2 / §3 接口)。
+    """请求 → 问题契约。
 
     只读题目与资料摘要: 先定研究类型与允许的方法, 再给出 1–3 条研究路径;
     研究类型无法判定且缺材料时给出**一个**会改变路线的澄清问题, 不猜。

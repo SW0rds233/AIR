@@ -1,19 +1,4 @@
-/*!
- * 研究工作台总览视图 (合并计划 §9.5: `app.ts::renderWorkbench/*Detail*` 迁出)。
- *
- * 迁移原则: **行为零变化** —— 这里只是把 `app.ts` 里原本直接读写 DOM 的渲染逻辑
- * 变成"输入数据 → 输出 HTML"的纯函数, 于是:
- *
- * - 视图本身可单测 (不需要真实页面);
- * - 仍然遵守 CSP 约束: 动态按钮一律 `data-action` + 文档级委托, 没有任何内联处理器;
- * - 所有外部文本经 `wbEsc` 转义 (安全渲染行为不变);
- * - `id` / 类名保持不变 (`#wbobj`、`#wbfeedback`、`#wbsnapid`、`.claim-link` ...),
- *   因为现有 e2e 与后端联调依赖它们。
- *
- * 依赖注入: 页面只传"怎么拿工作台数据"和"哪些结论详情是展开的"这两个查询函数,
- * 视图不持有任何页面状态 —— 唯一权威状态仍是 `state/research-store.ts`
- * 与 `window.AIR.research` (计划书 §9.3: 不引入第二份状态)。
- */
+/** 研究工作台总览的纯视图逻辑。 */
 
 import type { WorkbenchData } from './research-workbench';
 import {
@@ -89,7 +74,7 @@ export function workbenchErrorHtml(status: number, body: any): string {
 }
 
 /**
- * 从结论点开所用模型、原文证据、证明义务与验证记录 (§9.5 `*Detail*`)。
+ * 从结论点开所用模型、原文证据、证明义务与验证记录。
  * 薄封装: 具体渲染仍在 `views/research-workbench.ts` (已有单测)。
  */
 export function claimDetailRow(data: WorkbenchData | null, claimId: string): string {

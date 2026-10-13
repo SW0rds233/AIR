@@ -1,31 +1,6 @@
 from __future__ import annotations
 
-"""唯一提交口 (合并计划 §6.2): `ResearchCommitService`。
-
-为什么需要它
-------------
-合并计划 §6.2 要求"唯一提交接口 `commit_result(task, result, execution_receipts,
-expected_run_revision)` 隐藏授权、冲突、验证和落盘细节, 调用方不再拼 put/append_event"。
-在此之前团队走的是 `task_store.finish()` 之后**逐条** `projection.register()` ——
-事务能力没用上 (G08), 而且"谁有资格写科学状态"散落在角色、投影与判定层三处。
-
-它做什么 (顺序即不可颠倒)
-------------------------
-1. **校验**: 任务/运行/角色、可写对象种类、结果 schema —— 与运行时同一份能力表;
-2. **read-set**: 按"实际读取的对象版本"核对当前版本; 过期返回 `stale_input`,
-   不把依据旧版本的成果合入 (科研正确性, 不是错误处理细节);
-3. **拒绝候选自报科学等级**: `claim` 候选里的 `status/assurance/support_kind/
-   validation_status` 一律**丢弃并重置**, 由判定层从义务与核验记录重算;
-4. **核验落盘**: `verification` 候选按 `obligation_disposition_for` 重算义务处置,
-   并据此写义务状态 (拒绝"角色说通过了"当结论);
-5. **状态归并**: `reasoning_kernel.claim_state_for` 算出命题状态 —— 这是唯一的状态
-   写入点, 零 LLM;
-6. **一个事务**: 任务终态 + 接受的对象写入 + 事件 + 幂等收据同事务提交, 失败回滚。
-
-`expected_run_revision` 语义: 调用方给出"它读到的对象版本索引"
-(`projection.latest_versions()` 的并集)。缺省 (`None`) 时**跳过检查并如实标注**
-(`read_set_checked=False`), 不假装检查过。
-"""
+"""研究对象的统一提交入口，校验来源、权限、版本与幂等性。"""
 
 from dataclasses import dataclass, field
 from typing import Any
@@ -66,7 +41,7 @@ from src.verification.schemas import VerificationResult
 
 __all__ = ["CommitOutcome", "ResearchCommitService"]
 
-#: 由**提交服务**重算、不接受角色自报的状态字段 (合并计划 §6.2 第 3 条)。
+#: 由**提交服务**重算、不接受角色自报的状态字段。
 #: 只对 `claim` 生效: 别的对象没有"科学等级"这回事。
 _CLAIM_STATE_FIELDS: tuple[str, ...] = (
     "status", "assurance", "support_kind", "validation_status", "coverage",
@@ -111,9 +86,7 @@ class ResearchCommitService:
         #: 可选: 复用 `TaskStore` 的终态写法, 保证任务记录的字段集合只有一份实现。
         self.task_store = task_store
 
-    # ------------------------------------------------------------------
     # 提交
-    # ------------------------------------------------------------------
     def commit(self, task: AgentTask, result: AgentResult, *,
                current_versions: dict[str, int] | None = None,
                events: list[tuple[str, dict]] | None = None,
@@ -245,9 +218,7 @@ class ResearchCommitService:
         outcome.task_saved = True
         return outcome
 
-    # ------------------------------------------------------------------
     # 写入规划 (纯: 不碰存储, 便于单测)
-    # ------------------------------------------------------------------
     def _plan_writes(self, task: AgentTask, result: AgentResult,
                      accepted: list[ChangeProposal]) -> dict[str, Any]:
         writes: dict[tuple[str, str], dict[str, Any]] = {}
@@ -265,7 +236,7 @@ class ResearchCommitService:
                 mapped = proposal.model_copy(update={"payload": _strip_claimed_state(proposal.payload)})
             object_id, payload = object_payload_for(task, result, mapped, kind)
             if proposal.kind == "claim":
-                # 丢弃角色自报的科学等级, 由判定层重算 (§6.2 第 3 条)
+                # 丢弃角色自报的科学等级, 由判定层重算
                 payload = _strip_claimed_state(payload)
             if proposal.kind == "obligation":
                 # 归一化会**重建**载荷 (统一字段名与缺省值), 因此必须把唯一提交口刚写上的
@@ -493,13 +464,11 @@ class ResearchCommitService:
         return dict(row) if row else None
 
 
-# ----------------------------------------------------------------------
 # 纯辅助 (无 IO)
-# ----------------------------------------------------------------------
 def _strip_claimed_state(payload: dict[str, Any]) -> dict[str, Any]:
     """丢弃角色自报的科学等级。
 
-    不能只检查 `may_change_conclusion` 布尔值 (§6.2 第 3 条): 一个角色完全可以
+    不能只检查 `may_change_conclusion` 布尔值: 一个角色完全可以
     在布尔为 False 的候选里写 `status="supported"`。这里直接**重置**状态字段,
     随后由 `claim_state_for` 从义务与核验记录重算。
     """
@@ -561,7 +530,7 @@ def _keep_meta(payload: dict[str, Any], original: dict[str, Any]) -> dict[str, A
 def _put_record(writes: dict[tuple[str, str], dict[str, Any]],
                 record_data: dict[str, Any],
                 task: AgentTask | None = None, result: AgentResult | None = None) -> None:
-    """核验记录也必须带**运行身份** (§3.3 G14): 否则按 run 裁剪的查询看不到它。"""
+    """核验记录也必须带**运行身份**: 否则按 run 裁剪的查询看不到它。"""
     record_id = str(record_data.get("id") or "")
     if not record_id:
         return

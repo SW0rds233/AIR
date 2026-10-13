@@ -1,20 +1,6 @@
 from __future__ import annotations
 
-"""会话运行线程的归属资源 (合并计划 §7.4 / M4: "按 run/project/source grant 绑定……
-移除多线程替换全局 stdout 的日志归属方式")。
-
-三件进程级资源在这里按**线程**归属, 而不是"谁最后设置谁生效":
-
-1. **日志**: `_StdoutBridge` 把研究线程的 `print` 桥接成该会话的 SSE `log` 事件。
-   全局只挂一个 `_StdoutDispatcher`, 由它按 `threading.get_ident()` 查表派发。
-   早期实现直接 `sys.stdout = _StdoutBridge(...)`, 于是后启动的会话会把先启动的桥
-   当成"原始 stdout"包起来 (A 的日志转发给 B), 而且先结束的会话"恢复"时会把这个桥
-   重新装回全局 —— 后结束的会话日志静默消失。
-2. **用量**: 会话级 `UsageTracker` 绑定 (每个 run 的成本报告不再包含历史累计)。
-3. **运行身份**: 会话记忆/检索缓存/图表目录按 run 归属 (`run_scope`)。
-
-本模块不 import FastAPI, 也不 import `server`。
-"""
+"""管理会话运行线程及其关联资源。"""
 
 import sys
 import threading

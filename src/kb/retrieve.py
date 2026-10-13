@@ -1,19 +1,6 @@
 from __future__ import annotations
 
-"""CLI / 脚本用的检索薄适配层 (计划书 §6.1)。
-
-**唯一召回路径是 `KnowledgeService.search()`。** 早期这里另有一套独立的
-RRF 融合实现, 它绕过了范围/权限过滤、语言与年份约束, 也不返回字符范围与
-起止页 —— 于是"工作台看到的候选"与"研究循环实际用的候选"可能不一致。
-
-现在本模块只做三件事:
-1. 把 `KnowledgeService` 的 `SourceRef` 转成 CLI/旧调用方习惯的 dict;
-2. `stats()` 直接转发到知识底座统计;
-3. `describe()` 暴露检索能力自述 (哪些通道可用、是否退化为关键词检索)。
-
-不再有任何独立的关键词/向量/RRF 实现: 融合发生在 `KnowledgeService` 内部
-(`rrf_fuse`), 因此**范围过滤与融合排序对所有调用方一致**。
-"""
+"""CLI / 脚本用的检索薄适配层。"""
 
 from src.kb.service import KnowledgeService, RetrievalRequest, SourceRef
 from src.kb.store import KBStore

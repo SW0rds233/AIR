@@ -1,27 +1,4 @@
-/**
- * 统一输入与附件接入控制器 (合并计划 §9.5 `features/intake/controller.ts` / §8.1)。
- *
- * 这里集中"用户到底研究什么"的所有入口:
- *
- * - `start()` —— **唯一**启动入口 (统一入口: 用户不再选择"综述/理论"模式);
- * - `sendResponse()` / `respondWith()` —— 暂停点答复 (幂等键 `interrupt_id` 由状态持有);
- * - 附件 (`uploads.ts` 的协作面): 上传、列出、移除、归属自检、稳定草稿身份 (R2/R3);
- * - 续研与问题冲突 (同一 problem_id 上已有另一个请求) 的显式选择。
- *
- * 统一入口的契约 (本轮迁移):
- *
- * - 启动载荷**不再包含 `mode`**; 服务端按统一研究的默认引擎启动;
- * - 项目/问题/预算/资料授权/附件等字段**始终**随请求发出 (不再"只有某种模式才带");
- * - 项目与问题在启动前落实稳定身份 (草稿 id), 附件据此校验归属 (R2/R3)。
- *
- * 仍然:
- *
- * - 只使用 `data-action` (没有内联事件处理器), 因此 CSP 约束不变;
- * - 所有 `id` / 表单字段名与请求载荷字段不变;
- * - 唯一状态是 `state/research-store.ts`: 本模块**不存**项目/问题/线程/暂停点/
- *   候选路线的副本 —— 读走 selector, 写走 `dispatch(action)` (G19: 不再经
- *   `applyResearch(patch)` 这类兼容写入口)。
- */
+/** 统一输入与附件接入控制器。 */
 
 import { byId, checked, scrollToBottom, setDisabled, setHtml, setVal, val } from '../../dom';
 import {
@@ -42,7 +19,7 @@ import {
   newDraftProjectId,
   workbenchQueryTarget,
 } from '../../state/research-store';
-// §9.5: 取数入口统一在 api/ 层 (URL/错误/取消/重试/幂等语义只在那里实现)
+// 取数入口统一在 api/ 层 (URL/错误/取消/重试/幂等语义只在那里实现)
 import {
   ENDPOINTS,
   client as defaultApi,
@@ -76,7 +53,7 @@ export interface IntakeDeps {
    */
   ensureDraftProjectId?(): string;
 
-  /** HTTP 出口 (§9.5): URL/错误/取消/重试都在 `api/` 层, 控制器不自己拼。 */
+  /** HTTP 出口: URL/错误/取消/重试都在 `api/` 层, 控制器不自己拼。 */
   api?: ResearchClient;
 }
 
@@ -125,7 +102,7 @@ function currentThreadId(): string {
   return getState().selection.threadId || '';
 }
 
-/** 启动/续研同一个端点: 只差载荷里的 `resume` 字段 (§9.1 "续研与启动语义分开")。
+/** 启动/续研同一个端点: 只差载荷里的 `resume` 字段。
  *
  * 方法取自端点方法表 (`endpointMethod`), 不在调用点另写一份 —— 契约表已经声明过
  * 这个端点用 POST, 两处各写一遍就是等着漂移。
@@ -287,7 +264,7 @@ export function createIntakeController(deps: IntakeDeps): IntakeController {
   }
 
   function markDraftProject(projectId: string) {
-    // 草稿身份属于唯一状态 (`ui` 片, §8.1 的"选择/草稿")
+    // 草稿身份属于唯一状态
     dispatch({ type: 'ui/draftProject', projectId: String(projectId || '') });
   }
 
@@ -297,9 +274,7 @@ export function createIntakeController(deps: IntakeDeps): IntakeController {
     return workbenchQueryTarget(getState(), pid);
   }
 
-  // ------------------------------------------------------------------
   // 启动 / 续研
-  // ------------------------------------------------------------------
   function start(requestText: any) {
     const request = (requestText || '').trim();
     // 统一入口: 不再按模式挑 topic。表单里的精确主题优先, 否则用资料库/上下文主题,
@@ -480,9 +455,7 @@ export function createIntakeController(deps: IntakeDeps): IntakeController {
       }).catch((e: any) => { deps.addMsg('续研失败: ' + e, 'msg-error'); deps.setMode('idle'); });
   }
 
-  // ------------------------------------------------------------------
   // 暂停点答复
-  // ------------------------------------------------------------------
   function respondWith(response: any) {
     const tid = currentThreadId();
     if (!tid) return;
@@ -531,9 +504,7 @@ export function createIntakeController(deps: IntakeDeps): IntakeController {
     else if (inputPhase(getState()) === 'idle') { start(val('reply')); }
   }
 
-  // ------------------------------------------------------------------
   // 暂停点视图 (DOM 出口)
-  // ------------------------------------------------------------------
   function showCandidateChoice(p: any) {
     const card = buildCandidateCard(p, {
       currentSelection: () => getState().ui.candidateId,

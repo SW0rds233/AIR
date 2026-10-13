@@ -1,14 +1,6 @@
 from __future__ import annotations
 
-"""Z3 受限适配器 (P1)。
-
-用于精确编码片段的逻辑与约束求解:
-- check_implication: 检验 A => C 时检查 A ∧ ¬C。unsat 支持该编码下的蕴含;
-  sat 给出候选反例 (需回映射原问题复核); unknown 保持未决。
-- check_satisfiable: 检验约束本身是否可满足 (矛盾假设检测)。
-
-编码边界 (量词、实数/整数域、有界范围) 写入 detail。
-"""
+"""Z3 受限适配器。"""
 
 import ast
 

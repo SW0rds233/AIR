@@ -1,19 +1,6 @@
 from __future__ import annotations
 
-"""ReasoningAgent 推理与结论综合 (合并计划 §3.1 / §7.1)。
-
-职责: 分解义务、推导、查反例、**综合文献/案例并回答问题**。
-提交 `ReasoningResult`: 推导链、命题候选、工具请求/记录、结论建议、局限、补检索请求。
-
-两条硬约束 (§7.1、§14.3):
-1. 它只能**提出**命题与推导, 状态 (supported/refuted) 由判定层按证书链与中央规则产生;
-2. 综述也归这里 —— `synthesis` 策略负责主题归纳、定义比较、证据冲突解释与研究空白
-   综合; 纯文献清单可跳过。形式化证明只是**一种**策略, 不能把所有研究问题都强制
-   转成 SymPy 可解的式子。
-
-"引理缺条件"这类受阻情形在这里产生 `ResearchNeed(clause)`, 由主控派检索/建模
-—— 而不是让推理智能体无限等待, 也不是让写作者自己编补条件。
-"""
+"""ReasoningAgent 推理与结论综合。"""
 
 from typing import Any
 
@@ -59,17 +46,7 @@ _DATA_HINTS = ("回归", "估计", "统计", "样本", "面板", "回归系数",
 
 
 def classify_strategy(text: str, *, has_data: bool = False) -> str:
-    """决定推理策略 (规则)。
-
-    合并计划 §7.1 明确"不能把所有研究问题都强制转成 SymPy 可解的式子", 因此这里
-    只在题面**确实**要求判定/证明时才选 `derivation`; 否则默认 `synthesis`。
-
-    §3.1 G06 补了一条判据: **题面能被精确形式化**时也走 `derivation`。只靠关键词会漏掉
-    真实的形式化问题 —— 实测"参数 2-(211,15,1) 的设计是否存在"没有出现"证明/推导"
-    这些词, 于是被判成综述策略, 命题停在候选状态、交付降级为研究备忘录, 而它其实
-    有唯一的确定答案。判据用的是与 `build_spec_from_input` 同一份"精确计数约束抽取",
-    不是再加一组关键词。
-    """
+    """决定推理策略 (规则)。"""
     body = str(text or "")
     from src.research.classification import is_formal_question
     if is_formal_question(body):
@@ -164,7 +141,7 @@ class ReasoningAgent(AgentBase):
             has_data=bool(context.objects.get("dataset")) or bool(topic and _has_data(context)))
         if task.hints.get("need_kind") == "derivation" or task.hints.get("claim_id"):
             strategy = "derivation"
-        # 形式化推导策略先走**闭环路径** (合并计划 §3.1 G06): 它把
+        # 形式化推导策略先走**闭环路径**: 它把
         # "候选/义务 → 工具核验 → 结构化记录 → 状态归并"整条链接进同一任务协议 ——
         # 义务与核验记录作为候选提交, 命题状态由唯一提交口按内核判据重算。
         if strategy == "derivation":
@@ -359,7 +336,7 @@ class ReasoningAgent(AgentBase):
                               unresolved=[*fidelity_issues[:4], *missing[:4], *limitations[:4]],
                               usage=usage, payload=payload_out, replan=replan)
 
-    # ---- 形式化推导: 团队闭环 (合并计划 §3.1 G06) ----
+    # ---- 形式化推导: 团队闭环 ----
     def formal_closure(self, task: AgentTask, context: ContextPack,
                        runtime: AgentRuntime,
                        usage: UsageRecord) -> AgentResult | None:
@@ -391,6 +368,32 @@ class ReasoningAgent(AgentBase):
         if subject is None:
             return None
         claim, obligations, evidence, form_notes = subject
+        from src.research.classification import is_formal_question
+
+        question = str((context.objects.get("brief") or [{}])[0].get("main_question")
+                       or context.request)
+        related_support = any(
+            str(row.get("relation") or row.get("support") or "")
+            in {"supports", "partially_supports"}
+            and str(row.get("claim_id") or "") in {"", claim.id}
+            for row in context.objects.get("evidence") or [] if isinstance(row, dict)
+        )
+        if (task.source_policy in {"both", "user_kb", "autonomous"}
+                and not is_formal_question(question)
+                and claim.study.design.value == "theory"
+                and claim.origin.value == "proposed"
+                and (claim.lhs and claim.rhs or claim.strategy in {"derivation", "proof", "identity_simplification"})
+                and not related_support):
+            return self.blocked(
+                task, "应用研究中的候选模型公式缺少对应来源，暂不生成数学证明义务",
+                needs=[ResearchNeed(
+                    kind=NeedKind.more_sources,
+                    statement="为候选模型公式或所用定理补充可定位来源",
+                    why="数学恒等式本身不能证明模型适用于当前产业问题",
+                    blocked_refs=[ObjectRef(id=claim.id, version=claim.version)],
+                    acceptance=["核对框架出处与适用条件，或将其保留为未验证的方法假设"],
+                    blocking=False)],
+                usage=usage)
         if not obligations:
             # 命题已在库里但没有义务: 用**同一份**形式化判据给它拆义务, 而不是让角色
             # 自己列一份 (否则"该命题需要验什么"会有两份说法)。
@@ -488,7 +491,7 @@ class ReasoningAgent(AgentBase):
                        f"核验 {verified} 条"),
             input_versions={claim.id: claim.version},
             may_change_conclusion=False))
-        # 证据归属 (§6.1): 把上下文里的可用证据绑定到**本条命题的当前版本**。
+        # 证据归属: 把上下文里的可用证据绑定到**本条命题的当前版本**。
         # 没有这一步, 交付包里只有"一堆材料", 讲不出"这条结论依据哪条来源、适用条件
         # 是什么"; 而关系强度取自材料自己的判定 (不确定就是 insufficient), 不默认支持。
         changes.extend(_evidence_links_for(task, claim, context))
@@ -621,14 +624,7 @@ def _formalisable_subject(context: ContextPack, task: AgentTask | None = None):
 
 
 def _formal_subject(task: AgentTask, context: ContextPack):
-    """这条任务要形式化**什么**: 上下文里已有的命题, 或从题面自己形式化出来的。
-
-    为什么角色必须能自己形式化 (合并计划 §3.1 G06 / §9 R2): 团队要接管形式化研究,
-    就不能假设"已有人把命题放好了"。此前团队路径只在上下文里找 claim, 找不到就
-    退回通用策略 → 一条纯形式化题面**永远进不了形式化闭环** (实测: 团队跑
-    `2-(211,15,1)` 那类题只有 evidence/reasoning(blocked)/writing 三个角色)。
-    返回 `(claim, obligations, evidence, notes)`; 无法形式化时返回 `None`。
-    """
+    """这条任务要形式化什么: 上下文里已有的命题, 或从题面自己形式化出来的。"""
     claim, obligations, evidence = _formalisable_subject(context, task)
     if claim is not None:
         return claim, obligations, evidence, []
@@ -643,16 +639,7 @@ def _formal_subject(task: AgentTask, context: ContextPack):
 
 
 def _formulate_from_request(task: AgentTask, context: ContextPack):
-    """把题面形式化成"命题 + 义务" (确定性路径, 零 LLM)。
-
-    形式化能力本身在 `research/formulation.py` (从旧引擎按职责抽出), 因此团队与
-    引擎对同一题面得到的是**同一批**命题与义务, 不会各写一套编码。
-
-    候选文本**逐个尝试**而不是拼在一起: 原始请求、子问题措辞、主控画像是同一道题的
-    三种说法, 拼起来会让关系符两侧混入后一种说法的文本 —— 实测 `x**2 >= x` 的右端
-    变成 `"x 存在性判定"`, 交给工具就是语法错误, 于是报告 unsupported, 而命题其实
-    完全可判定。谁先能形式化就用谁, 不混合。
-    """
+    """把题面形式化成"命题 + 义务" (确定性路径, 零 LLM)。"""
     candidates = [
         str(context.request or ""),
         task_intent(task),
@@ -738,7 +725,7 @@ def _obligation_model():
 
 def _evidence_links_for(task: AgentTask, claim: Any,
                         context: ContextPack) -> list[ChangeProposal]:
-    """上下文证据 → **本条命题当前版本**的归属候选 (§6.1 EvidenceLink)。
+    """上下文证据 → **本条命题当前版本**的归属候选。
 
     只在材料确实带支持关系判定时才写"条件匹配"; 其余情况如实写 `insufficient`
     (检索命中不等于支持)。关系的来源是材料自己的 `relation` 字段, 这里不重新判语义
@@ -802,16 +789,7 @@ def _obligations_for_existing_claim(claim: Any) -> list[Any]:
 
 def _with_counterexample_obligation(claim: Any, obligations: list[Any],
                                     runtime: AgentRuntime) -> list[Any]:
-    """可编码反例搜索时，补一条**反例义务** (合并计划 §5.4 的能力)。
-
-    为什么必须独立于"命题有没有其他义务": 反例搜索回答的是"命题是否根本不成立",
-    而证明义务回答的是"命题能否被证明"。只在前者存在时才需要后者 —— 实测
-    `x**2 >= x` 这类**假命题**在只有 `prove_inequality` 义务时只会得到 unsupported,
-    结论停在"受阻", 而它其实有一个明确的反例。
-
-    反例义务的结论同样要经核验: 只有拿到**可回代的反例**才算被否决,
-    工具跑过没找到反例不构成证明 (`counterexample_verdict_for` 的判据)。
-    """
+    """可编码反例搜索时，补一条反例义务。"""
     from src.research.schemas import ProofObligation
 
     if any(getattr(o, "kind", "") == "refute" for o in obligations):

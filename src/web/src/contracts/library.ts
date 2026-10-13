@@ -1,16 +1,4 @@
-/**
- * 资料库契约: 按用户指定本机路径构建人工文献库。
- *
- * 为什么单独成文件: `contracts.ts` 描述会话/研究/交付的载荷, 这里的载荷属于
- * **资料接入** (扫描预览、导入报告、库详情)。计划书 §9.5 要求传输类型按
- * session/team/research/publication 分组, 因此新契约不再往 `contracts.ts` 里堆。
- *
- * 服务端口径 (`src/team_api.py` + `src/kb/path_import.py`):
- * - 响应里**只有 basename** (`display_path`), 完整绝对路径不外发;
- * - `denied` 项单独列出并给原因, 界面不得把它显示成"已跳过";
- * - 截断必须显式 (`truncated=true`), 不能静默丢文件;
- * - 删除库只解除登记, 不动用户原文件与共享向量库。
- */
+/** 资料库契约: 按用户指定本机路径构建人工文献库。 */
 
 /** 单个扫描条目在响应里的形状 (`ScannedFile.to_dict`)。 */
 export interface ScannedPathRow {
@@ -80,12 +68,6 @@ export interface LibraryImportReport {
   /** 当前对话绑定成功后的会话 ID；未选历史会话时为空。 */
   bound_session_id?: string;
   binding_error?: string;
-  /**
-   * 库的**规范 id**，即 `/api/sources` 里列出的那个值（磁盘目录名）。
-   * 用户输入的库名可能含空格等字符（实测 `星网 星链` → 目录 `星网_星链`），
-   * 因此选中资料库时必须用它，而不是用于回显的 `topic`。
-   */
-  source_set_id?: string;
 }
 
 /** `GET /api/library/{source_set_id}` 的返回 (`library_summary`)。 */
@@ -121,11 +103,7 @@ export interface LibraryPathRequest {
   label: string;
   max_files: number;
   max_bytes: number;
-  /**
-   * 授权根只能由服务端签发：本机文件夹选择窗口给出 `folder_grants` 令牌，
-   * 或服务端配置 `DATA_READ_ROOTS`。页面**不发送** `allow_roots`
-   * （后端保留该字段正是为了对非空值返回 400，避免"静默忽略"）。
-   */
+  /** Authorization roots come from folder grants or server configuration. */
   folder_grants: string[];
 }
 

@@ -197,7 +197,7 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
         # 2. 确定性检索: 与 LLM 路径共用同一入库与去重实现 (这就是"合并"的含义)
         # 新颖性对照在**检索之前**算: 它不依赖本次检索结果, 而且"没有检索能力/没比过"
         # 本身就是要写进交付物的结论 —— 放在检索之后会让"检索受阻"的运行连一条
-        # `unchecked` 记录都没有, 交付物于是看起来没有新颖性问题 (§5.4 / package.py)。
+        # `unchecked` 记录都没有, 交付物于是看起来没有新颖性问题。
         novelty_changes = self._novelty_records(task, context, [])
         selected_queries, search_cache = _observed_searches(observations, policy)
         if policy in {"both", "autonomous"}:
@@ -246,12 +246,12 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
 
         locatable = [e for e in evidence_items if e.get("locator")]
         changes = [self._evidence_proposal(task, e, topic) for e in evidence_items]
-        # 证据归属 (§6.1): 证据必须绑定到**具体命题版本**, 否则同一批证据会被所有命题
+        # 证据归属: 证据必须绑定到**具体命题版本**, 否则同一批证据会被所有命题
         # 共享 —— "这条来源支持哪个结论、适用条件是什么"就无从回答。这里由检索角色
         # 提交 `evidence_link` 候选 (relation 来自它自己的判定, 不是猜)。
         links = self._evidence_links(task, evidence_items, context)
         changes.extend(links)
-        # 新颖性对照 (§5.4): 交付包与出版层按它决定"能不能宣称原创"。**必须留下记录**
+        # 新颖性对照: 交付包与出版层按它决定"能不能宣称原创"。**必须留下记录**
         # —— 没有检索能力时也落一条 `unchecked` 并写明原因, 否则交付物看起来像
         # "没有新颖性问题"。判定由 `research/novelty.py` 做 (零 LLM), 这里只提供
         # 对照来源 (本地库优先, 否则外部检索)。
@@ -705,7 +705,7 @@ def _query_of(task: AgentTask, context: ContextPack) -> str:
     """检索目标: 优先用**研究问题**本身, 而不是子任务措辞。
 
     为什么必须这样: 资料子问题的措辞是"收集支撑或反驳候选结论的可定位来源" —— 拿它
-    当检索式, 在真实资料库里必然零命中 (实测: 命中 0 条, 研究因此卡住)。
+    当检索式, 在真实资料库里必然零命中。
     子问题的 `needs`/验收标准才是对检索**结果**的要求, 不是检索词。
     """
     hint = str((task.hints or {}).get("query", "") or "")

@@ -1,17 +1,6 @@
 from __future__ import annotations
 
-"""角色注册表: 契约 + **真实可用能力** (合并计划 §5 / §8)。
-
-为什么注册表不能只写一份静态清单
---------------------------------
-合并计划 §5 明确要求 `registry.py` 注册"角色与**真实可用**能力"。只声明
-"EvidenceAgent 能检索"没有意义 —— 检索后端可能没配 key、没有向量库、没有
-只读数据源。于是界面会显示"检索中"而实际什么都没发生 (系统已有的现场缺陷之一
-就是"工具不可用却伪造检索完成")。
-
-因此这里的每个能力都要经过一个**探测函数**: 探测说不可用, 注册表就如实报
-不可用并给出原因, 而不是把静态清单当事实。
-"""
+"""角色注册表: 契约 + 真实可用能力。"""
 
 from collections.abc import Callable
 from typing import Any
@@ -34,9 +23,7 @@ __all__ = [
 ]
 
 
-# ----------------------------------------------------------------------
 # 能力探测 (只回答"现在能不能用", 不触发任何研究动作)
-# ----------------------------------------------------------------------
 def _probe_search() -> tuple[bool, str]:
     """外部检索是否可用: 需要网络配置; 无 key 时 arXiv 仍可用但如实标注。"""
     try:
@@ -154,9 +141,7 @@ def probe(capability: str) -> tuple[bool, str]:
         return False, f"探测 {capability!r} 失败: {e}"
 
 
-# ----------------------------------------------------------------------
 # 角色契约
-# ----------------------------------------------------------------------
 def _contract(role: str, objective: str, deliverables: tuple[str, ...],
               need_kinds: tuple[str, ...], *, may_request_downgrade: bool = False,
               ) -> AgentContract:
@@ -169,7 +154,7 @@ def _contract(role: str, objective: str, deliverables: tuple[str, ...],
     )
 
 
-#: 七个功能角色 + 主控的职责声明 (与合并计划 §3.1 的表逐条对应)。
+#: 七个功能角色 + 主控的职责声明。
 ROLE_CONTRACTS: dict[str, AgentContract] = {
     "supervisor": _contract(
         "supervisor",

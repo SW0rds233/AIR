@@ -1,39 +1,9 @@
-/**
- * 前端唯一可写状态。
- *
- * 解决的问题 (G19: "前端仍同步多份状态")
- * -------------------------------------
- * 早期实现同时存在 `window.AIR.research` (current-research.ts 的状态机)、
- * `app.ts::currentResearch` 与一组 ID 镜像 (`currentProjectId`/`currentProblemId`/
- * `currentThreadId`/`currentSessionId`/`currentContext`/`mode`)、以及
- * `team-controller.ts` 里另一份 reducer store。三者并行时, 只要有**一条**路径忘了同步,
- * 界面就会出现"标题/任务/稿件属于上一个会话"这类串号问题 —— 那正是
- * `syncSelectionFromLegacy()` 存在的理由, 也正说明新 store 不是唯一权威。
- *
- * 现在只有这一份状态, 按**归属**切成四片:
- *   - `selection`: 当前 project/problem/session/run 身份、服务端返回的引擎标识、后台运行
- *     状态、当前查看的对象与标签页; 身份切换时整体替换;
- *   - `entities`: 按 ID/版本保存的任务、决策、角色、对象计数与审阅问题 (分 run 缓存);
- *   - `transport`: 连接状态与**每会话**事件游标 —— **与后台运行状态分开**
- *     (计划书明确要求: "离线不等于后台已停止");
- *   - `ui`: 标签筛选、展开项、未发送草稿、主题偏好 (=资料库主题)、暂停点/候选
- *     回显、草稿项目身份与加载代号; **不能回写命题状态**。
- *
- * 写路径只有一条: `dispatch(action)` → `reduce` → 通知订阅者。
- * 读路径只有一条: `getState()` / 导出 selector (视图不得自己再算一套)。
- * 兼容对象 (`window.AIR.research`) 只是这里的**只读投影**, 见 `current-research.ts`。
- *
- * `reduce`/selector 仍是纯函数 + 不可变数据 (不访问 `document`/`window`/网络),
- * 因此可以直接在测试里驱动; 进程级单例是模块内的一层薄封装 (与
- * `api/research-client.ts` 的 `client()`/`resetClient()` 同一模式)。
- */
+/** 前端唯一可写的研究状态和状态转移。 */
 
-// ----------------------------------------------------------------------
 // 类型
-// ----------------------------------------------------------------------
 // **类型**导入 (构建时被擦除, 不产生运行期依赖): 工作台投影的形状定义在
 // `views/research-workbench.ts`, 而"最近一次投影"这份服务端结论属于 `entities`。
-// 把 WorkbenchData 移到 `contracts/` 是另一件事 (§8.1 item 5 的后续切片)。
+// 把 WorkbenchData 移到 `contracts/` 是另一件事。
 import type { WorkbenchData } from '../views/research-workbench';
 
 export type TransportStatus = 'offline' | 'connecting' | 'online' | 'reconnecting';
@@ -132,7 +102,7 @@ export interface Entities {
    * 最近一次服务端工作台投影 (只读结论)。
    *
    * 放在这里而不是 `app.ts` 的局部变量: 工作台**不自己持有工作对象**
-   * (§8.1 item 4/5), 结论详情导航也按这份投影渲染。
+   *, 结论详情导航也按这份投影渲染。
    */
   workbench: WorkbenchData | null;
 }
@@ -178,9 +148,7 @@ export interface ResearchStore {
   ui: UiState;
 }
 
-// ----------------------------------------------------------------------
 // 初始状态
-// ----------------------------------------------------------------------
 export function emptySelection(): Selection {
   return {
     projectId: '', problemId: '', sessionId: '', threadId: '', runId: '',
@@ -224,9 +192,7 @@ export function newDraftProjectId(): string {
   return 'proj-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
-// ----------------------------------------------------------------------
 // 动作
-// ----------------------------------------------------------------------
 /** 身份字段: 整体切换 (`selection/open`) 与逐字段更新 (`selection/patch`) 都作用于它们。 */
 export const IDENTITY_KEYS: Array<keyof Selection> = [
   'projectId', 'problemId', 'sessionId', 'threadId', 'runId',
@@ -297,9 +263,7 @@ function identityPatch(patch: Partial<Selection>): Partial<Selection> {
   return next as Partial<Selection>;
 }
 
-// ----------------------------------------------------------------------
 // Reducer
-// ----------------------------------------------------------------------
 export function reduce(state: ResearchStore, action: Action): ResearchStore {
   switch (action.type) {
     case 'selection/open': {
@@ -483,9 +447,7 @@ export function reduce(state: ResearchStore, action: Action): ResearchStore {
   }
 }
 
-// ----------------------------------------------------------------------
-// 进程级唯一实例 (§8.1: 页面、控制器、团队视图都读写**这一份**)
-// ----------------------------------------------------------------------
+// 进程级唯一实例
 let current: ResearchStore = emptyStore();
 const listeners = new Set<(state: ResearchStore) => void>();
 
@@ -539,9 +501,7 @@ export function resetSession(): ResearchStore {
   return current;
 }
 
-// ----------------------------------------------------------------------
 // Selectors (只读派生; 视图不得自己再算一套)
-// ----------------------------------------------------------------------
 export const ROLE_LABEL: Record<string, string> = {
   supervisor: '主控',
   evidence: '检索与证据整理',
@@ -698,7 +658,7 @@ export function blockingIssues(state: ResearchStore) {
  * 是否应当请求"重新加载投影"。
  *
  * 触发条件: 连接层发现事件缺口, 或收到未知事件类型后无法推进游标。
- * 计划书要求: "发现缺口、日志截断或协议不兼容时重新加载投影"。
+ * 发现缺口、日志截断或协议不兼容时重新加载投影。
  */
 export function shouldResync(state: ResearchStore, incomingSeq: number, sessionId: string): boolean {
   if (state.transport.needsResync) return true;

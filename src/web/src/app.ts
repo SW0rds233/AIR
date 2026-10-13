@@ -1,40 +1,4 @@
-/**
- * 页面装配层 (合并计划 §8.1 / §9.5: `app.ts` 只负责装配, 不再承载业务逻辑,
- * 也不再持有任何状态副本)。
- *
- * 迁出历史: 本文件原先是 2228 行的单体页面逻辑 (启动、附件、SSE、历史、工作台、
- * 产物与 DOM 绑定全在一起)。现在按 §9.5 的表拆成:
- *
- * - `session-controller.ts` —— 会话操作单一入口 (新建/查看/继续/停止/删除);
- * - `features/intake/controller.ts` + `views/research-input.ts` —— 统一输入、附件绑定、
- *   稳定草稿身份 (R2/R3);
- * - `events/session-stream.ts` —— SSE 连接与带上限退避的重连 (`events/session-events.ts`
- *   的协议层之上);
- * - `views/research-overview.ts` / `views/project-navigation.ts` / `views/interrupt-cards.ts`
- *   —— 工作台总览、历史导航与暂停点卡片的纯渲染函数;
- * - `library-controller.ts::createLibrarySection` —— 本机路径资料接入;
- * - `team-controller.ts::createTeamMount` —— 团队区块挂载。
- *
- * 状态只有一份, 在 `state/research-store.ts`。本文件**不**再定义
- * `currentResearch` 对象, 也**不**再维护 `currentProjectId` / `currentProblemId` /
- * `currentThreadId` / `currentSessionId` / `currentContext` / `mode` 这一组 ID 镜像
- * (它们曾经与 `window.AIR.research` 并行存在, 于是必须靠 `syncResearchGlobals()`
- * 来回对表)。现在:
- *
- * - 读: `getState()` + selector (`selectionOf` / `researchView` / `inputPhase` / ...);
- * - 写: `dispatch(action)` (身份切换用 `selection/open` / `selection/reset`,
- *   字段回写用 `selection/patch`);
- * - 页面只留下 DOM 与装配 (渲染在 `views/*`), 运行状态徽标由 selector 现算。
- *
- * 本文件仍然守住的硬约束 (迁移期不允许退化):
- * 1. 严格 CSP (`script-src 'self'`): **没有内联事件处理器**, 所有动态按钮继续走
- *    `data-action` + 文档级委托 `PAGE_ACTIONS`;
- * 2. 所有 `id` / 选择器不变 (现有 e2e 与后端联调依赖它们);
- * 3. `window.AIRTeam`、`window.AIRLibrary` 与 `window.AIRPaper` 入口保留;
- *    `window.AIR.research` 由 `air-global.ts` 暴露为**只读投影** (不再有可写镜像);
- * 4. 直接的 DOM 访问保留 `any` 边界 (后端 JSON 载荷形状由 `contracts.ts` 描述),
- *    不重新引入 `@ts-nocheck`。
- */
+/** 装配页面、控制器和视图；可写状态集中在 research-store。 */
 import {
   byId, scrollToBottom, setDisabled, setHtml, setPlaceholder, setProp,
   setText, setVal, val,
@@ -85,7 +49,7 @@ import {
   type TabName,
 } from './state/research-store';
 import { researchLabel, researchView } from './current-research';
-// §9.6: 论文/公式/图表追溯 (纯函数视图; 取数与 DOM 装配在这里)
+// 论文/公式/图表追溯 (纯函数视图; 取数与 DOM 装配在这里)
 import {
   numberingView,
   renderFigureGallery,
@@ -102,7 +66,7 @@ import {
   workbenchNoProjectHtml,
   workbenchUnboundHtml,
 } from './views/research-overview';
-// §9.5 取数入口: 页面装配层也不再自己拼 URL / 判错 / 重试 —— 全部走 api/ 层。
+// 取数入口: 页面装配层也不再自己拼 URL / 判错 / 重试 —— 全部走 api/ 层。
 // `pageApi()` 每次调用时解析单例, 这样它永远是最新的客户端 (允许多个入口各自替换)。
 import {
   ENDPOINTS,
@@ -253,7 +217,7 @@ function copyProjectId() {
   addMsg('项目 ID: ' + pid, 'msg-system');
 }
 
-/* ---------------- 资料源绑定 (计划书 §3 R0) ---------------- */
+/* ---------------- 资料源绑定 ---------------- */
 function refreshSourceSets(preferredId?: string): Promise<void> {
   const sel = byId<HTMLSelectElement>('sourceset')!;
   if (!sel) return Promise.resolve();
@@ -272,26 +236,18 @@ function refreshSourceSets(preferredId?: string): Promise<void> {
   }).catch(() => {});
 }
 
-async function selectSourceSet(sourceSetId: string, announce = false): Promise<boolean> {
+async function selectSourceSet(sourceSetId: string): Promise<void> {
   await refreshSourceSets(sourceSetId);
   const sel = byId<HTMLSelectElement>('sourceset');
-  if (!sourceSetId) return false;
+  if (!sourceSetId) return;
   if (!sel || sel.value !== sourceSetId) {
-    // 列表里的 id 是库的**目录名**（规范化结果）：库名里的空格会变成下划线。
-    // 因此这里要告诉用户去哪儿找，而不是只说"没找到"。
-    if (announce) {
-      addMsg('资料库已导入，但未能自动选中「' + sourceSetId + '」。' +
-        '请在下方「资料库」下拉框里手动选择（列表显示的是规范化后的库名，' +
-        '例如空格会变成下划线）。', 'msg-error');
-    }
-    return false;
+    addMsg('资料库已导入，但未能在选择列表中找到该库，请刷新资料库。', 'msg-error');
+    return;
   }
   // 已选人工库应参与检索；保留“只用指定资料”或“两者结合”的既有偏好。
   const policy = byId<HTMLSelectElement>('sourcepolicy');
   if (policy?.value === 'autonomous') policy.value = 'both';
   onSourceSetChange();
-  if (announce) addMsg('已为下一次研究选中资料库「' + sourceSetId + '」。', 'msg-system');
-  return true;
 }
 
 function onSourceSetChange() {
@@ -312,7 +268,7 @@ function onSourceSetChange() {
   }).catch(() => { info.textContent = ''; });
 }
 
-/* ---------------- 资料库工作区 (合并计划 §13.4 的列表与详情) ---------------- */
+/* ---------------- 资料库工作区 ---------------- */
 /** 已展开详情的资料库 (按需查询, 不预先拉取全部库的文件清单)。 */
 const libraryDetails: Record<string, LibraryDetail> = {};
 let librarySection: LibrarySection | null = null;
@@ -348,7 +304,7 @@ function getLibraryController(): LibraryController {
   return library().controller();
 }
 
-/* ---------------- 科研工作台 (§9.5: 渲染在 views/research-overview.ts) ----------------
+/* ---------------- 科研工作台 ----------------
  * 工作台**不自己持有工作对象**: 最近一次服务端投影存放在唯一状态的 `entities` 片
  * (`entities/workbench`), 这里只是取数 + 把渲染结果写进 DOM。结论详情导航也因此可以从
  * 状态重渲染, 而不是靠页面局部变量。
@@ -639,7 +595,7 @@ function loadArtifact(name: any) {
   }).catch(() => {});
 }
 
-/* ---------------- 论文与追溯 (§9.6, F3–F5) ----------------
+/* ---------------- 论文与追溯 ----------------
  * 交付物清单 + `manifest.json` → 稿件追溯 / 图表 / 渲染期编号。
  * 三条硬要求:
  * 1. **不伪造**: manifest 缺失就显示"还没有交付包", 编号缺失就显示"只在最终渲染时分配";
@@ -712,7 +668,7 @@ function clearReply() {
 
 /* ---------------- 控制器装配 ---------------- */
 
-/** 统一输入与附件 (计划书 §9.5 `features/intake/`)。 */
+/** 统一输入与附件。 */
 const d: IntakeController = createIntakeController({
   addMsg: (text, cls) => addMsg(text, cls),
   setMode: (m) => setMode(m),
@@ -730,7 +686,7 @@ const d: IntakeController = createIntakeController({
   submitFeedback: (objectId, text) => submitWorkbenchFeedback(objectId, text),
 });
 
-/** 会话生命周期 (计划书 §9.5 `session-controller.ts`)。 */
+/** 会话生命周期。 */
 const sessions: SessionController = createSessionController({
   connectStream: (tid) => stream.connect(tid),
   closeStream: () => stream.close(),
@@ -755,7 +711,7 @@ function compensateStatus(status: string): RunStatus {
   return 'idle';
 }
 
-/** 事件流 (计划书 §9.5 `events/session-stream.ts`)。 */
+/** 事件流。 */
 const stream: SessionStream = createSessionStream({
   handleEvent: (ev) => handleEvent(ev),
   currentThreadId: () => currentThreadId(),
@@ -926,8 +882,7 @@ function bindStaticHandlers() {
 }
 
 function boot() {
-  // 唯一状态 → 视图: 状态一变就按 selector 重画上下文徽标 (计划书 §8.3 的
-  // "事件经 reducer 更新 store 后渲染", 不再是回调各自改全局状态)。
+  // 状态变化后按 selector 重画上下文徽标。
   subscribe(() => renderResearchBadge());
   bindStaticHandlers();
   setMode('idle');
@@ -956,7 +911,7 @@ function exposeTeamApi() {
       team().mount(String(projectId || ''), String(runId || '')),
     store: () => getTeamStore(),
   };
-  // §13.4: 资料接入入口 (只读 + 显式动作; 浏览器验收与调试用)。
+  // 资料接入入口 (只读 + 显式动作; 浏览器验收与调试用)。
   (window as any).AIRLibrary = {
     scan: (paths?: string, label?: string) =>
       getLibraryController().scan(String(paths || ''), String(label || '')),
@@ -965,7 +920,7 @@ function exposeTeamApi() {
     remove: (sourceSetId?: string) => library().remove(String(sourceSetId || '')),
     refresh: () => library().refreshWorkspace(),
   };
-  // §9.6: 论文与追溯面板的只读刷新入口 (浏览器验收与调试用; 不触发任何研究动作)。
+  // 论文与追溯面板的只读刷新入口 (浏览器验收与调试用; 不触发任何研究动作)。
   (window as any).AIRPaper = {
     refresh: () => refreshPaperTrace(),
   };

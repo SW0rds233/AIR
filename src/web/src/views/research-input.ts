@@ -1,13 +1,4 @@
-/*!
- * 研究输入与附件视图 (合并计划 §9.5 `views/research-input.ts`)。
- *
- * 这里只放**纯渲染**: 附件登记行、附件/资料权限绑定说明、上传按钮状态所需的文案。
- * 取文件、发请求、写 DOM 都在 `features/intake/controller.ts` (流程状态) 与 `app.ts`
- * (装配) 里, 于是"界面显示了什么"可以单测, 不会与请求逻辑互相掩盖。
- *
- * 硬约束不变: 动态按钮仍然写 `data-action` (CSP 下内联处理器不执行),
- * 附件 id 经转义后进入 `data-id`。
- */
+/** 研究输入表单的纯视图逻辑。 */
 
 import { escapeHtml } from './research-workbench';
 import {

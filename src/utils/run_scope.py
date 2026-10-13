@@ -1,18 +1,6 @@
 from __future__ import annotations
 
-"""运行身份作用域 (合并计划 §7.4 / M4: "按 run/project/source grant 绑定……禁止依靠全局
-'最近一次'续研")。
-
-问题
-----
-会话记忆、检索缓存、图表目录、用量这些资源此前都是**进程级单例**: 谁最后写谁生效。
-于是一个会话在跑的时候, 另一个会话"最近一次研究"的主题、图表目录或费用会被串起来。
-研究线程本来就只有一个明确的运行身份, 因此把它绑定到**当前上下文**是最直接的归属
-来源 —— 这也是 `server._run_session` 在其工作线程里能做、且不需要改所有调用点的事。
-
-与 `cost_tracker` 的做法一致: 用 `ContextVar` 而不是全局变量, 新建线程会继承父线程
-的上下文, 因此会话内部再派生的 worker 线程仍然归属同一运行。
-"""
+"""按运行、项目和资料授权范围维护运行身份作用域。"""
 
 from contextlib import contextmanager
 from contextvars import ContextVar

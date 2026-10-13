@@ -1,29 +1,9 @@
-/**
- * 会话事件消费。
- *
- * 解决的问题 (逐条对应计划书表格)
- * -----------------------------
- * 1. `connectSSE()` 早期用**全局游标** (`lastEventId`): 切换会话后游标还指向上一个
- *    会话的位置, 于是要么丢事件, 要么把旧会话的事件补进新会话。这里改成
- *    **会话级游标** (`transport.cursorBySession`)。
- * 2. 断线后固定间隔重连且无上限: 这里用**有上限的退避 + 抖动**, 并在服务端已终止
- *    (§9.4: "终止状态/切换会话后取消重连") 时停止重连。
- * 3. 每个 node 事件都刷新整个工作台: 这里把事件分成**业务事件**与**辅助事件**,
- *    只有业务事件触发受影响面板的刷新 (§9.4: "避免每个 token/工具日志触发全工作台
- *    刷新")。
- * 4. 未知事件被静默忽略 -> 页面停在"完成": 这里把未知类型记成 `unknown` 并要求
- *    **重新加载投影**, 不允许静默跳过 (§9.4: "未知事件可记录并重新同步, 不能静默让
- *    页面变成'完成'")。
- *
- * 本模块是纯函数: 不创建 EventSource、不碰 DOM。连接本身由 controller 负责。
- */
+/** 解析会话事件并决定受影响的视图；连接与重连由控制器负责。 */
 
 import type { ResearchStore, TaskStatus } from '../state/research-store';
 import { reduce, shouldResync } from '../state/research-store';
 
-// ----------------------------------------------------------------------
-// 事件契约 (§9.4)
-// ----------------------------------------------------------------------
+// 事件契约
 export type BusinessEventType =
   | 'task_dispatched' | 'task_started' | 'task_blocked' | 'task_completed'
   | 'object_changed' | 'manuscript_ready' | 'figure_ready'
@@ -56,7 +36,7 @@ export type EventEffect =
   | { kind: 'resync'; store: ResearchStore; reason: string }
   | { kind: 'incompatible'; store: ResearchStore; reason: string };
 
-/** 需要重新渲染的面板 (§9.4: 只重新渲染受影响面板)。 */
+/** 需要重新渲染的面板。 */
 export type RefreshTarget = 'team' | 'timeline' | 'paper' | 'review' | 'sources' | 'overview';
 
 export function refreshTargets(type: string): RefreshTarget[] {
@@ -88,9 +68,7 @@ export function refreshTargets(type: string): RefreshTarget[] {
   }
 }
 
-// ----------------------------------------------------------------------
 // 应用一个事件
-// ----------------------------------------------------------------------
 export function applyEvent(store: ResearchStore, event: TeamEvent): EventEffect {
   if (event.protocol !== undefined && event.protocol !== PROTOCOL_VERSION) {
     return {
@@ -277,9 +255,7 @@ function statusForType(type: string, fallback?: string): string {
   return map[type] ?? fallback ?? 'running';
 }
 
-// ----------------------------------------------------------------------
-// 重连策略 (§9.4: 有上限的退避与抖动)
-// ----------------------------------------------------------------------
+// 重连策略
 export interface BackoffOptions {
   baseMs?: number;
   maxMs?: number;
@@ -310,7 +286,7 @@ export function nextReconnectDelay(attempt: number, options: BackoffOptions = {}
   return { retry: true, delayMs, reason: `第 ${attempt + 1} 次重连` };
 }
 
-/** 是否还应继续重连 (§9.4: 终止状态/切换会话后取消重连)。 */
+/** 是否还应继续重连。 */
 export function shouldReconnect(store: ResearchStore,
                                 options: { sessionChanged?: boolean } = {}): BackoffDecision {
   if (store.transport.terminated) {
@@ -322,9 +298,7 @@ export function shouldReconnect(store: ResearchStore,
   return nextReconnectDelay(store.transport.reconnectAttempts);
 }
 
-// ----------------------------------------------------------------------
-// 投影与事件的衔接 (§9.4: 先读投影, 再订阅其后的事件)
-// ----------------------------------------------------------------------
+// 投影与事件的衔接
 export interface SnapshotCursor {
   revision?: number;
   eventSeq: number;

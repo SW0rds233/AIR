@@ -1,25 +1,6 @@
 from __future__ import annotations
 
-"""图表产物**质量检查**与审阅文本解析 (合并计划 §3.3 G18)。
-
-这里原来还有一个"LLM 写 matplotlib 脚本 → 子进程执行 → 代码级/视觉审阅"的
-自治绘图循环 (`generate_figure_with_llm` / `_execute_code` / `_sanitize_code` …)。
-G18 把它删掉了, 原因不是"写得不好", 而是它**没有权限边界**: 模型产出的任意
-Python 会被真的执行, 而进程隔离不等于权限隔离 —— 图的数据来源、单位、模型域与
-写权限都无法在执行前校验。新的唯一入口是 `src.agents.figures.render_figure_spec`
-(声明式 FigureSpec), 公式另走 `src.rag.figure_formula` 的白名单解析。
-
-保留下来的是**不执行任何代码**的两件事:
-
-- `check_png_quality`: 渲染产物的确定性质量检测 (空白/尺寸/内容密度/颜色多样性),
-  现在由产物服务在写盘后调用, 让"画出来但等于白画"也能被如实报出来;
-- `_extract_review_issues` / `_extract_vision_issues`: 把审阅文本解析成问题清单
-  (过滤模板回显与吹毛求疵), 与"谁来审"无关, 供审阅路径复用。
-
-注意: 本模块**没有**任何接受源码字符串并执行的函数, 也不起子进程;
-`tests/test_figure_artifact_service.py::test_free_script_execution_path_is_gone`
-专门锁这一点。
-"""
+"""图表产物质量检查与审阅文本解析。"""
 
 import logging
 import re
@@ -115,7 +96,7 @@ def _extract_vision_issues(review_text: str) -> list[str]:
     """从视觉审阅意见中提取**仅 Critical 级**问题。
 
     过滤掉不含 _CRITICAL_VISION_HINTS 关键词的吹毛求疵问题,
-    避免"每轮报满 5 个问题"导致修正循环永不收敛 (实测痛点)。
+    避免"每轮报满 5 个问题"导致修正循环永不收敛。
     """
     all_issues = _extract_review_issues(review_text)
     return [i for i in all_issues if any(h in i for h in _CRITICAL_VISION_HINTS)]

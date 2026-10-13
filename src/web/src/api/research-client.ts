@@ -1,21 +1,4 @@
-/**
- * 研究 HTTP 客户端: 前端与后端之间的**唯一**取数入口。
- *
- * 为什么要有这一层
- * ----------------
- * 页面装配层此前到处直连 `fetch('/api/...')`, 于是同一件事 (取数、判错、取消、重试)
- * 在每个调用点各写一遍。计划书 §9.5 明确要求把"URL、错误、取消、幂等与兼容"集中到
- * `api/` 下, 因此这里成为唯一出口; 视图与控制器只管**语义**, 不再拼 URL。
- *
- * 三条刻意写死的语义 (§9.4)
- * -------------------------
- * 1. **自动重试只限幂等请求**: GET 与"带幂等键的变更"才重试。无幂等键的 POST/DELETE
- *    一律不重试 —— 否则一次超时重试就可能把同一个动作施加两遍 (例如重复导入)。
- * 2. **取消**: 所有请求都接受 `AbortSignal`; 切换会话时由调用方 abort 旧请求,
- *    迟到响应由调用方按加载代号丢弃 (见 `team-controller` / `session-controller`)。
- * 3. **错误可读**: 4xx 把后端的 `detail` 如实带出来 (界面要显示"为什么失败"),
- *    而不是抛一个 `HTTP 400` 了事。
- */
+/** 研究 HTTP 客户端，统一处理地址、错误、取消和幂等重试。 */
 
 /** 用 URL + searchParams 构造地址: 手拼字符串在参数缺失时会生成非法路径
  *  (曾经的真实缺陷: `/state&_=...` 少了 `?`)。 */
@@ -154,9 +137,7 @@ export function createResearchClient(deps: ResearchClientDeps = {}): ResearchCli
   return { json, raw, base };
 }
 
-// ----------------------------------------------------------------------
-// 端点: URL 只在这里出现 (§9.5 "URL/错误/取消/幂等集中管理")
-// ----------------------------------------------------------------------
+// 端点: URL 只在这里出现
 
 /**
  * 非 GET 端点的方法表: 这是**契约**, 不是文档。
@@ -225,7 +206,7 @@ export const ENDPOINTS = {
   teamRoles: '/api/team/roles',
   teamProjection: (projectId: string, runId: string) =>
     `/api/team/${encodeURIComponent(projectId)}/${encodeURIComponent(runId)}`,
-  // 资料库接入 (§13.4): 扫描 / 导入 / 详情 / 解除登记
+  // 资料库接入: 扫描 / 导入 / 详情 / 解除登记
   libraryScan: '/api/library/scan',
   libraryImport: '/api/library/import',
   libraryPickFolder: '/api/library/pick-folder',

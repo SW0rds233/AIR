@@ -1,34 +1,6 @@
 from __future__ import annotations
 
-"""按用户指定路径构建人工文献库 (合并计划 §13)。
-
-需求
-----
-用户直接给出**本机文件或文件夹路径**, 由系统扫描并登记为文献库, 供检索、建模、
-推理与引用使用; 不再要求先把 PDF 手工拷进固定目录。
-
-为什么不能"复制到 data/manual_pdfs"
------------------------------------
-复制会产生第二份真相源、占双倍磁盘, 并在用户更新原件后让库静默过期。因此采用
-**引用 + hash + mtime**: 库只登记路径与内容摘要, 由 `PathImportRef.missing_since`
-承担失效检测。
-
-安全规则 (必须实现, 不能只靠提示词)
-----------------------------------
-1. 默认不放开任意路径: 只接受位于 `readonly_data.authorized_roots()` 之下
-   (data/、outputs/ 或 `DATA_READ_ROOTS` 显式放行项) 的路径, 其余一律 `denied`
-   并给出"需维护者显式放行"的说明 —— 与只读数据适配器同一语义, 不新写一套规则;
-2. 敏感目标硬拒绝 (即使在被授权根内): `.env`、`*.pem/*.key/*.pfx`、`.ssh/`、
-   `.git/`、`.aws/`、`credentials*`、`node_modules/`、`.venv/`, 以及符号链接指向
-   上述内容者;
-3. 只读: 不复制、不改名、不修改、不执行被导入文件; 不跟随符号链接出授权根
-   (越界即 denied);
-4. 路径回显: 对外只给 basename (界面/日志用 `display_path`), 完整绝对路径只进
-   本地登记记录与审计;
-5. 体量与数量上限: 默认 500 文件 / 2 GB; 超限截断并标记 `truncated=True`;
-6. 不引入新的提权入口: 导入只构建文献库, 不因为给了路径就获得数据查询、执行或
-   联网的额外权限。
-"""
+"""从用户选定的目录导入文献，并限制路径访问范围。"""
 
 import fnmatch
 import json
@@ -143,7 +115,7 @@ class ScannedFile(BaseModel):
 
 
 def display_path(path: str | Path) -> str:
-    """界面与日志只展示 basename (合并计划 §13.3 规则 4)。"""
+    """界面与日志只展示 basename。"""
     text = str(path or "")
     if not text:
         return ""
@@ -337,9 +309,7 @@ class ImportReport(BaseModel):
         }
 
 
-# ----------------------------------------------------------------------
 # 授权与敏感判定
-# ----------------------------------------------------------------------
 def _resolve_root(raw: str) -> Path | None:
     """把一条追加授权根解析为绝对路径; 无效/空返回 None (不是异常)。
 
@@ -589,9 +559,7 @@ def _human_bytes(size: int) -> str:
     return f"{size} B"
 
 
-# ----------------------------------------------------------------------
 # 登记记录 (引用 + hash + mtime; 不复制文件)
-# ----------------------------------------------------------------------
 def path_refs_file(topic: str) -> Path:
     return topic_dir(topic) / "path_refs.json"
 
@@ -650,9 +618,7 @@ def detect_missing(topic: str, *, save: bool = True) -> list[PathImportRef]:
     return refs
 
 
-# ----------------------------------------------------------------------
 # 导入
-# ----------------------------------------------------------------------
 @dataclass
 class _ImportContext:
     topic: str
@@ -864,13 +830,11 @@ def _guess_language(name: str) -> str:
     return "zh" if any("\u4e00" <= ch <= "\u9fff" for ch in name) else ""
 
 
-# ----------------------------------------------------------------------
 # 库级操作
-# ----------------------------------------------------------------------
 def library_summary(topic: str) -> dict[str, Any]:
     """单个路径导入库的可查信息: 来源类型、根目录、文件数、hash 清单、失效文件。
 
-    **不返回任何绝对路径** —— 只给 basename, 与 §13.3 规则 4 一致。
+    不返回绝对路径，只给 basename。
     """
     name = (topic or "").strip()
     if not name:
