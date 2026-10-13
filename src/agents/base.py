@@ -1,17 +1,6 @@
 from __future__ import annotations
 
-"""子智能体公共设施 (合并计划 §3.1 / §8)。
-
-七个功能角色共享三件事, 因此放在一处而不是各写一遍:
-
-1. **素材投影**: 从 `ContextPack` 里取"本角色该看的对象", 不把整份研究状态塞进提示词;
-2. **结构化输出解析**: 模型返回 JSON 时容错解析, 解析失败**如实报告**(不猜内容);
-3. **确定性兜底**: 没有 LLM / 预算为零时, 角色仍要产出**真实**成果 —— 要么用规则
-   与已有存储算出结果, 要么明确 `blocked`。绝不允许"没有模型就假装完成"。
-
-角色实现只依赖 `AgentRuntime` 暴露的接口 (授权令牌、记账 LLM、事件), 不直接读写
-研究存储: 状态写入是判定层的职责 (§5.2)。
-"""
+"""子智能体公共设施。"""
 
 import json
 import re
@@ -46,9 +35,7 @@ __all__ = [
 ]
 
 
-# ----------------------------------------------------------------------
 # 上下文投影
-# ----------------------------------------------------------------------
 def visible_objects(context: ContextPack, kind: str,
                     limit: int = 20) -> list[dict[str, Any]]:
     """取本角色可见的某一类对象 (按任务范围裁剪后的只读快照)。"""
@@ -110,9 +97,7 @@ def packet_lines(items: list[dict[str, Any]], *, fields: tuple[str, ...],
     return "\n".join(out)
 
 
-# ----------------------------------------------------------------------
 # 结构化输出解析
-# ----------------------------------------------------------------------
 _JSON_BLOCK = re.compile(r"```(?:json)?\s*(.+?)\s*```", re.DOTALL)
 
 
@@ -120,7 +105,7 @@ def extract_json(text: str) -> tuple[Any, str]:
     """从模型输出里取 JSON; 返回 `(对象, 失败原因)`。
 
     解析失败时**返回原因而不是空字典** —— "模型没给出合规输出"与"模型给出了空结果"
-    必须能区分 (合并计划 §5: 工具执行失败、解析失败、任务完成须可区分)。
+    必须能区分。
     """
     body = str(text or "").strip()
     if not body:
@@ -215,9 +200,7 @@ def task_intent(task: AgentTask) -> str:
     return hint or task.objective
 
 
-# ----------------------------------------------------------------------
 # 成果构造
-# ----------------------------------------------------------------------
 def build_proposal(kind: str, *, payload: dict[str, Any], object_id: str = "",
                    expected_revision: int | None = None,
                    rationale: str = "",
@@ -244,9 +227,7 @@ def record_artifact(*, kind: str, uri: str, label: str = "", summary: str = "",
                        produced_by=produced_by, sha256=sha256, bytes=size)
 
 
-# ----------------------------------------------------------------------
 # 角色基类
-# ----------------------------------------------------------------------
 class AgentBase:
     """七个功能角色的公共骨架。
 
@@ -343,13 +324,7 @@ class AgentBase:
                 needs: list[ResearchNeed] | None = None,
                 usage: UsageRecord | None = None,
                 payload: dict[str, Any] | None = None) -> AgentResult:
-        """部分成果。
-
-        `needs` 必须接受: 部分完成往往正是"因为缺某样东西", 而那件事必须能回到主控
-        手上 (写作缺前提、检索缺口径都属此类)。此前 `partial` 没有这个参数, 写作角色
-        一旦有未决项就抛 `TypeError` 并整条失败 —— 症状是"交付形态要求未满足", 真正
-        原因埋在 `failure_reason` 里。
-        """
+        """部分成果。"""
         return AgentResult(
             task_id=task.task_id, agent=role_of(self.role) or self.role,
             outcome=TaskOutcome.partial, summary=summary,

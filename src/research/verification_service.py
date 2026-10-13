@@ -1,29 +1,6 @@
 from __future__ import annotations
 
-"""核验服务 (合并计划 §6.2 / §9 R2): 把"该验什么"变成可落盘的 `VerificationRecord`。
-
-它解决的是什么
---------------
-`_run_tool` / `_act_check_step` / `_act_rule_obligation` 三块逻辑此前只存在于
-`research/loop.py` 的 `TheoryEngine` 里。合并计划 §3.1 G06 要求团队形式化路径能自己
-走完"候选/义务 → **工具核验** → 结构化记录 → 状态归并", 而这些能力**不能**由
-另一个完整研究总控提供 (§1.1: 不保留第二个引擎)。
-
-因此这里按职责抽出**核验**这一件事, 只有三种来源, 都保持确定性、零 LLM:
-
-1. **工具核验**: 义务可编码成 SymPy/Z3/统计后端的调用 → 真子进程执行
-   (`verification.runner`), 读真实退出码与证书;
-2. **规则核验**: 义务能由命题记录里的显式声明/参数确定性判定 (设计可行性、
-   识别假设、范围、混淆处理、证据分级) → 不调任何外部进程;
-3. **独立审查**: 没有工具可核验的义务 → 保持未决, 明确标注"待人工/独立审查确认"。
-
-服务**只产出记录与义务处置**, 不写命题状态: 命题状态归并由
-`reasoning_kernel.claim_state_for` 负责, 由唯一提交口 (`research/commit.py`) 落盘。
-这样"谁写了科学状态"始终只有一处。
-
-与引擎的关系: 引擎的相关方法改为调用本服务, 用**差异测试**锁住等价性
-(`tests/test_verification_service.py`), 因此在引擎退役前两条路径不会各自漂移。
-"""
+"""核验服务: 把"该验什么"变成可落盘的 `VerificationRecord`。"""
 
 import json
 from collections.abc import Callable
@@ -101,9 +78,7 @@ class VerificationService:
         #: 证据来源 (规则型 `evidence_support` 义务需要读已判定支持关系的证据)。
         self._evidence_provider = evidence
 
-    # ------------------------------------------------------------------
     # 后端可用性
-    # ------------------------------------------------------------------
     def available(self) -> dict[str, bool]:
         """当前可用的核验后端 (探测结果缓存; 缺失的后端报告 unavailable)。"""
         if self._available is None:
@@ -117,18 +92,14 @@ class VerificationService:
             self.runner = VerificationRunner()
         return self.runner
 
-    # ------------------------------------------------------------------
     # 计划: 义务 → 检查项
-    # ------------------------------------------------------------------
     def plan_check(self, claim: Any, obligation: ProofObligation):
         """该义务能否编码成一次工具调用 (不能则返回 None, 由调用方走规则/未决)。"""
         from src.research.theorist import _check_for
 
         return _check_for(obligation, claim, self.available())
 
-    # ------------------------------------------------------------------
     # 核验
-    # ------------------------------------------------------------------
     def check(self, claim: Any, obligation: ProofObligation, *,
               record_id: str = "", evidence: list[Any] | None = None
               ) -> CheckOutcome:
@@ -150,7 +121,7 @@ class VerificationService:
             return self._informal(obligation)
         return self.check_tool(claim, obligation, record_id=record_id)
 
-    # ---- 反例搜索 (§5.4 `_act_seek_counterexample` 的能力) ----
+    # ---- 反例搜索 ----
     def has_counterexample_check(self, claim: Any) -> bool:
         """该命题能否编码成反例搜索 (不能则**不应**为它造反例义务)。"""
         from src.research.critic import counterexample_check
@@ -163,7 +134,7 @@ class VerificationService:
 
         判定用内核的 `counterexample_verdict_for`: 只有给出**可回代的反例**才算反驳
         (`refuted`); 工具跑过但没给反例只记一次"有限测试证据" (义务保持 blocked),
-        因此该义务永远不会把命题升级为 supported —— 这与计划 §7.2 的纪律一致。
+        因此该义务不能将命题升级为 supported。
         """
         from src.research.critic import counterexample_check
         from src.research.reasoning_kernel import counterexample_verdict_for

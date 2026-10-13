@@ -1,26 +1,4 @@
-/**
- * 会话操作单一入口 (合并计划 §9.5 `session-controller.ts` / §8.1)。
- *
- * 归属这里的操作都是"会话级生命周期": 新建 / 查看历史 / 继续 / 停止 / 结束 / 删除。
- * 迁移前它们散在 `app.ts` 各处, 于是同一件事有几套写法:
- *
- * - "查看"会顺手改模式或项目字段 (切到另一个会话后模式泄漏到下一个会话);
- * - "继续"与"新建"各自处理在途请求与连接, 旧请求的最后回包可能污染新会话;
- * - 切换会话时团队状态没有整体重置, 界面显示上一个 run 的任务。
- *
- * 现在统一为: **旧请求先作废 + 状态整体切换 + 明确的查看/继续/停止语义**。
- * 统一入口 (本轮迁移) 之后这里不再有"运行模式"要恢复或回放 —— 模式选择器已删除。仍然:
- *
- * - 唯一状态是 `state/research-store.ts`; 本模块**不持有**任何状态副本, 也不接
- *   `applyResearch(patch)` 这类兼容写入口 —— 身份变化直接派发 store action
- *   (`selection/open` / `selection/patch` / `selection/reset`), §8.1 要求
- *   "session-controller 的 applyResearch/reset 改为 store action";
- * - 身份切换 (`selection/open` / `selection/reset`) 会推进加载代号, 在途的工作台请求
- *   因此自动作废 (迟到回包不得覆盖新会话), 不再另设一套序号;
- * - 行为与 `id` / 选择器零变化 (历史下拉框、回看抽屉、日志容器都保持原样);
- * - 渲染判定在 `views/project-navigation.ts` (纯函数、可单测), 这里只做装配;
- * - 不新增内联事件处理器 (CSP 不变)。
- */
+/** 会话操作单一入口。 */
 
 import { byId, setProp, setText, val } from './dom';
 import {
@@ -52,13 +30,13 @@ export interface SessionDeps {
   refreshArtifacts(): void;
   refreshContexts(): void;
   refreshHistorySelect(): void;
-  selectSourceSet?(sourceSetId: string, announce?: boolean): Promise<boolean>;
+  selectSourceSet?(sourceSetId: string): Promise<void>;
   loadArtifact(name: string): void;
 
   // 团队状态整体重置 (会话级)
   resetTeam(): void;
 
-  /** HTTP 出口 (§9.5): URL/错误/取消/重试都在 `api/` 层, 控制器不自己拼。 */
+  /** HTTP 出口: URL/错误/取消/重试都在 `api/` 层, 控制器不自己拼。 */
   api?: ResearchClient;
 }
 
@@ -97,9 +75,7 @@ function sessionId(): string {
 export function createSessionController(deps: SessionDeps): SessionController {
   const api = deps.api ?? defaultApi();
 
-  // ------------------------------------------------------------------
   // 新建 / 切换
-  // ------------------------------------------------------------------
   function newSession() {
     // F1-2: 新会话必须清空旧项目/问题与工作台绑定, 否则新研究会沿用上一个问题。
     // 唯一状态的"清空身份"是一个 store action; 它同时推进加载代号, 于是在途的
@@ -224,9 +200,7 @@ export function createSessionController(deps: SessionDeps): SessionController {
       }).catch((e: any) => alert('恢复失败: ' + e));
   }
 
-  // ------------------------------------------------------------------
   // 历史下拉框 / 回看抽屉
-  // ------------------------------------------------------------------
   function refreshHistorySelect() {
     api.json(ENDPOINTS.conversations, {params: {_: Date.now()}})
       .then((d: any) => {
@@ -308,9 +282,7 @@ export function createSessionController(deps: SessionDeps): SessionController {
     detail.scrollTop = detail.scrollHeight;
   }
 
-  // ------------------------------------------------------------------
   // 结束 / 停止 / 删除
-  // ------------------------------------------------------------------
   function onDone(state: any) {
     deps.setStatus('完成', 'done');
     if (state && state.error) {

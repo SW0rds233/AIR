@@ -37,7 +37,7 @@ _CLAUSE_LEAD = re.compile(
 _TRAILING = re.compile(
     # 题面常把"给出严格证明/并说明理由"这类**指令**接在表达式后面。不剥掉它们, 右端
     # 会变成 "0, 并给出严格" 这种带中文的串, 交给工具就是语法错误 → 报告 unsupported,
-    # 而命题其实完全可判定 (实测: `x**2 >= 0` 因右端残留而验不了)。
+    # 而命题其实完全可判定。
     r"[，,。;；\s]*(?:并|请|再|同时)?\s*(?:给出|说明|补充|列出)?\s*"
     r"(?:严格|完整|详细|简要|形式化)?\s*"
     r"(?:证明|反例|等号条件|等号成立条件|过程|推导|理由|依据|适用条件).*$"
@@ -411,7 +411,7 @@ def parse_questions(text: str) -> list[ClaimQuestion]:
         # 量词段之后常跟"变量列表 + 连接词" (如 "对所有实数 x 都有 x**2 >= x" 里的
         # "x 都有")。它们不是表达式的一部分, 但 `_CLAUSE_LEAD` 只剥开头的词, 于是
         # 解析出来的 lhs 会是 "x 都有 x**2" —— 交给工具就是一句语法错误, 表现为
-        # "表达式语法错误/unsupported", 而真正的命题其实完全可判定 (实测)。
+        # "表达式语法错误/unsupported", 而真正的命题其实完全可判定。
         # 只在连接词**后面确实还有内容**时才切, 否则会把 "x**2" 这种正常表达式切坏。
         connective = re.search(r"(都有|均有|有|满足|使得|使|则|成立)", tail)
         if connective:
@@ -440,13 +440,7 @@ def parse_questions(text: str) -> list[ClaimQuestion]:
 def obligations_for_claim(claim: Claim,
                           method_available: dict[str, bool] | None = None,
                           *, wants_equality: bool = False) -> list[ProofObligation]:
-    """为一条**已有**命题构造它应有的证明义务 (与 `formulate` 同一实现)。
-
-    为什么需要这个入口 (合并计划 §3.1 G06): 团队的形式化闭环要能处理"命题已经在
-    库里、义务还没拆出来"的情形 (例如命题由建模/写作上游登记)。让角色自己写一套
-    "该命题需要什么义务"就是第二份形式化判据 —— 同一命题在两条路径上会被拆成不同
-    的待核验清单, 而核验是照着这份清单做的。
-    """
+    """为一条已有命题构造它应有的证明义务 (与 `formulate` 同一实现)。"""
     return _obligations_for(claim, wants_equality, method_available or {})
 
 

@@ -29,7 +29,7 @@ class Plan:
     attempt: ProofAttempt
     checks: list[tuple[str, PlannedCheck]] = field(default_factory=list)  # (obligation_id, check)
     strategy: str = ""
-    # 计划来源: rules (规则模板) / llm (LLM 结构化推导, 计划书 §7.1); 供审计区分
+    # 计划来源: rules (规则模板) / llm; 供审计区分
     source: str = "rules"
     # 新增的待核验子目标义务 (仅来自 LLM 推导); 它们进义务集合后同样需要核验
     proposed: list[ProofObligation] = field(default_factory=list)

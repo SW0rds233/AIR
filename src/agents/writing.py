@@ -27,10 +27,14 @@ from src.agents.protocol import (
 )
 from src.agents.runtime import AgentRuntime, ToolSpec
 from src.agents.tools import latex_tool
-from src.publication.references import citation_eligible, citation_suffix
 from src.agents.writer_plan import (
-    build_paper_outline, linked_source_ids, rank_sources, refine_outline, revision_section,
+    build_paper_outline,
+    linked_source_ids,
+    rank_sources,
+    refine_outline,
+    revision_section,
 )
+from src.publication.references import citation_suffix, research_citation_eligible
 from src.publication.schemas import (
     Block,
     BlockRole,
@@ -386,7 +390,7 @@ class WritingAgent(AgentBase):
 
         evidence_section = Section(heading="2 资料与证据", role="method")
         if packet.sources:
-            for index, source in enumerate([s for s in packet.sources if citation_eligible(s)][:20], 1):
+            for index, source in enumerate([s for s in packet.sources if research_citation_eligible(s)][:20], 1):
                 source_id = str(source.get("source_id") or source.get("id") or "")
                 block = Block(
                     role=BlockRole.evidence,
@@ -557,12 +561,13 @@ class WritingAgent(AgentBase):
         查三件可判定的事: 引用是否都在给定来源清单里、结论块是否交代依据、
         是否出现了"已证明"这类越权措辞 (文本风险保留为**提示**, 不据此丢弃内容)。
         """
-        known_sources = {str(s.get("source_id") or s.get("id") or "")
+        known_sources = {str(s.get("source_id") or s.get("id") or ""): s
                          for s in packet.sources}
         known_claims = {str(c.get("id", "") or "") for c in packet.claims}
         claim_status = {str(c.get("id", "")): str(c.get("status", "proposed")) for c in packet.claims}
         verified_claims = {str(v.get("claim_id")) for v in packet.verifications
-                           if v.get("validation_status") == "verified" and not v.get("stale")}
+                           if v.get("status") == "passed"
+                           and v.get("validation_status") == "verified" and not v.get("stale")}
         problems: list[str] = []
         from src.research.acceptance import missing_section_references
         missing_sections = missing_section_references(render_markdown(manuscript))
@@ -576,6 +581,9 @@ class WritingAgent(AgentBase):
             for kind, ref in zip(block.ref_kinds, block.refs):
                 if kind == RefKind.source.value and ref.id and ref.id not in known_sources:
                     problems.append(f"块 {block.block_id} 引用了不在来源清单里的 {ref.id}")
+                elif (kind == RefKind.source.value and ref.id
+                      and not research_citation_eligible(known_sources[ref.id])):
+                    problems.append(f"块 {block.block_id} 引用了关系不足或出版未核实的来源 {ref.id}")
                 if kind == RefKind.claim.value and ref.id and ref.id not in known_claims:
                     problems.append(f"块 {block.block_id} 引用了不存在的命题 {ref.id}")
             if block.role == BlockRole.claim and not block.refs \
@@ -586,6 +594,8 @@ class WritingAgent(AgentBase):
                 claim_status.get(claim_id) in {"supported", "refuted"} for claim_id in linked)
             if block.role in (BlockRole.claim, BlockRole.reasoning) and _overclaims(block.text) and not certified:
                 problems.append(f"块 {block.block_id} 含越权措辞 (需改为条件性表述或补证书)")
+            if _asserts_settled_result(block.text) and not certified:
+                problems.append(f"块 {block.block_id} 使用已知/已证实/已核验措辞，但命题未核验")
             if block.role == BlockRole.claim:
                 pending = sorted(ref for ref in linked if claim_status.get(ref) not in {"supported", "refuted"})
                 if pending:
@@ -659,19 +669,19 @@ class WritingAgent(AgentBase):
                 why="未落盘的图不能在论文中当作已有图形引用",
                 acceptance=["图号对应已登记并导出的真实图，正文和图注一致；否则删除图号"],
                 blocking=True))
-        if any(citation_eligible(source) for source in packet.sources) and not any(
+        if any(research_citation_eligible(source) for source in packet.sources) and not any(
                 RefKind.source.value in block.ref_kinds for block in manuscript.all_blocks()):
             needs.append(ResearchNeed(kind=NeedKind.manuscript_revision,
                 statement="已核查的研究文献未实际用于正文论证",
                 why="收集文献不等于完成相关研究与结果讨论",
                 acceptance=["在相关研究、方法或结论讨论中解释相关文献的具体贡献与适用条件并引用；禁止为凑数量引用"],
                 blocking=True))
-        if not any(citation_eligible(source) for source in packet.sources):
+        if not any(research_citation_eligible(source) for source in packet.sources):
             needs.append(ResearchNeed(
                 kind=NeedKind.more_sources,
-                statement="缺少可确认正式出版的相关文献，需核查出版版本后再写入论文",
-                why="没有依据的正文不能作为研究交付",
-                acceptance=["核查正式出版版本、作者、刊名及年卷期页；未确认出版的文献不得列入参考文献"],
+                statement="缺少已核查出版且与本研究有可用关系的文献",
+                why="出版信息正确但关系为 insufficient 的命中仍不能支撑正文",
+                acceptance=["核查出版版本和可定位原文，明确其与当前问题的关系；无关来源不得列入参考文献"],
                 hints={"query": next((str(s.get("title")) for s in packet.sources if s.get("title")), packet.main_question),
                        "published_only": True, "trigger_id": "published-sources:" + packet.problem_id},
             ))
@@ -688,6 +698,14 @@ class WritingAgent(AgentBase):
                 statement="正文含未被证书支撑的强结论",
                 why="结论强度必须与证书一致",
                 acceptance=["给出证书或把表述降为条件性"],
+            ))
+        if any("使用已知/已证实/已核验措辞" in p for p in problems):
+            needs.append(ResearchNeed(
+                kind=NeedKind.manuscript_revision,
+                statement="将未核验命题的确定性措辞改为条件性表述",
+                why="候选模型中的代数关系不能被表述为已经核验的研究结论",
+                acceptance=["仅对有有效核验记录的命题使用已知、已证实或已核验"],
+                blocking=True,
             ))
         if any("具名定理" in p and "缺少具名定理来源" not in p for p in problems):
             needs.append(ResearchNeed(
@@ -714,9 +732,7 @@ class WritingAgent(AgentBase):
         return needs
 
 
-# ----------------------------------------------------------------------
 # 辅助
-# ----------------------------------------------------------------------
 _REVISION_PROSE = re.compile(
     r"(?:上一版|上一版本|本版|修订版|审阅意见|审阅记录|针对.{0,20}(?:意见|问题).{0,12}(?:修订|修改))"
 )
@@ -767,6 +783,8 @@ def _section_material(packet: WritingPacket, role: str,
             "ref_id": source_id, "title": row.get("title"),
             "authors": row.get("authors"), "year": row.get("year"),
             "content_level": row.get("content_level"), "relation": row.get("relation"),
+            "publication_status": row.get("publication_status"),
+            "publication_verified_by": row.get("publication_verified_by"),
             "locator": row.get("locator"), "relevance": row.get("relevance_reason"),
             "excerpt": excerpt,
         })
@@ -882,7 +900,8 @@ def finalise_manuscript(manuscript: Manuscript, packet: WritingPacket,
     manuscript.sections = [s for s in manuscript.sections
                            if s.role != "references" and "参考文献" not in (s.heading or "")
                            and (s.heading or "").strip().lower() != "references"]
-    eligible = {str(s.get("source_id") or s.get("id")) for s in packet.sources if citation_eligible(s)}
+    eligible = {str(s.get("source_id") or s.get("id")) for s in packet.sources
+                if research_citation_eligible(s)}
     for block in manuscript.all_blocks():
         pairs = []
         for kind, ref in zip(block.ref_kinds, block.refs):
@@ -1026,6 +1045,15 @@ def _source_text(source: dict[str, Any]) -> str:
 def _overclaims(text: str) -> bool:
     from src.publication.claims import asserts_completed_proof
     return asserts_completed_proof(text)
+
+
+def _asserts_settled_result(text: str) -> bool:
+    for match in re.finditer(r"已知|已证实|已核验|已经证明|得到证明", text or ""):
+        prefix = text[max(0, match.start() - 8):match.start()]
+        if re.search(r"(?:并非|不是|不能|不可|尚非|未被|不应|不宜).{0,4}$", prefix):
+            continue
+        return True
+    return False
 
 
 def _keywords_of(packet: WritingPacket) -> list[str]:

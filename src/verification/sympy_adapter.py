@@ -1,14 +1,6 @@
 from __future__ import annotations
 
-"""SymPy 受限适配器 (P1)。
-
-安全边界:
-- 只接受受白名单约束的数学表达式字符串 (AST 校验, 禁止属性访问/调用任意函数)。
-- 限制表达式长度与嵌套深度。
-- SymPy 假设查询存在 True/False/None 三态; None 一律返回 unknown, 不得当成通过。
-
-覆盖: 恒等变换、非负性/不等式、等式条件 (含严格不等式反例)。
-"""
+"""SymPy 受限适配器。"""
 
 import ast
 import re
@@ -413,7 +405,7 @@ def op_prove_monotonicity(arguments: dict) -> VerificationResult:
                         str(deriv))
     if res.status != VerificationStatus.passed:
         # 未能证明方向成立: 只有给出**域内可回代的反例**才算数学反驳;
-        # 否则保持未决 (计划书 §4.3-3: 不用普通执行错误冒充反驳)。
+        # 否则保持未决。
         witness = _find_monotonicity_witness(
             expr, symbols[wrt], variables, increasing, strict,
             dict(arguments.get("assumptions") or {}), symbols)
@@ -528,7 +520,7 @@ def _find_monotonicity_counterexample(arguments: dict) -> VerificationResult:
     proof = f"d/d{wrt} ({expr}) = {deriv}"
 
     # 单调性反例必须是**可回代的见证**, 且必须落在声明的变量域内:
-    # 域外见证不构成反驳 (计划书 §13.2 "域外伪反例必须拒绝")。
+    # 域外见证不构成反驳。
     witness = _find_monotonicity_witness(
         expr, symbols[wrt], variables, increasing, strict,
         dict(arguments.get("assumptions") or {}), symbols)

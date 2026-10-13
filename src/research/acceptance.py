@@ -1,20 +1,6 @@
 from __future__ import annotations
 
-"""结论与交付门槛 (P3)。
-
-两道门槛分离:
-1. 理论有效性门槛: 结论明确、假设完整、依赖闭合、无循环、无未处理反例、
-   无过期验证、验证等级符合约定。
-2. 论文表达门槛: 摘要/正文/定理/证明/结论一致, 无遗漏条件或夸大范围。
-
-旧有 50 分制只可用于表达质量参考, 不决定理论有效性。
-
-计划书 §2 P0-A06/A07 修复点:
-- 门槛必须检查**验证记录的状态/版本/域与全部义务**, 而不只是"存在一条记录";
-- 只检查本次快照实际引用的有效记录是否 stale (§4.3-6), 历史 stale 不永久阻止交付;
-- 反例语义: 运行错误不得冒充反驳; 未找到反例不得当作普遍成立;
-- 因果结论要求识别假设、设计、范围、混淆处理与证据分级分别成立。
-"""
+"""根据研究证据和验证结果评估结论及交付等级。"""
 
 import re
 from dataclasses import dataclass, field
@@ -291,7 +277,7 @@ def _aligned(record: VerificationRecord, claim: Claim) -> bool:
         return False
     if args.get("variables") and claim.variables and list(args["variables"]) != list(claim.variables):
         return False
-    # 域/量词一致性 (计划书 §7.3 陈述对齐)
+    # 域/量词一致性
     assumptions = args.get("assumptions") or {}
     if assumptions and claim.variable_domains:
         for var, domain in claim.variable_domains.items():
@@ -359,7 +345,7 @@ def delivery_gate(manuscript: str, snapshot: ResearchSnapshot,
             )
 
     # 没有命题就不是论文: 空快照 + 有正文骨架最容易伪装成"完整交付"
-    # (实测: 0 条命题、正文只有骨架时交付等级仍报"论文草稿")。
+    #。
     if not snapshot.claims:
         unresolved.append("没有任何已确定结论 (快照里没有命题), 只能作为研究备忘录导出")
     elif not any(c.status == ClaimStatus.supported for c in snapshot.claims) \
@@ -379,16 +365,7 @@ def publication_gate(manuscript: str, snapshot: ResearchSnapshot,
                      blocks: list | None = None,
                      checklist: dict | None = None,
                      latex_source: str = "") -> GateResult:
-    """出版完备门槛 (方案 v2 §5 阶段 1): 判断能否称为"完整论文"。
-
-    与"论文表达门槛"的区别: 表达门槛问的是"正文有没有如实表达研究结论";
-    本门槛问的是"**能不能作为一篇完整论文交付**"—— 摘要/关键词/参考文献章节、
-    正文引用与文献表的双向一致、结论可反查、`.tex` 能编译成 PDF、没有悬空的
-    `\\ref`/`\\cite` 与未标注占位符。
-
-    **缺项一律如实列为理由/未决, 不因为"看起来完整"就通过**; 无文献可用时
-    参考文献章节仍必须在位并说明检索范围, 否则不算出版完备 (方案 v2 §0)。
-    """
+    """出版完备门槛: 判断能否称为"完整论文"。"""
     reasons: list[str] = []
     unresolved: list[str] = []
     text = manuscript or ""
@@ -561,26 +538,13 @@ def _unlabelled_placeholders(text: str) -> list[str]:
 
 
 def publication_complete(publication: GateResult) -> bool:
-    """出版完备判定: 没有缺项理由 **且** 没有未决项。
-
-    为什么不能只看 `passed`: 出版层的"未决"是**实质缺项**而不是提示 ——
-    例如"尚未尝试编译 .tex, 无法确认能否交付 .pdf"。若只看 `passed`, 一份没有
-    PDF、没有参考文献的稿件会被报成"完整论文", 这正是方案 v2 §0 明确禁止的
-    "看起来完整"。存在未决项时如实降级为"论文草稿", 并写明缺什么。
-    """
+    """出版完备判定: 没有缺项理由 且 没有未决项。"""
     return bool(publication.passed and not publication.unresolved)
 
 
 def classify_deliverable(theory_gate: GateResult, delivery: GateResult,
                          publication: GateResult | None = None) -> str:
-    """四级交付 (方案 v2 §5 阶段 1):
-
-    完整论文 (研究 ✓ + 表达 ✓ + 出版完备) > 论文草稿 (前两道 ✓) >
-    条件性研究报告 > 研究备忘录。
-
-    出版门槛未过时**仍可交付"论文草稿"** —— 这是合法终态; 但绝不允许把
-    未过出版门槛的产出写成"完整论文"。
-    """
+    """四级交付。"""
     if theory_gate.passed and delivery.passed:
         if publication is None or publication_complete(publication):
             return "完整论文"

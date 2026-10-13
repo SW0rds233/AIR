@@ -35,7 +35,7 @@ export interface ProblemContract {
   frozen_version: number;
 }
 
-/** 检索覆盖记录 (P0-1/§1 契约第 2 行)。 */
+/** 检索覆盖记录。 */
 export interface RetrievalCoverage {
   policy: SourcePolicy;
   executed: boolean;
@@ -81,7 +81,7 @@ export interface ExperimentRow {
   purpose: string;
   execution_status: string;
   decision_rule: string;
-  /** P1-3: 计划书必备要素里还缺哪些 (缺项只能维持草案)。 */
+  /** 缺失的必备要素；有缺项时方案保持草案状态。 */
   missing_elements?: string[];
   model_ref?: { id?: string; name?: string };
 }

@@ -1,24 +1,6 @@
 from __future__ import annotations
 
-"""与已有工作的逐项差异分析 (计划书 §3 R4)。
-
-计划书的判断: 现有对照仍主要依靠检索结果的标题/摘要, 差异栏可能为空;
-新颖性状态能保持待比较, 但"与先前工作有何不同"尚未真正完成。
-
-本模块把"差异分析"变成**逐项判定 + 可审计结果**:
-
-- 比对维度: 前提 (premises) / 模型 (method/model) / 结论 (conclusion) /
-  证明方法 (method) / 适用域 (applicability);
-- 每个维度给出 `same` / `contains` / `contained` / `stronger` / `weaker` /
-  `unknown`, 只有 `unknown` 以外的判定才允许支撑"差异";
-- 整体关系: `equivalent` / `conclusion_contained` / `conditions_stronger` /
-  `conditions_weaker` / `different` / `not_comparable`;
-- **没有原文或覆盖不充分时只作有界表述**: 判定为 `not_comparable` 并写明缺什么,
-  绝不用标题相似度冒充"等价/不同"。
-
-硬约束: 本模块不改变任何结论状态; 它只产出可写入 `NoveltyComparisonRow.difference`
-的文本与结构化判定, 供 `novelty.assess` 决定新颖性状态。
-"""
+"""与已有工作的逐项差异分析。"""
 
 import re
 from dataclasses import dataclass, field
@@ -377,7 +359,7 @@ def _formal_implication(claim: Claim, row: NoveltyComparisonRow) -> tuple[str, s
 
 
 def compare_prior(claim: Claim, source_result) -> Comparison:
-    """逐维、有界地比较一条先前结果 (计划书 §3 接口 `compare_prior`)。
+    """逐维、有界地比较一条先前结果。
 
     `source_result` 可以是 `SourceEvidence` (已读原文, 会先抽结构化字段)
     或 `NoveltyComparisonRow` (检索层已给出的行)。

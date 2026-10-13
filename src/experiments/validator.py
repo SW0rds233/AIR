@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""实验/仿真规格校验 (计划书 §8.1/§8.2)。
+"""校验实验与仿真规格。
 
 `spec_validated` 只表示**规格通过检查**, 不代表科学假设已经成立,
 也不代表实验已经执行。本模块不执行任何代码、不产生任何数值结果。
@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 from src.experiments.schemas import ExecutionStatus, ExperimentSpec
 
-# 必填信息 (计划书 §8.1 表格): 缺任一项都不算可执行规格
+# 必填信息: 缺任一项都不算可执行规格
 REQUIRED_FIELDS = (
     ("hypothesis", "要检验的假设"),
     ("decision_rule", "什么结果会改变判断"),
@@ -21,7 +21,7 @@ REQUIRED_FIELDS = (
     ("stop_criteria", "失败/停止判据"),
 )
 
-# 计划书逐项列出的必备要素 (交付前必须逐条交代; 缺关键项只能维持草案)
+# 实验方案缺少关键要素时只能保持草案状态。
 REQUIRED_ELEMENTS: tuple[tuple[str, str], ...] = (
     ("alternatives", "待区分的两个解释或待核验假设 (alternative_explanations)"),
     ("variables", "变量与单位 (variables)"),
@@ -58,7 +58,7 @@ class SpecReport:
 
 
 def missing_elements(spec: ExperimentSpec) -> list[str]:
-    """逐条检查计划书要求的必备要素, 返回缺失项说明。
+    """逐条检查实验方案的必备要素，返回缺失项说明。
 
     与 `REQUIRED_FIELDS` 的区别: 这里覆盖"变量与单位、参数依据、预期输出、资源"等
     交付审阅者要逐条核对的内容, 缺项会写进规格与工作台, 而不是只留在校验报告里。
@@ -107,7 +107,7 @@ def validate_spec(spec: ExperimentSpec) -> SpecReport:
     if not spec.deliverables:
         warnings.append("未声明交付物清单")
 
-    # 单位与量纲 (计划书 R5): 操纵/观测变量缺单位 → **不得**算可执行规格。
+    # 单位与量纲: 操纵/观测变量缺单位 → **不得**算可执行规格。
     # 早期实现把它降级为 warning, 于是"待定单位"的草案也能拿到 spec_validated。
     missing_units = [v.name for v in spec.variables if not v.unit and v.role != "controlled"]
     if missing_units:
@@ -128,7 +128,7 @@ def validate_spec(spec: ExperimentSpec) -> SpecReport:
         if not value.strip() or "待定" in value or "待授权" in value:
             errors.append(f"{label}未确定 (只能作为草案): {value or '(空)'}")
 
-    # 找不到可区分的解释 → 建议没有目标 (计划书 §8.3: 建议必须绑定要区分的解释)
+    # 找不到可区分的解释 → 建议没有目标
     if not [a for a in spec.alternative_explanations if str(a).strip()]:
         errors.append("未声明待区分的替代解释 (建议没有明确目标)")
 

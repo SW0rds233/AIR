@@ -1,22 +1,6 @@
 from __future__ import annotations
 
-"""资料源登记与绑定 (计划书 §3 R0)。
-
-问题
-----
-研究入口原来只带主题/项目/问题/预算, 没有"用哪个资料库"; 研究图按
-`spec.domain` 或原始请求字符串去找**同名**知识底座 —— 用户建好的资料库若名字
-不同, 引擎就找不到, 于是静默退回"无知识库", 而用户以为系统在用他给的资料。
-
-本模块把"资料源"变成可列举、可绑定、可校验的对象:
-
-- `list_source_sets()`: 列出每个已建知识底座的文档数、语言/年份范围、卡片数、
-  是否建了向量索引、最后更新时间 —— 入口据此让用户选择;
-- `describe_source_set(id)`: 单个资料源的可读范围与索引状态;
-- `validate_binding(id)`: 绑定是否可用; 不可用时给出**明确原因**, 而不是静默降级。
-
-约束: 只读枚举 (不创建空底座); 不把来源真实性判定写在这里 (那是 §6.2)。
-"""
+"""资料源登记与绑定。"""
 
 from dataclasses import dataclass, field
 
@@ -45,7 +29,7 @@ class SourceSet:
     readable: bool = True
     note: str = ""
     #: 这个库从哪来: managed (data/kb 下自建) / path_import (用户给定本机路径) /
-    #: upload (界面上传)。合并计划 §13.3: "从哪来、能读哪些根"必须可查。
+    #: upload (界面上传)。来源和可读根目录必须可查。
     origin: str = "managed"
     #: 路径导入库登记的文件数 (managed 库为 0)。
     imported_files: int = 0

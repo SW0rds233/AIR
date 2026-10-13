@@ -247,9 +247,7 @@ class ReviewAgent(AgentBase):
                      "blocking": len(blocking), **judgement})
 
 
-# ----------------------------------------------------------------------
 # 确定性检查 (零 LLM; 与 LLM 意见合并去重)
-# ----------------------------------------------------------------------
 def deterministic_issues(context: ContextPack) -> list[ReviewIssueRef]:
     """可判定的审阅项: 无定位引用、越权措辞、结论无依据、图文不一致、未决未交代。
 
@@ -270,12 +268,17 @@ def deterministic_issues(context: ContextPack) -> list[ReviewIssueRef]:
     for source in evidence:
         if str(source.get("source_id") or source.get("id") or "") not in cited_ids:
             continue
-        from src.publication.references import citation_eligible
+        from src.publication.references import citation_eligible, research_citation_eligible
         if not citation_eligible(source):
             issues.append(_issue(category="citation", severity="major",
                 summary=f"正式引用尚未核查出版版本: {clip(str(source.get('title', '')), 100)}",
                 affected=[str(source.get("source_id") or source.get("id") or "")],
                 owner="evidence", acceptance=["核查已出版版本并补齐正式书目信息，或撤除引用"]))
+        elif not research_citation_eligible(source):
+            issues.append(_issue(category="citation", severity="major",
+                summary=f"引用来源与当前论断的支持关系不足: {clip(str(source.get('title', '')), 100)}",
+                affected=[str(source.get("source_id") or source.get("id") or "")],
+                owner="writing", acceptance=["撤除该引用，或登记可定位且确有相关性的证据片段"]))
         if source.get("locator"):
             continue
         issues.append(_issue(
@@ -389,9 +392,7 @@ def _unit_conflict(caption: str, figure: dict[str, Any]) -> bool:
     return declared not in caption and "单位" not in caption
 
 
-# ----------------------------------------------------------------------
 # 合并与辅助
-# ----------------------------------------------------------------------
 def _issues_from_payload(value: Any) -> list[ReviewIssueRef]:
     out: list[ReviewIssueRef] = []
     for item in value or []:

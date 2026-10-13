@@ -1,18 +1,6 @@
 from __future__ import annotations
 
-"""会话注册表与持久化边界 (合并计划 §8: `src/sessions/store.py`)。
-
-职责只有三件, 都很小但都有真实约束:
-
-1. **注册表** `SESSIONS`: thread_id → 活跃会话。端点、删除、批关闭都从这里取;
-2. **落盘**: 会话记录写入 `data/conversations/<session_id>/conversation.json` (失败不中断会话);
-3. **批关闭** `shutdown_sessions()`: 先给**所有**会话发停止信号, 再逐个等线程退出。
-
-为什么"先全部发信号"是硬要求: 逐个"发信号→等待"会让线程串行收敛, 多会话时白等
-多个超时。这一点由 `tests/test_session_lifecycle.py` 的时序用例固定。
-
-本模块不 import FastAPI, 也不 import `server`。
-"""
+"""持久化会话注册表，并维护会话存储边界。"""
 
 from src.sessions.controller import Session
 from src.utils.conversation_store import load_conversation, save_conversation

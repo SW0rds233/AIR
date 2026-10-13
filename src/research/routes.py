@@ -1,19 +1,6 @@
 from __future__ import annotations
 
-"""研究路线与失败记忆 (计划书 §4.1 ResearchRoute、§5.4 真正的路线切换, P1-2 失败驱动修订)。
-
-修复 (计划书 §2 P1): 旧 `switch_strategy` 直接把 claim 改成 blocked, blocked 对象
-不会自然进入有效重试路线 —— 等于"失败后无法改变研究方法"。现在:
-- 换路产生一条**新的 ResearchRoute** 对象 (含目标、父路线、策略、预算、
-  失败原因、恢复条件), 旧路线保留在历史中不覆盖;
-- 失败档案 (`FailureRecord`) 持久保存失败原因、反例、不可用工具与新证据条件,
-  重启后不会重复犯同样的错误;
-- 被 blocked 的命题在满足恢复条件时重新进入有效动作集合。
-
-P1-2 追加: 失败必须**分类** (资料没找到 / 模型被反例否定 / 形式化失败 / 工具未知 /
-预算耗尽), 每类映射到不同的下一动作; 换路必须给出**实质变化** (新条件、新子命题或
-不同机制), 只换工具名不算修订, 直接给出停止理由。
-"""
+"""研究路线与失败记忆。"""
 
 import json
 from dataclasses import dataclass, field
@@ -224,13 +211,7 @@ class RouteManager:
                reason: str = "", new_condition: str = "", new_subclaim: str = "",
                new_mechanism: str = "", tool_change: str = "", max_routes: int = 5,
                ) -> tuple[ResearchRoute | None, str]:
-        """按失败类型提出新路线。
-
-        必须给出**实质变化**: 新条件、新子命题或不同机制。只换工具名/措辞 → 返回
-        `(None, 停止理由)` 并记一条 `no_progress` 失败, 而不是再造一条同义路线。
-        例外: 失败类型是"工具未知"时, 换一个**没试过**的后端也算实质变化
-        (计划书对该类的处置就是"换后端或缩小问题范围")。
-        """
+        """按失败类型提出新路线。"""
         change = (new_mechanism and f"不同机制: {new_mechanism}") or \
                  (new_subclaim and f"新子命题: {new_subclaim}") or \
                  (new_condition and f"新条件: {new_condition}") or ""

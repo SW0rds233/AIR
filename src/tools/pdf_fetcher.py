@@ -166,7 +166,7 @@ def _is_downloadable_oa_url(url: str) -> bool:
     parsed = __import__("urllib.parse", fromlist=["urlparse"]).urlparse(url)
     # 只看 path 是否以 .pdf 或 /pdf 结尾 (忽略 ?query 参数):
     # - 带 query 的直链如 MDPI ".../pdf?version=..." 旧版 endswith(".pdf") 会误判
-    # - MDPI 等 OA 出版商用无扩展名的 "/pdf" 路径段, 旧版也误判 (实测 11 篇全被跳过)
+    # - MDPI 等 OA 出版商用无扩展名的 "/pdf" 路径段, 旧版也误判
     # 是否真 PDF 由下载后的 %PDF 魔数校验兜底, 放宽此处判断是安全的。
     path = parsed.path.lower().rstrip("/")
     if not (path.endswith(".pdf") or path.endswith("/pdf")):

@@ -24,15 +24,7 @@ def _is_equivalent(row: NoveltyComparisonRow) -> bool:
 
 
 def _comparison_basis(record: NoveltyRecord) -> str:
-    """判定依据: 只有**分析过差异且确实不同**的行才允许支撑"可能不同"。
-
-    计划书 §6.2 / A13 / R4: 检索命中本身不构成新颖性结论。因此
-    - difference 为空的行走 (未分析) 一律不计入判定, 记录保持待比较;
-    - difference 明确写"等价"的行走计为已知等价结果;
-    - difference 写"未能判断/无法比较"的行走**既不算等价也不算不同**
-      (分析过但结论不可比), 保持待比较;
-    - 只有写明条件/结论差异的行走才算"可能不同"。
-    """
+    """判定依据: 只有分析过差异且确实不同的行才允许支撑"可能不同"。"""
     if any(_is_equivalent(r) for r in record.rows):
         return "known_equivalent"
     for row in record.rows:

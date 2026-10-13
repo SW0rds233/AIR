@@ -1,14 +1,6 @@
 from __future__ import annotations
 
-"""子智能体的受控工具集 (合并计划 §3.2 / §7.2)。
-
-工具是"智能体决定何时调用、程序保证执行范围"的那一半: 每个 `ToolSpec` 自带
-**读范围或可写能力**, 由运行时签发的令牌实际控制 (不是提示词约定)。
-
-这里只注册**真实存在**的入口, 并且对每个工具如实标注可用性 —— 系统已有一条现场
-缺陷是"工具不可用却伪造检索完成", 因此探测失败时工具仍然注册但会返回明确的
-错误说明, 而不是静默成功。
-"""
+"""子智能体的受控工具集。"""
 
 from typing import Any
 
@@ -68,8 +60,7 @@ def _format_papers(papers: Any) -> str:
 def evidence_tools() -> list[ToolSpec]:
     """检索与资料接入类工具 (EvidenceAgent)。
 
-    检索后端**不设最低篇数与固定年份** —— 合并计划 §7.2 明确要求清除
-    "固定年份/最低篇数/学科词", 查询与停止条件由角色按研究缺口决定。
+    检索后端不设固定年份或最低篇数；角色按研究缺口决定查询与停止条件。
     """
     return [
         tool_spec("search_all_sources", _search_all,
@@ -217,12 +208,10 @@ def _load_rows(data_ref: str, limit: int = 20) -> str:
 
 
 #: 每个核验工具的**操作契约**: 工具名 -> (适配器, 操作, 参数映射)。
-#:
 #: 为什么把操作名写死成契约而不是让调用方随便传: 审计复现过 G10 —— 工具用
 #: `operation="check"` 调 SymPy/Z3, 而两个适配器的 `OPERATIONS` 表里**没有** `check`,
 #: 于是每次调用都返回 `unsupported`, 却又看起来像"执行过了"。参数名同样错过:
 #: 统计工具传 `column`, 适配器读的是 `outcome_col`, 于是报"缺少 outcome_col"。
-#:
 #: 这张表在**导入时**与适配器的真实 `OPERATIONS` 对照 (见 `_assert_operation_supported`),
 #: 因此适配器改名会让这里立刻失败, 而不是等运行到才静默返回 unsupported。
 VERIFICATION_TOOLS: dict[str, tuple[str, str]] = {
@@ -253,9 +242,7 @@ def _assert_operation_supported(tool: str) -> str:
 def _format_verification(tool: str, result: Any) -> str:
     """把 `VerificationResult` 呈现给模型时**保留**状态、证书与输入 hash。
 
-    只回一句字符串会丢掉判定所需的依据 (§3.2 G10: "保留完整 VerificationResult 和
-    输入 hash, 不只返回一句字符串")。这里把 hash 与证书摘出来, 让角色能把它作为核验
-    依据引用; 完整对象仍由判定层按同一 hash 存取。
+    返回输入 hash 与证书摘要，供角色引用；完整结果由判定层保存。
     """
     status = getattr(result, "status", None)
     status_value = getattr(status, "value", None) or str(status or "")
@@ -280,7 +267,7 @@ def _split_relation(expression: str, relation: str) -> tuple[str, str, str]:
 
     适配器读的是 `lhs` / `rhs` 两个字段 (见 `sympy_adapter.op_prove_identity`), 而模型
     自然会说"证明 (x+1)^2 = x^2+2x+1"。工具层负责这层翻译, 否则传 `expression` 进去
-    会得到 `KeyError: 'lhs'` —— 实测就是这条。
+    会得到 `KeyError: 'lhs'`。
     """
     text = str(expression or "").strip()
     wanted = str(relation or "").strip() or "=="
@@ -308,7 +295,7 @@ def _split_relation(expression: str, relation: str) -> tuple[str, str, str]:
 def _declared_variables(names: list[str], explicit: str = "") -> dict[str, str]:
     """构造 Z3 适配器要的变量声明 (`{"x": "Real"}`)。
 
-    适配器读的是**映射**而不是列表: 传列表会得到"未声明变量 x" (实测 G10)。
+    适配器读的是**映射**而不是列表: 传列表会得到"未声明变量 x"。
     """
     declared: dict[str, str] = {}
     for name in [*names, *_names_in(explicit)]:
@@ -402,7 +389,7 @@ def _stats(data_ref: str, column: str) -> str:
     """描述统计。
 
     参数名必须是适配器读的那个 (`outcome_col`), 不是 `column` —— 传错会得到
-    "缺少 outcome_col" 这种**看起来像数据问题**的错误 (§3.2 G10 实测复现)。
+    "缺少 outcome_col" 这种**看起来像数据问题**的错误。
     """
     from src.verification.runner import run_request
 
@@ -417,7 +404,7 @@ def figure_tools(grant: Any = None, sources: dict[str, int] | None = None) -> li
 
     `grant` / `sources` 由调用方 (FigureAgent) 注入: 工具与服务必须用**同一套**
     来源登记表与权限令牌, 否则模型可以通过工具绕开"来源/单位/权限先校验"
-    (§3.3 G18)。工具自身的 `read_scope`/`capability` 仍由 ToolLoop 独立检查。
+。工具自身的 `read_scope`/`capability` 仍由 ToolLoop 独立检查。
     """
     def _render(spec: dict) -> str:
         from src.agents.figures import render_figure_spec

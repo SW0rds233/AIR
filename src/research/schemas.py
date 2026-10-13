@@ -118,7 +118,7 @@ class Coverage(str, Enum):
 
 
 class ValidationStatus(str, Enum):
-    """验证结果状态 (计划书 §4.3 / §7.3 的统一语义)。
+    """验证结果状态。
 
     verified 是唯一可用来支持结论的状态; 其余一律不得升级为支持。
     """
@@ -166,7 +166,7 @@ SUPPORTING_RELATIONS = {
 
 
 class GapType(str, Enum):
-    """研究缺口类型 (计划书 §4.1 ResearchGap)。"""
+    """研究缺口类型。"""
 
     missing_definition = "missing_definition"
     missing_model = "missing_model"
@@ -181,7 +181,7 @@ class GapType(str, Enum):
 
 
 class RouteStatus(str, Enum):
-    """研究路线状态 (计划书 §4.1 ResearchRoute / §5.4)。"""
+    """研究路线状态。"""
 
     active = "active"
     suspended = "suspended"
@@ -191,7 +191,7 @@ class RouteStatus(str, Enum):
 
 
 class ReferenceStatus(str, Enum):
-    """文献被引用的适用性 (计划书 §6.2 第三项检查)。"""
+    """文献被引用的适用性。"""
 
     unchecked = "unchecked"
     applicable = "applicable"
@@ -307,7 +307,7 @@ class StudyPlan(BaseModel):
     counterfactual: str = ""
     confounders: list[str] = Field(default_factory=list)
     confounder_handling: str = ""
-    # ---- 计划书 §7.4: 因果结论需把以下各项列为独立研究义务 ----
+    # 因果结论的独立研究义务。
     identification_assumptions: list[str] = Field(default_factory=list)  # 识别假设
     design_feasibility: str = ""          # 设计可行性 (为何该设计在本数据上可用)
     predictive_validation: str = ""       # 样本外划分、指标与基线比较方案
@@ -315,7 +315,7 @@ class StudyPlan(BaseModel):
     measurement_notes: str = ""           # 测量方案
     missing_data_handling: str = ""       # 缺失机制与处理
     error_structure: str = ""             # 误差结构 (聚类/异方差/自相关等)
-    # 数据来源性质: 防止用占位数据产出"现实因果结论" (§7.4)
+    # 数据来源性质: 防止用占位数据产出"现实因果结论"
     data_source_kind: str = "unspecified"  # unspecified / real / placeholder / synthetic
     data_source_note: str = ""
     treatment_col: str = ""
@@ -496,7 +496,7 @@ class ResearchPath(BaseModel):
 
 
 class ProblemContract(BaseModel):
-    """冻结的问题契约 (计划书 P0-2)。
+    """冻结的问题契约。
 
     `clarification` 非空表示"先问一个问题, 不冻结"; `frozen_version > 0` 表示
     用户已确认。改题必须新版本或新问题, 不得静默替换。
@@ -540,7 +540,7 @@ class ResearchSpec(BaseModel):
     original_request: str = ""
     problem_statement: str = ""
     domain: str = ""
-    # 资料源绑定 (计划书 §3 R0): 用户显式选择的资料库/数据源。
+    # 资料源绑定: 用户显式选择的资料库/数据源。
     # 为空时退回"按主题名找同名知识底座"的旧行为 (向后兼容)。
     source_set_id: str = ""
     source_set_kind: str = "kb"        # kb / files / dataset
@@ -557,7 +557,7 @@ class ResearchSpec(BaseModel):
     research_type: str = ""  # monotonicity / bound / extremum / threshold / general
     contract: ProblemContract | None = None  # 用户确认后冻结的问题契约
     source_policy: SourcePolicy = SourcePolicy.user_kb
-    coverage: RetrievalCoverage | None = None  # 检索覆盖记录 (P0-1/§1 契约第 2 行)
+    coverage: RetrievalCoverage | None = None  # 检索覆盖记录
     candidates: list[ClaimQuestion] = Field(default_factory=list)
     confirmed: bool = False
     selected_candidate_id: str = ""  # 已确认的候选 ID (稳定引用)
@@ -629,7 +629,7 @@ class SourceEvidence(PublicationMetadata):
     applicability_conditions: list[str] = Field(default_factory=list)
     # 定位与版本: 检索结果必须可回到原文
     source_id: str = ""         # KB doc_id 等权威来源 ID
-    # 命题归属 (计划书 §3 R3): 该证据是为哪条命题召回的。
+    # 命题归属: 该证据是为哪条命题召回的。
     # 逐命题缺口统计只读这个字段 + 版本化的 EvidenceLink, 不从全局证据列表推断。
     claim_id: str = ""
     chunk_id: str = ""          # 段落/分块稳定 ID
@@ -663,7 +663,7 @@ class SourceEvidence(PublicationMetadata):
 
 
 class EvidenceLink(BaseModel):
-    """命题—证据关系 (计划书 §4.1 EvidenceLink)。
+    """命题—证据关系。
 
     把"文献可信"与"支持本命题"分成两种关系; 关系强度与审查状态显式记录。
     """
@@ -907,7 +907,7 @@ class Claim(BaseModel):
     id: str = Field(default_factory=lambda: new_id("clm"))
     version: int = 1
     statement: str
-    # 所属研究问题 (计划书 R6: 同一项目可研究多个问题, 对象必须归属到具体问题)。
+    # 所属研究问题。
     # 旧数据为空 → 归属当前正在研究的问题 (由工作台过滤逻辑判定, 不猜测)。
     problem_id: str = ""
     claim_type: ClaimType = ClaimType.definitional
@@ -950,7 +950,7 @@ class Claim(BaseModel):
     verification_scope: VerificationScope | None = None
     novelty_status: NoveltyStatus = NoveltyStatus.unchecked
     obligations: list[str] = Field(default_factory=list)  # obligation id
-    # ---- 计划书 §4.2: 结论状态与验证维度分开 ----
+    # 结论状态与验证维度分别记录。
     support_kind: SupportKind = SupportKind.none
     coverage: Coverage = Coverage.step
     validation_status: ValidationStatus = ValidationStatus.unchecked
@@ -1096,7 +1096,7 @@ class ResearchSnapshot(BaseModel):
     novelty: list[NoveltyRecord] = Field(default_factory=list)
     experiment_specs: list[dict] = Field(default_factory=list)
     writing_map: dict[str, str] = Field(default_factory=dict)  # claim_id -> 正文锚点
-    # 冻结时该结论所占用的有效验证记录 (计划书 §4.3-6: 只检查本次快照引用的记录)
+    # 冻结时该结论所占用的有效验证记录
     verification_index: dict[str, list[str]] = Field(default_factory=dict)
 
 

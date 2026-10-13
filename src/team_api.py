@@ -1,25 +1,6 @@
 from __future__ import annotations
 
-"""团队与资料库的 HTTP 接口 (合并计划 §9.4 / §13.4)。
-
-设计约束
---------
-- **本模块不做科学判定**: 它只把团队运行与资料库登记的结果按结构化形式返回;
-  "交付等级""命题状态"等结论由判定层产生。
-- **view 不触发执行**: 读取运行状态只读存储; 只有显式启动/resume 才会跑任务
-  (§9.3: "页面刷新、浏览器后退与分享页面地址不自动重启任务")。
-- 资料库接口遵守 §13.3 的安全规则: 路径只回显 basename, 拒绝项单独列出,
-  删除只解除**该库**登记, 不动用户原文件与共享向量库。
-
-路由:
-- `GET  /api/team/roles`                    角色与**真实可用**能力
-- `GET  /api/team/{project_id}/{run_id}`    任务/依赖/状态/预算投影
-- `POST /api/team/run`                      启动一次团队运行 (team_v1)
-- `POST /api/library/scan`                  只扫描不导入 (先预览再确认)
-- `POST /api/library/import`                按请求导入 (幂等)
-- `GET  /api/library/{source_set_id}`       库来源、文件数、hash 清单、失效文件
-- `DELETE /api/library/{source_set_id}`     只解除该库登记
-"""
+"""提供团队运行和文献资料库的 HTTP 接口。"""
 
 from typing import Any
 
@@ -35,9 +16,7 @@ from src.research.task_store import TaskStore
 router = APIRouter()
 
 
-# ----------------------------------------------------------------------
 # 请求体
-# ----------------------------------------------------------------------
 class TeamRunRequest(BaseModel):
     request: str
     project_id: str = ""
@@ -57,10 +36,6 @@ class ScanRequestModel(BaseModel):
     label: str = ""
     max_files: int = 0
     max_bytes: int = 0
-    #: **已废弃**: 网页请求不能自行扩展授权根, 传非空值会被 400 拒绝。
-    #: 之所以保留字段而不是删掉它: pydantic 默认忽略未知字段, 删掉就等于又变回
-    #: "静默忽略" —— 照旧传该字段的调用方只会看到"全部被拒", 看不出原因。
-    #: 需要放行目录请用 `/api/library/pick-folder` 或服务端 `DATA_READ_ROOTS`。
     allow_roots: list[str] = Field(default_factory=list)
     folder_grants: list[str] = Field(default_factory=list)
 
@@ -72,9 +47,7 @@ class ImportRequestModel(ScanRequestModel):
     session_id: str = ""
 
 
-# ----------------------------------------------------------------------
 # 团队
-# ----------------------------------------------------------------------
 @router.get("/api/team/roles")
 def team_roles() -> dict[str, Any]:
     """团队角色清单 + 当前**真实可用**能力 (不是静态声明)。"""
@@ -89,7 +62,7 @@ def team_projection(project_id: str, run_id: str) -> dict[str, Any]:
         task_store = TaskStore(project_id, store)
         # 只接受**本运行**的任务: 以前 `not t.get("run_id")` 也算通过, 于是任意运行
         # 的窗口都会把"没有 run 的历史任务"一并算进来, 同项目多次运行互相串
-        # (§3.3 G14)。无 run_id 的旧记录宁可不出现在投影里, 也不冒充本次运行。
+        #。无 run_id 的旧记录宁可不出现在投影里, 也不冒充本次运行。
         tasks = [t for t in task_store.tasks() if str(t.get("run_id", "")) == run_id]
         events = [e for e in store.events()
                   if str((e.get("payload") or {}).get("run_id", "")) == run_id]
@@ -99,7 +72,7 @@ def team_projection(project_id: str, run_id: str) -> dict[str, Any]:
 
     store = ResearchStore(project_id)
     try:
-        # 对象同样按本运行裁剪 (§3.3 G14): 项目级 list_latest 会把别的运行混进来
+        # 对象同样按本运行裁剪: 项目级 list_latest 会把别的运行混进来
         objects = {kind: object_rows(store, kind, limit=50, run_id=run_id)
                    for kind in KIND_MAP}
     finally:
@@ -152,7 +125,7 @@ def run_team(req: TeamRunRequest) -> dict[str, Any]:
             "tasks": [r.to_dict() for r in outcome.results.values()],
             "unresolved_report": outcome.unresolved_report,
             "usage": outcome.usage.to_dict(),
-            # 交付评估必须随响应返回 (§3.2 G12): 界面与人工复核要能回答
+            # 交付评估必须随响应返回: 界面与人工复核要能回答
             # "为什么是这一级", 而不是只看到一个 status。
             "delivery": dict(outcome.delivery),
             "objects": {kind: len(projection.rows(kind))
@@ -164,9 +137,7 @@ def run_team(req: TeamRunRequest) -> dict[str, Any]:
     return result
 
 
-# ----------------------------------------------------------------------
-# 资料库 (§13)
-# ----------------------------------------------------------------------
+# 资料库
 @router.post("/api/library/pick-folder")
 def library_pick_folder(request: Request) -> dict[str, Any]:
     """在运行 AIR 的本机打开系统文件夹选择器。"""
@@ -209,17 +180,7 @@ def library_scan(req: ScanRequestModel) -> dict[str, Any]:
 
 @router.post("/api/library/import")
 def library_import(req: ImportRequestModel) -> dict[str, Any]:
-    """按请求导入; 幂等键防重复导入; 部分失败**逐条返回**。
-
-    幂等键必须与**目录内容**绑定。只按 `label + 路径字符串` 计时: 往同一目录新增
-    文件后键不变, 调用方会命中旧缓存并拿到上一次的报告, 新文件一个都不处理
-    (实测 2026-10-11 库 `星网 星链`: 扫描报"将入库 42", 导入却回 2026-10-09 的
-    "新增 12 · 合并 1", 新增的 29 个文件从未入库)。
-
-    因此这里先扫描取**内容签名**(`path+size+mtime`), 用 `客户端键#签名` 作为真正的
-    缓存键: 重复点击(内容未变)仍命中缓存; 内容一变就重新导入。命中缓存时**如实
-    标注** `cached`, 界面不得把旧报告当成一次成功的导入。
-    """
+    """按请求导入; 幂等键防重复导入; 部分失败逐条返回。"""
     from src.kb import path_import as pi
     from src.kb.store import KBStore
 
@@ -235,32 +196,25 @@ def library_import(req: ImportRequestModel) -> dict[str, Any]:
 
         if not re.fullmatch(r"[0-9a-f]{32}", session_id) or not conversation_exists(session_id):
             raise HTTPException(404, "当前对话不存在，无法绑定资料库")
-    from src.kb.store import default_db_path, topic_dir
+    from src.kb.store import default_db_path
 
     existed = default_db_path(topic).is_file()
-    # 库的**规范 id** 是磁盘目录名 (`sanitize_filename(库名)`), 而 `/api/sources`
-    # 列出的正是目录名。用户输入的库名可能含空格等字符 (实测 `星网 星链` →
-    # 目录 `星网_星链`), 只回显原文会让前端在下拉框里找不到这个库, 于是
-    # "已导入" 之后又报 "未能在选择列表中找到该库", 下一次运行还会变成未绑定。
-    canonical_id = topic_dir(topic).name
 
     def with_binding(report: dict[str, Any]) -> dict[str, Any]:
         result = dict(report)
         result["library_existed"] = existed
-        result["source_set_id"] = canonical_id
         result["bound_session_id"] = ""
         result["binding_error"] = ""
         from src.kb.sources import validate_binding
 
-        check = validate_binding(canonical_id)
+        check = validate_binding(topic)
         if not check["ok"]:
             result["binding_error"] = check["reason"]
         elif session_id:
             from src.sessions.store import bind_conversation_library
 
             try:
-                # 存规范 id: 恢复对话时前端要拿它去下拉框里选中, 必须是列表里的那个值。
-                bind_conversation_library(session_id, canonical_id)
+                bind_conversation_library(session_id, topic)
             except KeyError:
                 result["binding_error"] = "当前对话已不存在，资料库已导入但未绑定"
             else:
@@ -321,14 +275,10 @@ def library_delete(source_set_id: str, delete_records: bool = False) -> dict[str
     return outcome
 
 
-# ----------------------------------------------------------------------
 # 内部
-# ----------------------------------------------------------------------
 def _scan_request(pi, req: ScanRequestModel):
     from src.kb.folder_picker import granted_roots
 
-    # 客户端不能自带授权根。此前是"静默忽略", 结果是照旧传 allow_roots 的调用方
-    # 只看到"文件全部被拒", 无从判断这个字段已废弃; 改为明确拒绝并给出替代做法。
     if req.allow_roots:
         raise HTTPException(
             400,

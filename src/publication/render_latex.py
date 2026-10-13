@@ -19,11 +19,9 @@ __all__ = [
 ]
 
 #: Unicode → LaTeX 映射 (只列**实际会被正文带进来**的字符)。
-#:
 #: 原则: 数学符号进数学模式 (`$...$`), 这样既能排版也不再缺字形; 不放进数学模式的
 #: 字符 (如中文标点) 一律不动。刻意**不**映射 `\\`、`{`、`}`、`$` —— 它们是命令结构,
 #: 正文里的既有命令 (如 `\\textbf{}`) 必须原样保留。
-#:
 #: 没有这张表时实测后果: 正文里的 `λ`/`≡`/`×`/`−`/`∈` 直接落到 ctexart 的拉丁字体上,
 #: 日志报 `Missing character: There is no ∈ in font [lmroman12-regular]`, PDF 出现空洞。
 _UNICODE_TO_LATEX: dict[str, str] = {
@@ -49,7 +47,6 @@ _UNICODE_TO_LATEX: dict[str, str] = {
     "Λ": r"$\Lambda$", "Ξ": r"$\Xi$", "Π": r"$\Pi$", "Σ": r"$\Sigma$",
     "Φ": r"$\Phi$", "Ψ": r"$\Psi$", "Ω": r"$\Omega$",
     # 数论/线性代数里常见、但 ctexart 拉丁字体同样没有字形的符号
-    # (实测: `ℓ` 会报 `Missing character: There is no ℓ`, PDF 留下空洞)
     "ℓ": r"$\ell$", "ℝ": r"$\mathbb{R}$", "ℕ": r"$\mathbb{N}$",
     "ℤ": r"$\mathbb{Z}$", "ℚ": r"$\mathbb{Q}$", "ℂ": r"$\mathbb{C}$",
     "∥": r"$\parallel$", "⊥": r"$\perp$", "≅": r"$\cong$",
@@ -71,7 +68,6 @@ _UNICODE_TO_LATEX: dict[str, str] = {
 }
 
 #: 同一张表的**数学模式**版本: 去掉外层 `$`, 只保留命令本身。
-#:
 #: 公式体 (`Block.math`) 已经处在 `equation` 里, 再插入 `$` 会破坏数学模式
 #: (`$-$` 落在公式里 → `Missing $ inserted`)。`−` 这类映射到单字符的条目
 #: 去掉 `$` 后正好是合法的数学符号。
@@ -100,10 +96,8 @@ _INLINE_SET_POWER_RE = re.compile(
     r"(\{[^{}]*\}|-?[A-Za-z0-9]+)")
 
 #: 正文里"单字母_下标"的形状: `c_i`、`I_667`、`d_H`、`H_{1j}`、`Σ_{t=0}`。
-#:
 #: 转义成 `\_` 只是能编译 —— PDF 里显示的是**字面下划线**而不是真下标, 一篇满是
 #: `c\_i`、`J\_667` 的论文读起来很糟。这里把它还原成行内数学。
-#:
 #: 边界刻意收得很紧, 只吃**单个字母/数字**作底数, 且
 #: - lookbehind 排除 `ab_c` / `existence_proof` 这类**多字母标识符** (否则蛇形命名会被
 #:   当成下标, 变成 `existence_{proof}`);
@@ -382,7 +376,6 @@ def escape_latex(text: str) -> str:
     # 的兜底替换会把刚生成的 `^{...}`/`_{...}` 一起改掉 (实测产出
     # `$M\textasciicircum{}{T}$`, 并在数学模式里报 "Command \textasciicircum invalid
     # in math mode")。
-    #
     # 顺序要求: 这一步必须**早于** Unicode 映射。实测 (proj-muvx3j7ima1z)
     # `{+1,−1}^668` 里的 `−` 会先被映射成 `$-$`, `Σ_{t=0}^{166}` 的 `Σ` 先变成
     # `$\Sigma$` —— 两者都会把待识别的形状切碎, 于是 `^` 只能退化成脱字符。

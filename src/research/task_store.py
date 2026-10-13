@@ -1,22 +1,6 @@
 from __future__ import annotations
 
-"""团队任务生命周期与事务一致性 (合并计划 §5.3 / §6.3 / §10 M4)。
-
-三个必须解决的问题
-------------------
-1. **任务生命周期要持久化**: `queued/running/waiting/completed/partial/failed/
-   cancelled` 必须能跨重连与进程重启恢复, 否则"断线重放、停止、恢复、重试不重复提交"
-   无从上谈起 (M4 验收)。
-2. **read-set 一致性**: `ResearchStore.put()` 已有 `expected_revision`, 但
-   `submit_step()` 不接收"整个读取集合的期望版本"。于是"Agent 依据 v2 产出、对象已到
-   v3"仍会被合入 —— 这就丢了那份成果本该触发的复核。本模块在**同一提交路径**里做
-   版本检查、候选接受、依赖失效与事件写入, 只用 Python 锁不能替代它 (§6.3)。
-3. **幂等续跑**: 已提交的任务在恢复时必须跳过; 重试用**原 task_id + 新 attempt/
-   agent_run_id**, 防止重连或超时触发重复付费调用 (§5.3)。
-
-设计取舍: 任务与运行记录复用同一 `ResearchStore`(SQLite) 持久化基础, 不新造第二个
-存储 —— 合并计划 §6.1 要求"一次迁移中每种对象只能指定唯一权威写入口"。
-"""
+"""团队任务生命周期与事务一致性。"""
 
 import json
 from enum import Enum
@@ -56,7 +40,7 @@ class ReadSetConflict(RuntimeError):
     """依据的输入版本已经过期 (对象在派工之后又换代了)。
 
     这不是错误处理细节, 而是**科研正确性**要求: 依据 v2 得出的结论不能直接合到 v3
-    之上。拒绝合入, 记录过期, 由主控决定重做或重新核对 (§6.3)。
+    之上。拒绝合入, 记录过期, 由主控决定重做或重新核对。
     """
 
     def __init__(self, stale: dict[str, tuple[int, int]], message: str = ""):

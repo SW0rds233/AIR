@@ -1,17 +1,6 @@
 from __future__ import annotations
 
-"""研究动作契约与注册表 (P1)。
-
-计划书 §5.3 / §2 P0-A02/A05 的两条硬约束:
-1. **注册表只向控制器暴露当前确实有执行器且满足条件的动作** ——
-   `available_actions(state)` 同时检查"有 handler"与"前置条件成立";
-   没有有效动作时控制器必须澄清、换路或部分交付, 不能空转。
-2. 前置条件失败不是只写一个字段, 而是形成的**执行门禁**:
-   `check_preconditions` 的结果决定动作是否可派发。
-
-动作声明输入 schema、前置条件、可修改对象与输出 schema。
-验证结果由执行器与规则层写入, 协调者不得直接把命题状态改为"已证明"。
-"""
+"""研究动作契约与注册表。"""
 
 from collections.abc import Callable
 

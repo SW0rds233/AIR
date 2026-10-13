@@ -86,7 +86,7 @@ def _page_span_for(offsets: list[tuple[int, int]], section) -> list[tuple[int, i
     """把本节内的字符偏移映射为起始/结束页。
 
     逐页解析器未提供节内页边界时, 按"节内字符位置比例"估算页号, 并**显式标注为估算**
-    (计划书 §6.1-3: 不能沿用整节首个页码; 也不得把估算页号冒充精确页码)。
+。
     """
     text_len = max(1, len(getattr(section, "text", "") or ""))
     first = int(getattr(section, "page", 0) or 0)
@@ -107,7 +107,7 @@ def _chunks_from_sections(doc_id: str, sections) -> list[Chunk]:
     """按节切块, 每块记录**本节内的精确字符范围**与起止页。
 
     早前实现把整节的 `section.page` 赋给该节切出的每一个 chunk, 导致跨页片段定位错误
-    (计划书 §6.1-3 点名)。现在记录真实字符范围, 并按比例估算起止页且标注为估算。
+。现在记录真实字符范围, 并按比例估算起止页且标注为估算。
     """
     from src.rag.chunker import chunk_text_with_offsets
 

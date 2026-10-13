@@ -151,13 +151,7 @@ _COUNTRY_NAMES = frozenset((
 
 
 def _clean_venue(venue: str, is_conference: bool) -> str:
-    """清洗出处字符串中的年份残留与会议地点信息。
-
-    实测格式缺陷 (审稿人连续扣参考文献分):
-    - venue 尾部内嵌年份 ("IEEE Internet of Things Journal 2021") 与 year 字段
-      叠加 → "…Journal 2021, 2020, 8(10)" 年份重复;
-    - 会议 venue 尾部带 "城市, 国家" (GB/T 7714 会议条目不含地点)。
-    """
+    """清洗出处字符串中的年份残留与会议地点信息。"""
     v = (venue or "").strip()
     if not v:
         return v
@@ -231,7 +225,6 @@ def format_gbt7714_entry(ref: dict) -> str:
     marker, origin = _ref_type_marker(ref)
     # venue 内嵌年份兜底剥离 (_clean_venue 已处理期刊/会议出处; 此处覆盖其余路径):
     # 年份由 year 字段单独输出, 避免 "…Journal 2021, 2020, 8(10)" 年份重复
-    # (实测被审稿人判格式异常, 参考文献维度无法上 4 分)
     origin = re.sub(r"[,\s]+\b(?:19|20)\d{2}\b\s*$", "", origin).strip().rstrip(".")
 
     # 作者 + 题名 + 类型标识

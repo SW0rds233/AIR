@@ -1,20 +1,4 @@
-/*!
- * AIR 2026-09-23 前端安全渲染模块 (计划书 §2 F3)。
- *
- * 为什么不用 marked:
- * 1. 页面原来从 jsdelivr CDN 加载 `marked@12`, 这既是"本地应用却依赖外部脚本",
- *    也让离线环境直接失去渲染能力;
- * 2. [Marked 官方明确说明其输出不做 HTML 消毒](https://marked.js.org/), 而
- *    产物与检索内容可能含外部文本 —— 直接 `innerHTML = marked.parse(x)` 等于
- *    把外部文本当 HTML 执行。
- *
- * 本模块的渲染器**只使用 DOM API 构造节点** (`createElement` / `textContent`),
- * 全程不拼接 HTML 字符串、不给 `innerHTML` 赋值, 因此不存在注入面; 链接还会做
- * 协议白名单 (`http/https/mailto`), 其它协议一律降级为纯文本。
- *
- * 覆盖范围: 标题、段落、无序/有序列表、围栏代码块、行内代码、加粗/斜体、
- * 表格、水平线、引用块。纯文本文件走 `renderText()`。
- */
+/** 使用 DOM API 安全渲染文稿文本，并限制链接协议。 */
 
 export interface RenderOptions {
   tag?: string;

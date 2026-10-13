@@ -57,13 +57,7 @@ def derive_topic(text: str, *, limit: int = TOPIC_MAX_CHARS) -> str:
 
 
 def safe_join(root: Path | str, *parts: str) -> Path | None:
-    """把不可信路径片段拼到 root 下, 越界返回 None。
-
-    不能用 `str(path).startswith(str(root))` 做包含性判断: 那会把
-    `outputs_backup/` 这类**同前缀兄弟目录**误判为在 `outputs/` 之内
-    (计划书 §9.4/§9.5: 网页与文件名都是外部资料, 不得越出授权目录)。
-    这里按路径分量判断, 并且拒绝绝对路径与 `..` 上跳。
-    """
+    """把不可信路径片段拼到 root 下, 越界返回 None。"""
     root_path = Path(root).resolve()
     candidate = Path(parts[0]) if len(parts) == 1 else Path(*parts)
     if candidate.is_absolute():

@@ -1,23 +1,6 @@
 from __future__ import annotations
 
-"""阶段 2 (方案 v2 M3): 为出版层获取**可引用**的证据。
-
-它在链路里的位置
-----------------
-研究循环后半段可能已经产生 `snapshot.evidence` (研究过程中召回并判定过的证据)。
-本模块负责的是**出版前的补齐**: 出版层需要"相关工作比较"和参考文献表, 当快照里的
-证据不足以支撑这两节时, 按资料授权策略再检索一轮, 并把结果**逐条判定支持关系**。
-
-三条硬约束
-----------
-1. **命中 != 支持**: 检索命中只证明"文献存在", 不证明"内容支持该命题"。因此每条
-   命中都先建为 `insufficient`, 再经 `assess_support` 得到候选关系; 没有可定位引文时
-   **最多只到 `partially_supports`** (`quote_is_locatable`), 绝不能靠标题相似升级为支持。
-2. **离线不联网**: `THEORY_LLM=0` 或检索源不可用时, 如实记"未执行检索"并保持
-   参考文献表为空 —— 方案 v2 明确禁止用伪造引用把版面填满。
-3. **缺记录 != 无命中**: 覆盖记录区分"没检索"、"检索失败"与"检索过无命中"三种状态,
-   因为"未检索"不能作为"无先例"的依据 (发布门槛 4)。
-"""
+"""为文稿获取可引用且可追溯的文献证据。"""
 
 import re
 from dataclasses import dataclass, field
@@ -42,16 +25,7 @@ def _domain_translations(text: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
 
 
 def terminology_variants(text: str) -> list[str]:
-    """从中文文本里取出**英文术语变体** (供检索规划使用)。
-
-    必要性来自实测: OpenAlex 的 `search` 对中文关键词几乎不做语义匹配 ——
-    查"射影平面 不存在性"返回的是"非平行光束对窄带滤光片光谱性能的影响"、
-    "济南-淄博-泰安地区地表伽玛辐射特征"; 查"组合设计 存在性"返回土木工程的
-    "路面结构组合设计"。也就是说**中文查询会被当成无关领域的关键词**。
-
-    因此中文题在检索前必须把领域术语换成英文变体再查。这里只做**术语**替换,
-    不翻译句子; 取不到变体就返回空列表 (调用方保持原查询, 不臆造英文)。
-    """
+    """从中文文本里取出英文术语变体 (供检索规划使用)。"""
     haystack = text or ""
     if not haystack:
         return []
@@ -64,10 +38,7 @@ def terminology_variants(text: str) -> list[str]:
     return variants
 
 
-# 判定"背景相关"所需的最少命中数。1 个泛词 (design/theorem) 会把
-# "polypill design"、"fusion pilot plant design" 这类完全无关的工作拉进来 ——
-# 实测过一次: 11 条"背景文献"里只有 2 条与组合设计有关。因此要求**至少 2 个**
-# 不同术语命中, 或者命中一个强领域短语。
+# 单个泛词不足以判定相关；需两个术语或一个强领域短语命中。
 _RELATED_MIN_HITS = 2
 
 
@@ -97,9 +68,7 @@ class PublicationEvidence:
     coverage: RetrievalCoverage = field(default_factory=RetrievalCoverage)
     notes: list[str] = field(default_factory=list)
     executed: bool = False
-    # 逐条可引用的证据 (命题 → 证据)。**必须随结果一起传出去**: 这些证据不在冻结
-    # 快照里, 而正文的"与已有工作比较"要靠它渲染。此前只传了参考文献表, 于是出现
-    # "参考文献 11 条、第 4 节却写'未发现可比较的工作'"的自相矛盾 (实测)。
+    # 命题到证据的映射不在冻结快照中，须随结果传给写作层。
     evidence: list = field(default_factory=list)
 
     def evidence_for(self, claim_id: str) -> list:
@@ -188,9 +157,7 @@ def gather_publication_evidence(snapshot: ResearchSnapshot, engine,
         return bundle
 
     coverage.hits = len(hits)
-    # 检索**确实执行过** (可能命中 0 条): 与"没检索"必须区分 ——
-    # 前者不构成"无先例"的依据, 后者连依据都谈不上。此前这里漏写, 覆盖记录会
-    # 一边写着命中 18 条、一边写着 executed=false, 自相矛盾。
+    # 检索已执行与检索未执行须区分，即使命中数为零。
     coverage.executed = True
     bundle.executed = True
     deduped = _dedup(hits)
@@ -248,16 +215,7 @@ def _queries(snapshot: ResearchSnapshot) -> list[str]:
 
 
 def _search(query: str, limit: int, knowledge) -> list:
-    """一次检索: 有资料库走资料库, 否则走外部检索 (arXiv/OpenAlex)。
-
-    两个必须处理的现实细节:
-    - `search_tools` 里的检索函数被 `@tool` 包装成 `StructuredTool`, **不能直接调用**,
-      要经 `.func` 取原始实现 (实测: 直接调用报 `'StructuredTool' object is not callable`);
-    - 多源聚合可能因为其中一个源不可用而整体失败 (例如 Semantic Scholar 限流 429),
-      此时**退到单源 arXiv** —— 否则一个源的问题会让整篇论文没有引用。
-
-    检索失败与"检索过无命中"必须分开: 前者记 `failures`, 后者记 `hits=0`。
-    """
+    """一次检索: 有资料库走资料库, 否则走外部检索 (arXiv/OpenAlex)。"""
     if knowledge is not None:
         return _refs_of(knowledge.search(query, limit=limit))
     from src.tools import search_tools as tools
@@ -299,18 +257,7 @@ def _refs_of(result) -> list:
 
 
 def _stable_locator(url: str, doi: str = "", openalex_id: str = "") -> str:
-    """从命中的标识符取**稳定定位**: `arXiv:2001.11974` / `doi:10.4230/…` / `W123`。
-
-    必要性来自实测: 外部检索结果没有页/节定位, 而引用守门要求"可定位出处",
-    于是每条外部命中都会被判成"无可定位出处"而无法引用 —— 结果是"检索到了却一条
-    也引不了"。
-
-    早期实现**只认 arXiv URL**, 而 OpenAlex 返回的全是 DOI 链接
-    (`https://doi.org/10.4230/lipics.itp.2026.19`), 于是 OpenAlex 命中的定位恒为空、
-    永远只能当背景相关——包括"引用某个具名定理"时找到的那个定理原始出处
-    (实测: `_arxiv_locator` 对 DOI 返回 `''`)。这里按标识符的稳定性排序:
-    arXiv ID > DOI > OpenAlex ID。
-    """
+    """从命中的标识符取稳定定位: `arXiv:2001.11974` / `doi:10.4230/…` / `W123`。"""
     text = (url or "").strip()
     lowered = text.lower()
     match = re.search(r"arxiv\.org/(?:abs|pdf)/([0-9]+\.[0-9]+)", lowered)
@@ -361,7 +308,7 @@ def _to_evidence(ref, snapshot: ResearchSnapshot) -> SourceEvidence:
     url = str(get("url", "") or "")
     doi = str(get("doi", "") or "")
     openalex_id = str(get("openalex_id", "") or "")
-    # DOI / OpenAlex ID 与 arXiv ID 等价可用作定位 (见 `_stable_locator` 的实测说明)
+    # DOI / OpenAlex ID 与 arXiv ID 等价可用作定位
     locator = (str(get("locator", "") or "")
                or _stable_locator(url, doi, openalex_id))
     doc_id = str(get("source_id", "") or get("doc_id", "") or "")
@@ -415,7 +362,7 @@ def _judge_support(snapshot: ResearchSnapshot, item: SourceEvidence) -> SourceEv
             return item          # 真的无关: 保持 insufficient, 不进参考文献表
         # 主题相关但**没有被判定为支持**: 只能作为"背景相关工作"引用。
         # 这条区分很关键 —— 相关工作一节需要能引用真实存在的同类研究,
-        # 但不得暗示它们支持本文结论 (方案 v2 §3 防火墙)。
+        # 但不得暗示它们支持本文结论。
         item.support = SupportKindOfEvidence.background
         item.support_reason = ("主题相关 (术语对照命中), 但未判定为支持本文结论; "
                                "仅作背景相关工作引用")

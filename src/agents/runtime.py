@@ -1,23 +1,6 @@
 from __future__ import annotations
 
-"""统一智能体运行时: 有界工具循环、权限校验、用量记账与结构化结果 (合并计划 §5, M1)。
-
-这个模块替代的是原来的 `literature_reviewer._run_agent_loop()`: 那段代码本身是
-**唯一现成的工具调用闭环**, 但带四个硬编码 —— `_TOOL_MAP` 字典、`all_papers`
-隐式收集器、进程级 `tracker` 单例、以及"消息条数 > 8 就停"的循环终止条件。
-它只能服务文献检索一个角色; 复制七份会让每个角色各有一套预算/取消/记账语义。
-
-因此这里把机制抽出来, 保留可复用的部分 (调用→观察→再决策), 去掉硬编码:
-
-- 工具由调用方**注入** (`ToolSpec`), 不再有模块级 `_TOOL_MAP`;
-- 观察结果收集进 `ToolObservation` 列表 (而不是往一个共享 list 里灌);
-- 用量记在**本次任务**的 `UsageRecord` 上, 不再写进程级单例 (合并计划 §7.4 点名
-  `cost_tracker.tracker` 是全局资源, 团队并发前必须处理其归属);
-- 停止条件由 `task.budget` 与取消信号决定, 不再用消息条数。
-
-工具循环只在**有 LLM 且工具可用**时启用; 离线或预算为零时由角色的确定性实现
-兜底 —— 判定层 (`src/verification/**`、`acceptance.py`) 保持零 LLM。
-"""
+"""受控执行智能体任务，校验权限和预算，并登记结构化结果。"""
 
 import logging
 import time
@@ -70,9 +53,7 @@ class TaskCancelled(RuntimeError):
     """
 
 
-# ----------------------------------------------------------------------
 # 取消
-# ----------------------------------------------------------------------
 @dataclass
 class CancelToken:
     """协作式取消信号。
@@ -100,9 +81,7 @@ class CancelToken:
         raise TaskCancelled(self.reason or "任务被取消")
 
 
-# ----------------------------------------------------------------------
 # 结构化观察
-# ----------------------------------------------------------------------
 class ObservationSink(Protocol):
     """工具调用与阶段事件的落盘入口 (由运行时/图提供)。
 
@@ -121,8 +100,7 @@ class _NullSink:
 class ToolObservation:
     """一次工具调用及其结果。
 
-    `status` 区分**工具执行失败**、**解析失败**与**正常返回** (合并计划 §5:
-    "工具执行失败、解析失败、任务完成和科学结论未决须可区分")。
+    `status` 区分工具执行失败、解析失败与正常返回。
     """
 
     name: str
@@ -160,9 +138,7 @@ class ToolObservation:
         }
 
 
-# ----------------------------------------------------------------------
 # 工具
-# ----------------------------------------------------------------------
 @dataclass
 class ToolSpec:
     """一个可注入的工具。
@@ -215,9 +191,7 @@ def tool_spec(name: str, fn: Callable[..., Any], **kwargs: Any) -> ToolSpec:
     return ToolSpec(name=name, fn=fn, **kwargs)
 
 
-# ----------------------------------------------------------------------
 # 记账 LLM
-# ----------------------------------------------------------------------
 class BudgetedLLM:
     """把 LLM 调用计入**本次任务**的用量, 并在超预算/取消时拒绝继续调用。
 
@@ -278,9 +252,7 @@ class BudgetedLLM:
         return getattr(self._inner, name)
 
 
-# ----------------------------------------------------------------------
 # 工具循环
-# ----------------------------------------------------------------------
 class ToolLoop:
     """有界工具调用闭环 (调用 → 执行工具 → 观察回喂 → 再决策)。
 
@@ -412,14 +384,12 @@ def observation_text(observation: ToolObservation, budget: int = 6000) -> str:
     return text[:budget]
 
 
-# ----------------------------------------------------------------------
 # 角色基类
-# ----------------------------------------------------------------------
 class Agent(Protocol):
     """一个子智能体的实现契约。
 
     `run` 必须返回结构化 `AgentResult`; 抛出的异常由执行器转成 `failed` 结果,
-    而不是让整个 run 崩掉 (合并计划 §4.2: 工具故障可有界重试)。
+    而不是让整个 run 崩掉。
     """
 
     role: str
@@ -428,9 +398,7 @@ class Agent(Protocol):
             runtime: AgentRuntime) -> AgentResult: ...
 
 
-# ----------------------------------------------------------------------
 # 运行时
-# ----------------------------------------------------------------------
 class AgentRuntime:
     """任务执行的唯一入口: 签发令牌、校验成果、记账、落事件。
 
@@ -450,7 +418,6 @@ class AgentRuntime:
         self.max_tool_rounds = max_tool_rounds
         self.run_budget = run_budget
         #: 各角色已解析出的模型 (`stage -> 模型或 None`)。
-        #:
         #: 为什么需要它: `llm_available()` 原先只判断"工厂是否存在", 而工厂**可以返回
         #: None** (显式离线)。两者混在一起, 离线模式下角色会以为模型可用、调用时抛
         #: `RuntimeError`, 再退回确定性实现 —— 症状被掩盖成"跑通了", 实际每次都在
@@ -465,7 +432,7 @@ class AgentRuntime:
         #: 唯一提交口。
         self.research_store: Any = None
 
-    # ---- 核验服务 (合并计划 §4: "VerificationService 类型化请求与结果提交") ----
+    # ---- 核验服务 ----
     def verification_backends(self) -> dict[str, bool]:
         """当前可用的核验后端 (缺失的后端必须影响可用动作集合)。"""
         from src.verification.runner import available_tools
@@ -593,8 +560,8 @@ class AgentRuntime:
         """逐条候选的违规说明 —— 违规是**候选级**的, 不是整条结果级的。
 
         这一点很关键: 若按"整条结果违规"处理, 一个越权候选会把同一任务里合法的候选
-        一起拖下水; 若只降级整条结果 (修复前的行为), 越权候选本身仍会被登记。
-        因此这里给出**每条候选自己的**理由, 由 `finalize()` 精准隔离 (§3.2 G07)。
+        一起拖下水; 若只降级整条结果, 越权候选本身仍会被登记。
+        因此这里给出**每条候选自己的**理由, 由 `finalize()` 精准隔离。
         """
         allowed = writable_kinds(task.agent)
         violations: list[tuple[ChangeProposal, str]] = []
@@ -616,15 +583,7 @@ class AgentRuntime:
 
     def finalize(self, task: AgentTask, result: AgentResult,
                  grant: CapabilityGrant | None = None) -> AgentResult:
-        """校验、**隔离**越权候选并落事件; 违规时把结果降级为 partial 并写明原因。
-
-        两条并行的处置 (§3.2 G07):
-        1. **候选级隔离**: 违规候选从 `proposed_changes` 移入 `rejected_changes`
-           (带理由)。只有留在 `proposed_changes` 里的候选才可能被登记为权威对象 ——
-           "拒绝候选不得进权威库"因此是**结构性**保证, 而不是靠调用方自觉。
-        2. **结果级降级**: 仍把 `completed` 降为 `partial` 并写明原因, 让调用方看到
-           "这次成果不符合契约"。降级而不是整体丢弃: 合规的那部分成果仍然有用。
-        """
+        """校验、隔离越权候选并落事件; 违规时把结果降级为 partial 并写明原因。"""
         violations = self._proposal_violations(task, result, grant)
         quarantined: list[ChangeProposal] = []
         if violations:
@@ -678,7 +637,7 @@ class AgentRuntime:
 
 
 def downgrade_only_gate(agent: str, proposal: ChangeProposal) -> tuple[bool, str]:
-    """审阅的"只可降级、不可升级"闸门 (合并计划 §14.3 不得让渡的不变量)。
+    """审阅的"只可降级、不可升级"闸门。
 
     返回 `(是否允许, 原因)`。判定依据是候选载荷里的**显式等级变化**, 不是提示词:
     审阅提出 `target_level` 高于 `current_level` 时拒绝。
@@ -702,9 +661,7 @@ def downgrade_only_gate(agent: str, proposal: ChangeProposal) -> tuple[bool, str
     return True, ""
 
 
-# ----------------------------------------------------------------------
 # 执行器
-# ----------------------------------------------------------------------
 @dataclass
 class _Backend:
     agent: Agent

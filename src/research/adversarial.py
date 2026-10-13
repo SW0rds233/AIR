@@ -1,23 +1,6 @@
 from __future__ import annotations
 
-"""反方审查清单 (计划书 §7.2 / §7.4)。
-
-计划书要求独立审查"指向具体对象/步骤并产生新的义务", 而不是只给一个总分。
-早期实现只有两条硬检查 (漏条件、循环引证), 应用类的质量问题完全没被审查:
-样本选择偏差、外部效度、测量误差、混淆识别、多重比较、反向因果、指标替换、
-结论强度 —— 这八项是应用/因果结论最常见的失效方式, 缺一项就可能把
-"数据能支持的关联"写成"因果结论"。
-
-设计约束
---------
-1. **不判定成立**: 本清单只产出待核验义务 (informal_review), 不关闭任何义务、
-   不提升任何证据等级、不改写任何命题状态;
-2. **不适用必须说明原因**: 每项检查都返回 `not_applicable`/`satisfied` 并给出理由,
-   审计记录里能看到"八项都跑过", 而不是只有命中项;
-3. **缺信息不等于通过**: 该问的信息 (设计/混淆/测量/适用范围) 缺失时一律
-   生成义务, 不回退成"没有发现问题";
-4. **只看已登记字段**: 不猜测未记录的细节 (不读取"也许作者做过"的假设)。
-"""
+"""反方审查清单。"""
 
 from dataclasses import dataclass, field
 
@@ -195,9 +178,7 @@ def review_claim(claim: Claim,
     return review
 
 
-# ----------------------------------------------------------------------
 # 1. 样本选择偏差
-# ----------------------------------------------------------------------
 def _check_sample_selection(claim: Claim, text: str) -> Finding:
     if not _is_applied(claim):
         return Finding("sample_selection_bias", CHECK_TITLES["sample_selection_bias"],
@@ -219,9 +200,7 @@ def _check_sample_selection(claim: Claim, text: str) -> Finding:
                    CLEAR, "样本范围已登记")
 
 
-# ----------------------------------------------------------------------
 # 2. 外部效度
-# ----------------------------------------------------------------------
 def _check_external_validity(claim: Claim, text: str) -> Finding:
     if not _is_applied(claim):
         return Finding("external_validity", CHECK_TITLES["external_validity"],
@@ -255,9 +234,7 @@ def _check_external_validity(claim: Claim, text: str) -> Finding:
                    CLEAR, "人群/地区/时期均已限定")
 
 
-# ----------------------------------------------------------------------
 # 3. 测量误差与缺失
-# ----------------------------------------------------------------------
 def _check_measurement(claim: Claim, text: str,
                        supporting: list[SourceEvidence]) -> Finding:
     if not _is_applied(claim):
@@ -281,9 +258,7 @@ def _check_measurement(claim: Claim, text: str,
     )
 
 
-# ----------------------------------------------------------------------
 # 4. 混淆识别
-# ----------------------------------------------------------------------
 def _check_confounding(claim: Claim, text: str,
                        supporting: list[SourceEvidence]) -> Finding:
     if not _is_applied(claim) or claim.claim_type not in (ClaimType.causal, ClaimType.associational,
@@ -318,9 +293,7 @@ def _check_confounding(claim: Claim, text: str,
     )
 
 
-# ----------------------------------------------------------------------
 # 5. 多重比较
-# ----------------------------------------------------------------------
 def _check_multiple_comparisons(claim: Claim, text: str,
                                 supporting: list[SourceEvidence]) -> Finding:
     if not _is_applied(claim) or claim.claim_type not in (ClaimType.causal, ClaimType.associational,
@@ -341,9 +314,7 @@ def _check_multiple_comparisons(claim: Claim, text: str,
                    CLEAR, "单一假设检验, 不涉及多重比较")
 
 
-# ----------------------------------------------------------------------
 # 6. 反向因果
-# ----------------------------------------------------------------------
 def _check_reverse_causality(claim: Claim, text: str,
                              evidence: list[SourceEvidence]) -> Finding:
     if not _is_applied(claim) or claim.claim_type not in (ClaimType.causal, ClaimType.predictive):
@@ -369,9 +340,7 @@ def _check_reverse_causality(claim: Claim, text: str,
     )
 
 
-# ----------------------------------------------------------------------
 # 7. 指标替换
-# ----------------------------------------------------------------------
 def _check_metric_substitution(claim: Claim, text: str) -> Finding:
     if not _is_applied(claim):
         return Finding("metric_substitution", CHECK_TITLES["metric_substitution"],
@@ -391,9 +360,7 @@ def _check_metric_substitution(claim: Claim, text: str) -> Finding:
                    "未发现以代理指标顶替目标结果的写法")
 
 
-# ----------------------------------------------------------------------
 # 8. 结论强度
-# ----------------------------------------------------------------------
 def _check_conclusion_strength(claim: Claim, text: str,
                                evidence: list[SourceEvidence]) -> Finding:
     strong = _hits(claim.statement, _STRONG_WORDS)
@@ -418,9 +385,7 @@ def _check_conclusion_strength(claim: Claim, text: str,
     )
 
 
-# ----------------------------------------------------------------------
 # 与义务机制对接
-# ----------------------------------------------------------------------
 def findings_to_obligations(review: AdversarialReview, claim: Claim,
                             existing_statements: set[str] | None = None) -> list:
     """把命中的检查项转成 `informal_review` 义务。

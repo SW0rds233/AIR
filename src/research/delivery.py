@@ -1,24 +1,6 @@
 from __future__ import annotations
 
-"""交付评估 (合并计划 §3.2 G12): 区分"依赖已终止"与"验收已通过"。
-
-这一层解决的问题 (G12 的原文)
-----------------------------
-"角色跑过仍被当成交付依据": `_missing_roles()` 把 partial 也算满足, `TeamSession.export()`
-未传完整研究/出版门槛, `TeamApp.stream()` 吞导出异常 —— 于是"某个角色跑过一次"就等于
-"可以交付", 而且交付包是不是完整论文全靠运气。
-
-因此这里做两件事, 且只有这两件:
-
-1. **验收判定**: 用与研究侧同一套门槛 (`acceptance.theory_validity_gate` /
-   `delivery_gate` / `publication_gate`) 判断当前产出属于哪一级交付
-   (`classify_deliverable`), 并给出**具体**的阻塞理由与未决项 —— 不看"谁跑过",
-   只看"有没有结论、结论有没有依据、正文有没有如实表达、出版是否完备";
-2. **不升级**: 门槛没过一律降级 (完整论文 > 论文草稿 > 条件性研究报告 > 研究备忘录),
-   绝不允许把未过门槛的产出写成"完整论文"。
-
-判定结果进入运行结果与交付包 manifest, 界面与人工复核据此看到"为什么是这一级"。
-"""
+"""根据研究有效性、论文表达和出版完备性评估交付等级。"""
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field

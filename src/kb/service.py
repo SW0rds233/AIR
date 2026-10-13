@@ -1,18 +1,6 @@
 from __future__ import annotations
 
-"""KnowledgeService (计划书 §3.2 / §6): 统一检索—读取—解析接口。
-
-对外只暴露三个动作:
-- `search(request)`  → 候选（**带完整定位**, 全部召回分支统一为同一引用对象）;
-- `read(source_ref)` → 回到原文取完整上下文（摘要不能代替完整条件）;
-- `resolve(source_ref)` → 来源真实性/版本（存在性检查, 不推断内容支持）。
-
-硬约束:
-- 检索命中**绝不**把命题设为成立;
-- 所有分支（关键词文档 / 卡片 / 向量 chunk）都返回统一引用对象;
-- 项目/主题范围过滤覆盖每一条召回路径; 越范围资料不泄漏;
-- 检索失败与"无相关文献"分开记录。
-"""
+"""KnowledgeService: 统一检索—读取—解析接口。"""
 
 from dataclasses import dataclass, field
 
@@ -185,7 +173,7 @@ class KnowledgeService:
         """底座是否真的有可检索资料。
 
         只有可用的底座还不够: 空底座会让"定向检索/读取原文"这类动作被选中却
-        永远失败。计划书 §9.3 要求 unavailable 影响可用动作集合。
+        永远失败；不可用的底座应从可用动作集合中排除。
         """
         if not self._store:
             return False
@@ -209,7 +197,7 @@ class KnowledgeService:
         return out
 
     def retrieval_debug(self) -> dict:
-        """检索能力自述 (计划书 §9.3 可观测性)。
+        """检索能力自述。
 
         明确区分"通道不可用"与"通道可用但没命中": 前者是能力缺失,
         后者才是"无相关文献"。调用方据此决定是否记录检索失败。
@@ -241,9 +229,7 @@ class KnowledgeService:
             "note": "向量通道不可用时自动退化为关键词+卡片, 不影响可用性",
         }
 
-    # ---------------------------------------------------------------
     # 检索
-    # ---------------------------------------------------------------
     def search(self, request: RetrievalRequest | str, limit: int = 8,
                card_types: list[str] | None = None,
                manual_only: bool = False) -> SearchOutcome:
@@ -458,9 +444,7 @@ class KnowledgeService:
             out.append(ref)
         return out
 
-    # ---------------------------------------------------------------
     # 读取原文
-    # ---------------------------------------------------------------
     def _locate_by_chunk(self, doc_id: str, ref: SourceRef,
                          context_chars: int) -> dict | None:
         """按 `chunk_id` 的编号精确回查入库片段; 无编号或查不到时返回 None。"""
@@ -577,11 +561,9 @@ class KnowledgeService:
                 "truncated": False,
                 "failure": "未找到全文, 仅能返回检索片段 (不得视为完整条件)"}
 
-    # ---------------------------------------------------------------
     # 解析来源真实性
-    # ---------------------------------------------------------------
     def resolve(self, ref: SourceRef) -> dict:
-        """来源真实性/版本解析 (计划书 §6.2 第一项检查)。不推断内容支持。"""
+        """来源真实性/版本解析。不推断内容支持。"""
         if not self._store:
             return {"found": False, "failure": "知识底座不可用"}
         doc = self._store.get_document(ref.source_id) if ref.source_id else None

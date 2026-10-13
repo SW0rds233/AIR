@@ -1,25 +1,6 @@
 from __future__ import annotations
 
-"""文稿中间表示: WritingPacket / Manuscript / Block (合并计划 §6.2 / §8)。
-
-为什么单独建这一层
-------------------
-合并前有**两套**正文路径: 综述侧把"笔记字典"伪装成稿件, 理论侧在
-`rag/theory_render.py` 里渲染结构化事实并另写一份附录长文 —— 合并计划 §7.3 要求
-**退役"双正文"主路径**: 主文统一由 WritingAgent 形成, 证书留在附录。
-
-因此这里定义唯一的文稿表示:
-
-- `Block` 带**稳定 block ID**、段落角色 (`role`)、论断/来源/图表引用 (`claims`/
-  `sources`/`figures`) 与所依赖的对象版本 —— 这样"从稿件句子回到来源/推导"是可查的,
-  而不是靠再解析一段 Markdown;
-- `Manuscript` 带版本与快照引用; 所依赖快照过期时能明确标 stale (§6.1、§9.6);
-- `WritingPacket` 是写作**输入**契约: 任务画像 + 结果快照 + 来源/图表引用 +
-  审阅意见。它替代"综述字典": 后端不再靠字段名猜这是个什么任务。
-
-编号规则 (§6.3): 来源 ID/DOI/hash 是稳定身份; `[1]`、图 1 与公式编号**只在最终渲染
-时分配**。因此这里只保存引用关系, 不保存渲染出来的编号。
-"""
+"""文稿中间表示: WritingPacket / Manuscript / Block。"""
 
 from enum import Enum
 from typing import Any
@@ -78,7 +59,7 @@ class Block(BaseModel):
     #: 依赖的版本化对象 (论断/来源/图表/核验记录)。引用只带 id+version。
     refs: list[ObjectRef] = Field(default_factory=list)
     ref_kinds: list[str] = Field(default_factory=list)   # 与 refs 一一对应
-    #: 该块所依据的**对象版本** (read-set): 依据变化则该块 stale (§6.3)。
+    #: 该块所依据的**对象版本** (read-set): 依据变化则该块 stale。
     input_versions: dict[str, int] = Field(default_factory=dict)
     #: 待核查标记 (审阅问题定位到这里)。
     needs_check: bool = False
@@ -152,7 +133,7 @@ class Manuscript(BaseModel):
         return next((b for b in self.all_blocks() if b.block_id == block_id), None)
 
     def trace(self) -> dict[str, list[dict[str, Any]]]:
-        """段落 -> 依据 的追溯映射 (计划书 §6.1 的可反查要求)。"""
+        """段落 -> 依据 的追溯映射。"""
         out: dict[str, list[dict[str, Any]]] = {}
         for block in self.all_blocks():
             out[block.block_id] = [
@@ -162,7 +143,7 @@ class Manuscript(BaseModel):
         return out
 
     def stale_against(self, current_versions: dict[str, int]) -> list[str]:
-        """相对当前对象版本, 哪些块已过期 (§6.3: 模型换代使下游 stale)。"""
+        """相对当前对象版本, 哪些块已过期。"""
         stale: list[str] = []
         for block in self.all_blocks():
             for object_id, version in (block.input_versions or {}).items():
@@ -191,7 +172,7 @@ class Manuscript(BaseModel):
 
 
 class WritingPacket(BaseModel):
-    """写作输入契约 (合并计划 §3.1 的 `WritingPacket`)。
+    """写作输入契约。
 
     后端不再靠字段名猜任务类型: `subquestion_kinds`/`deliverables` 显式说明这是
     综述、理论结论还是验证建议, 章节结构由写作智能体按论证需要设计。
@@ -218,7 +199,7 @@ class WritingPacket(BaseModel):
     #: 审阅意见 (修订任务的输入)。
     review_issues: list[dict[str, Any]] = Field(default_factory=list)
     prior_manuscript: dict[str, Any] = Field(default_factory=dict)
-    #: 未决项: 写作不得掩盖未决, 必须如实写出来 (§12)。
+    #: 未决项: 写作不得掩盖未决, 必须如实写出来。
     unresolved: list[str] = Field(default_factory=list)
     snapshot_id: str = ""
     input_versions: dict[str, int] = Field(default_factory=dict)

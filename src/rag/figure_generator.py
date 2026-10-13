@@ -44,7 +44,7 @@ if _CN_FONT:
 
 
 #: 当前产物归属。修复前只有 run 身份一层 (`figures/<run>/`), 而文件名只是局部序号
-#: (`taxonomy_0.png`): 同一 run 里两张**不同**的图仍可能同名互相覆盖 (§3.3 G18)。
+#: (`taxonomy_0.png`): 同一 run 里两张**不同**的图仍可能同名互相覆盖。
 #: 现在归属是 `(run_id, task_id, artifact_version)` 三元组, 目录逐层下分。
 #: 用 ContextVar 而不是参数: 绘图函数有 8 个入口, 每个都加一个 scope 参数会把
 #: 归属信息散到调用链上; 而"这次是谁在画第几张图"本来就是环境事实。
@@ -94,14 +94,7 @@ def figure_scope() -> str:
 
 @contextmanager
 def figure_scope_bound(scope: str, *, task_id: str = "", artifact_version: str | int = ""):
-    """在 `with` 块内把图表产物归到 `(run, task, 产物版本)` 名下 (合并计划 §7.4 / §3.3 G18)。
-
-    为什么必须做: 图表文件名是**局部序号** (`taxonomy_0.png`、`framework_0.png`),
-    此前所有会话共用 `outputs/figures/`, 于是两个会话同时画图会互相覆盖对方的产物
-    ("两任务不串图表"是 M4 的退出条件之一)。只按 run 分一层还不够 —— 同一次运行里的
-    两张不同图仍会同名; 因此归属扩到任务与产物版本: `figures/<run>/<task>/v<version>/`。
-    未绑定任何身份时保持原来的扁平目录 (向后兼容旧调用点与测试)。
-    """
+    """在 `with` 块内把图表产物归到 `(run, task, 产物版本)` 名下。"""
     bound = FigureScope(run_id=str(scope or "").strip(),
                         task_id=str(task_id or "").strip(),
                         artifact_version=str(artifact_version or "").strip())
@@ -469,24 +462,7 @@ def parse_timeline_from_text(text: str) -> list[dict]:
 def generate_figures_from_notes(
     topic: str, lit_notes: str, verified_refs: list[dict] | None = None
 ) -> list[str]:
-    """从文献综述素材生成图表（**确定性模板**, 不再执行 LLM 生成的绘图脚本）
-
-    策略 (借鉴 PaperBanana + FigMirror + AI-Scientist 12 图上限):
-    1. 研究框架总览图 (framework, 分层框图模板)
-    2. 识别流水线图 (pipeline, 确定性流程框图)
-    3. 分类体系图 (taxonomy, 从素材解析出的结构)
-    4. 研究时间线图 (timeline, 从素材解析出的里程碑)
-    5. 出版趋势图 (trend, 确定性: 从 verified_refs 年份统计)
-    6. 主题×年份热力图 (heatmap, 确定性: 从 verified_refs 统计)
-    7. 方法对比图 (comparison, LLM 只提取**结构化数据**, 仍由本模块绘图)
-
-    为什么不再走"LLM 写 matplotlib 脚本 → 子进程执行" (§3.3 G18): 那条路径等于
-    让模型产出任意 Python 并执行, 进程隔离不等于权限隔离。绘图统一走本模块的
-    声明式实现; 方法对比数据仍可由模型提取, 但必须过 `_validate_comparison_data`
-    的结构/值域校验才会被画出来。
-
-    Returns: 生成的图片路径列表
-    """
+    """从文献综述素材生成图表（确定性模板, 不再执行 LLM 生成的绘图脚本）。"""
     paths: list[str] = []
     refs = verified_refs or []
 

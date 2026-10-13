@@ -7,17 +7,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-/**
- * 计划书 §2 F4: 用 Vite + TypeScript 组织前端, 构建产物由 FastAPI 提供。
- *
- * 产物布局 (源码目录保持"输入"语义, 不写入构建产物):
- * - `src/web/dist/`      构建输出 (构建后复制 assets, 再删除; 已被 .gitignore 忽略)
- * - `src/web/assets/`    构建后的 JS/CSS (提交进版本库, server.py 直接服务)
- * - `src/web/dist/index.html` 已构建页面, 由 server.py 优先提供
- *
- * 为什么不把构建结果写回 `src/web/index.html`: 那会让"源码"与"产物"混为一谈,
- * 第二次构建会把自己注入的 `/assets/...` 标签当成源码 import 而失败。
- */
+/** 构建产物写入 dist，并将带哈希的资源发布到 assets 供 FastAPI 提供。 */
 export default defineConfig({
   root: here,
   base: '/',
@@ -44,18 +34,7 @@ export default defineConfig({
   plugins: [
     {
       name: 'air-publish-assets',
-      /**
-       * 产物发布必须是**原子**的 (合并计划 §9.5 "构建发布")。
-       *
-       * 为什么不能"先删旧的再拷新的": 服务端在发布过程中随时可能响应用户 ——
-       * 旧哈希文件一旦被删、新文件还没拷全, 页面拿到的 `index.html` 会引用一个
-       * 不存在的脚本/CSS (表现为"样式没了/按钮全不响应")。
-       *
-       * 这里的做法利用一个事实: 产物名带内容哈希, **新旧文件名必然不同**, 因此
-       * 可以让两代产物同时存在 —— 先把新文件全部拷进去 (此时旧文件仍在, 页面
-       * 无论引用哪一代都能加载), 再删掉本代不再被引用的旧文件。任何时刻磁盘上
-       * 都有一份完整可用的产物。
-       */
+      /** 先发布新哈希资源，再清理旧资源，避免服务期间出现引用缺失。 */
       writeBundle() {
         const assets = resolve(here, 'dist', 'assets');
         const target = resolve(here, 'assets');

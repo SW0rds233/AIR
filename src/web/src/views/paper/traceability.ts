@@ -1,20 +1,8 @@
-/**
- * 稿件追溯面板: 论断 → 正文锚点 → 快照对象, 以及三个门槛的**独立**结论。
- *
- * 三条不可让步 (与 §9.6 一致):
- * - 门槛结论以 `manifest.json` 的字段为准, 页面不自己判断"通过"; 缺失显示"未知";
- * - 无法反查的论断必须**显式列出** (`unmapped_claims` / `missing_anchors` /
- *   `unlabeled_blocks`), 不能因为"看起来完整"就当作已追溯;
- * - 来源索引按交付包登记的 `source_set.documents` 显示, 不猜。
- *
- * 纯函数: 输入 manifest, 输出结构或 HTML; 取数与 DOM 装配在页面控制器。
- */
+/** 稿件追溯面板: 论断 → 正文锚点 → 快照对象, 以及三个门槛的独立结论。 */
 
 import { esc, type DeliveryManifestView } from './types';
 
-// ----------------------------------------------------------------------
 // 追溯表
-// ----------------------------------------------------------------------
 export interface TraceRow {
   claim_id: string;
   anchor: string;
@@ -86,7 +74,6 @@ export function traceStatusBadge(status: TraceRow['status']): string {
     `<span class="txt">${esc(label)}</span></span>`;
 }// ----------------------------------------------------------------------
 // 来源索引 (从稿件句子回到来源)
-// ----------------------------------------------------------------------
 export interface SourceIndexRow {
   source_id: string;
   title: string;
@@ -104,9 +91,7 @@ export function sourceIndex(manifest: DeliveryManifestView | null | undefined): 
   })).filter((row) => row.source_id || row.title);
 }
 
-// ----------------------------------------------------------------------
 // 渲染
-// ----------------------------------------------------------------------
 /** 门槛结论: 三个字段各自独立, 缺失显示"未知", 不默认通过。 */
 export function gateLabel(passed: boolean | null | undefined): string {
   if (passed === true) return '通过';

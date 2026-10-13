@@ -27,7 +27,7 @@ import {
 } from './state/research-store';
 import { renderTeamBoard } from './views/team-board';
 
-// 端点集中在 api/ 层 (§9.5): 这里只做语义命名, 不重复写 URL。
+// 端点集中在 api/ 层: 这里只做语义命名, 不重复写 URL。
 export const TEAM_API = {
   roles: ENDPOINTS.teamRoles,
   projection: (projectId: string, runId: string) =>
@@ -43,16 +43,14 @@ export function dispatchAction(action: Parameters<typeof dispatch>[0]): Research
   return dispatch(action);
 }
 
-// ----------------------------------------------------------------------
 // 数据加载 (带加载代号; 迟到响应丢弃)
-// ----------------------------------------------------------------------
 export interface LoadDeps {
   fetchJson?: (url: string) => Promise<any>;
   onNotice?: (text: string) => void;
 }
 
 async function defaultFetchJson(url: string): Promise<any> {
-  // 统一走 HTTP 客户端: URL/错误/取消/重试语义只在一处 (§9.5)。
+  // 统一走 HTTP 客户端: URL/错误/取消/重试语义只在一处。
   // 延迟取单例, 这样用例替换 `fetchImpl` 之后仍然生效。
   const { client } = await import('./api/research-client');
 
@@ -95,7 +93,7 @@ export function rolesAreLoaded(): boolean {
 /**
  * 读取某 run 的任务投影并合并进状态。
  *
- * **只读**: 这个函数不会启动/恢复任何任务 —— 计划书要求"查看不触发执行"。
+ * 只读：查看任务不会启动或恢复运行。
  * 返回 `false` 表示迟到的响应被丢弃 (身份已经切走)。
  */
 export async function loadRunProjection(
@@ -112,7 +110,7 @@ export async function loadRunProjection(
     deps.onNotice?.(`读取团队状态失败: ${String(error)}`);
     return false;
   }
-  // 加载期间身份被切走 -> 丢弃这份迟到结果 (§9.3)
+  // 加载期间身份被切走 -> 丢弃这份迟到结果
   const state = getState();
   if (token !== state.ui.loadToken
       || state.selection.projectId !== projectId
@@ -156,9 +154,7 @@ export async function loadRunProjection(
   return true;
 }
 
-// ----------------------------------------------------------------------
 // 渲染
-// ----------------------------------------------------------------------
 /** 需要重新渲染的面板 (供 controller 调用; 未传时渲染全部)。 */
 export function renderTeamSection(targets?: string[]): string {
   if (targets && targets.length && !targets.includes('team')
@@ -187,9 +183,7 @@ export function resetTeamStore(): void {
   dispatch({ type: 'transport/reset' });
 }
 
-// ----------------------------------------------------------------------
-// 页面接入 (§9.5: 把团队区块挂进 `#workbench`; `app.ts` 只调用)
-// ----------------------------------------------------------------------
+// 页面接入
 export interface TeamMountDeps {
   /** 用户可见提示 (读取失败不阻断旧工作台)。 */
   notify(text: string, cls?: string): void;
@@ -253,7 +247,7 @@ export function createTeamMount(deps: TeamMountDeps): TeamMount {
     deps.status?.('loading');
     await ensureRoles();
     const target = String(runId || getState().selection.runId || '');
-    // 身份进唯一 store (§8.1): 只有真的换了身份才整体切换, 否则一次普通刷新会
+    // 身份进唯一 store: 只有真的换了身份才整体切换, 否则一次普通刷新会
     // 把用户正展开的对象详情关掉。这里**不再**从 `window.AIR.research` 兼容同步。
     switchSelection({
       projectId,

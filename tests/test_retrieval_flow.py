@@ -134,6 +134,8 @@ class RetrievalFlowTest(unittest.TestCase):
             snapshot = snapshot_from_store(store, project_id="p", problem_id="q", run_id="r")
             self.assertEqual(snapshot.evidence[0].authors, PAPER["authors"])
             self.assertTrue(_source_set(None, snapshot)["queries"])
+            # 检索命中先是 insufficient；确认其作为相关工作后才能进入文献表。
+            rows[0]["relation"] = "background"
             packet = WritingPacket(main_question="Equidistant codes", sources=rows)
             source_id = rows[0]["source_id"]
             manuscript = _manuscript_from_payload({"sections": [

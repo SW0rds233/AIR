@@ -97,7 +97,7 @@ def _model_extra_body(model: str) -> dict | None:
 
 
 def _role_config(prefix: str) -> dict:
-    """理论研究角色模型配置: 未单独设置时回退主模型 (方案 §10)。"""
+    """理论研究角色模型配置: 未单独设置时回退主模型。"""
     model = os.getenv(f"{prefix}_MODEL", LLM_CONFIG["model"])
     return {
         "model": model,

@@ -1,17 +1,6 @@
 from __future__ import annotations
 
-"""ValidationPlanningAgent 验证方案 (合并计划 §3.1 / §7.1)。
-
-职责: 判断什么验证能区分竞争解释, 产出仿真/实验**实现建议**。
-提交 `ValidationPlan`: 变量/单位、参数来源、对照、指标、判据、预算与停止条件,
-并明确标注**未执行**。
-
-合并要点 (§7.1): `loop._act_design_experiment` + `experiments/planner.py/schemas.py/
-validator.py` 归这里; 当前的规则模板作草稿与校验, 增加按具体模型和缺口修订。
-
-硬约束: 本轮范围只到"实施建议" —— 不自动执行仿真/实验, 也不把查询到的数据
-写成新实验 (合并计划 §1 与 §11)。
-"""
+"""ValidationPlanningAgent 验证方案。"""
 
 from typing import Any
 
@@ -79,9 +68,7 @@ class ValidationPlanningAgent(AgentBase):
         plan: dict[str, Any] = {}
         parse_note = ""
         # 先把内核生成的规格 (若有) 作为草稿交给模型/规则细化。
-        # 合并计划 M2: 实验规格的**构造与拒绝判据**在
-        # `reasoning_kernel.validation_plan_for` —— 它保证 `executed=False`, 并在
-        # "既没有竞争预测也没有未闭义务"时拒绝生成, 不套模板充数。
+        # 规格构造与拒绝判据由 reasoning_kernel.validation_plan_for 负责。
         kernel_outcome = self.plan_via_kernel(task, context)
         if kernel_outcome is not None and not kernel_outcome.ok \
                 and kernel_outcome.payload.get("refused"):

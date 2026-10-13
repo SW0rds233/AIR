@@ -39,6 +39,13 @@ def citation_eligible(source: dict[str, Any]) -> bool:
             and bool(source.get("title") and source.get("authors") and source.get("year")))
 
 
+def research_citation_eligible(source: dict[str, Any]) -> bool:
+    """A verified publication still needs a usable relation to this research."""
+    relation = source.get("relation") or source.get("support") or ""
+    relation = getattr(relation, "value", relation)
+    return citation_eligible(source) and str(relation) != "insufficient"
+
+
 def _authors(value) -> str:
     names = value if isinstance(value, list) else re.split(r"\s*[,;；]\s*", str(value or ""))
     out = []

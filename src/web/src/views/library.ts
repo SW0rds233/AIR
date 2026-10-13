@@ -1,14 +1,4 @@
-/**
- * 资料工作区视图 (合并计划 §13.4「接口与前端」)。
- *
- * 两条必须守住的要求:
- * - **不显示系统绝对路径**: 后端只回 basename, 视图也只渲染它, 不做补全;
- * - **不把部分失败显示成成功**: `denied`/`failed`/截断必须出现在清单里, 并给出
- *   可执行的下一步, 而不是一句"导入完成"。
- *
- * 本模块是纯函数 (输入报告/登记表, 输出 HTML 与分组结构), 可直接在测试里断言;
- * 网络调用留在页面控制器里 (与 `refreshSourceSets` 同一分工)。
- */
+/** 资料工作区视图。 */
 
 import type {
   ImportedPathRow,
@@ -27,7 +17,7 @@ export function esc(text: unknown): string {
     .replace(/'/g, '&#39;');
 }
 
-/** 逐状态图标 + 文字 (状态不能只靠颜色区分, §9.6)。 */
+/** 逐状态图标 + 文字。 */
 export const PATH_STATUS: Record<string, { icon: string; label: string }> = {
   ok: { icon: '✓', label: '将入库' },
   imported: { icon: '＋', label: '新增入库' },
@@ -67,9 +57,7 @@ export function fileName(row: { path?: string }): string {
   return text || '(未命名)';
 }
 
-// ----------------------------------------------------------------------
 // 扫描预览 (先预览再确认)
-// ----------------------------------------------------------------------
 export interface ScanCounts {
   ok: number;
   skipped: number;
@@ -154,9 +142,7 @@ export function renderScanPreview(report: LibraryScanReport | null | undefined):
   return head + truncated + notes + deniedBlock + okBlock;
 }
 
-// ----------------------------------------------------------------------
 // 导入报告
-// ----------------------------------------------------------------------
 function importedRowHtml(row: ImportedPathRow): string {
   const bits = [
     row.pages ? `${row.pages} 页` : '',
@@ -215,11 +201,9 @@ export function renderImportReport(report: LibraryImportReport | null | undefine
   return head + verdict + binding + truncated + notes + blocks;
 }
 
-// ----------------------------------------------------------------------
 // 资料工作区 (库分组)
-// ----------------------------------------------------------------------
 export interface LibraryGroup {
-  /** 来源类型: path_import / managed / upload (§13.3 数据模型扩展)。 */
+  /** 来源类型: path_import / managed / upload。 */
   origin: string;
   label: string;
   items: LibraryDetail[];

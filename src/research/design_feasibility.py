@@ -1,17 +1,6 @@
 from __future__ import annotations
 
-"""2-(v,k,λ) 设计的可行性判定与命题化 (计划书 §4 S2)。
-
-只做**与构造无关的必要条件**: 计数整除、Fisher 不等式、对称性、Bruck–Ryser–Chowla。
-结论三态: nonexistent(必要条件被违反) / necessary_met(必要条件满足, 存在性未定) /
-insufficient(信息不足)。**任何情况下都不把计数吻合当作存在**。
-
-本模块不含任何具体题目的常量: 输入是 (v,k,λ[,b,r]), 判定逻辑对全部参数通用。
-
-每条判定都带**出处要求**: 记录它引用的经典必要性定理 (名称 + 形式陈述 + 输入 + 结论),
-使"结论"能逐条反查到定理, 而不是空口断言。判定结果可转成可复核证书
-(`FeasibilityReport.evidence` / `certificate_json`) 供规则型义务验收使用。
-"""
+"""2-(v,k,λ) 设计的可行性判定与命题化。"""
 
 import hashlib
 import json
@@ -479,9 +468,7 @@ def _factor_text(n: int) -> str:
     return " × ".join(parts) or str(n)
 
 
-# ---------------------------------------------------------------------------
 # S1 抽取: 从自然语言题面取出计数约束 (通用词表, 不含任何具体题目数值)
-# ---------------------------------------------------------------------------
 
 _OBJECTS = r"(?:节点|对象|样点|样本|元素|点|设备|台站|处理|品种|nodes?|objects?|points?|elements?|treatments?|varieties)"
 _BLOCKS = r"(?:轮|组|块|批|次|blocks?|rounds?|groups?|plots?)"
@@ -564,9 +551,7 @@ def feasibility_from_text(text: str) -> FeasibilityReport | None:
     return check(params) if params is not None else None
 
 
-# ---------------------------------------------------------------------------
 # S1 命题化: 判定 → 命题 + 必要性义务 (可复核证书 + 来源要求)
-# ---------------------------------------------------------------------------
 
 # 义务验收方式: 由确定性规则按证书关闭 (nonexistent 才允许关闭)
 ACCEPTANCE_METHOD = "design_necessity"

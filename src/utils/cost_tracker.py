@@ -68,14 +68,7 @@ def extract_usage_metadata(result) -> dict | None:
 
 
 class UsageTracker:
-    """简单的进程内用量累计器
-
-    **归属**: 这是一个"归属可绑定"的累计器 —— 模块级单例
-    (`tracker`) 只是没有绑定会话时的默认出口。一个会话启动时用
-    `bind_session_tracker()` 在本线程 (及其派生线程, ContextVar 会继承) 上绑定
-    自己的实例, 于是"两会话同时研究"不会互相把用量算进对方的成本报告。
-    此前只有一个全局实例, 于是每个 run 的成本报告都是**历史累计**。
-    """
+    """简单的进程内用量累计器。"""
 
     def __init__(self):
         self.calls: list[dict] = []
@@ -190,7 +183,7 @@ class _TrackerProxy:
     """把模块级名字 `tracker` 变成"当前生效的累计器"的转发。
 
     这样各处 `from src.utils.cost_tracker import tracker` 的写法不必改动, 也**不会**
-    在 import 时就把会话归属定死 (计划书 §7.4 要求按 run/project 绑定用量)。
+    在 import 时就把会话归属定死。
     """
 
     def add_call(self, *args, **kwargs):

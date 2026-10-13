@@ -250,7 +250,7 @@ python -m src.main --request "研究信道变化如何影响射频指纹可分�
 | `DELETE /api/library/{source_set_id}` | 只解除**该库**登记；**不删除用户原文件**，也不清空共享向量库 |
 
 安全规则（程序强制，不靠提示词）：只接受位于授权根（`data/`、`outputs/` 或
-`DATA_READ_ROOTS` 显式放行项）之下的路径；通过本机文件夹选择窗口选中的目录会获得 15 分钟的临时授权，供扫描和导入使用，网页请求不能自行扩展授权根 —— 请求体里的 `allow_roots` **已废弃**，传非空值会被 **HTTP 400** 拒绝并提示替代做法（不再静默忽略，否则调用方只会看到"全部被拒"而不知原因）。`.env`、`*.pem/*.key/*.pfx`、`.ssh/`、`.git/`、
+`DATA_READ_ROOTS` 显式放行项）之下的路径；通过本机文件夹选择窗口选中的目录会获得 15 分钟的临时授权，供扫描和导入使用，网页请求不能自行扩展授权根。`.env`、`*.pem/*.key/*.pfx`、`.ssh/`、`.git/`、
 `.aws/`、`credentials*`、`node_modules/`、`.venv/` 即使在被授权根内也一律拒绝；符号链接
 越界即拒绝；默认上限 500 文件 / 2 GB，超限标记 `truncated` 而不是静默截断。
 
@@ -359,7 +359,7 @@ AIR/
 │       │   └── team-controller.ts  # 团队视图接入 (只读, 单向同步旧状态)
 │       ├── assets/          #   构建出的 JS/CSS (入库, server.py 从这里提供)
 │       └── dist/            #   构建出的页面 (不入库, 新克隆需 npm run build, 见「快速开始」)
-├── docs/                    # 项目文档 (进度.md / 计划书.md / 合并计划.md / 会话资料存储.md / writer-paper-workflow.md)
+├── docs/                    # 项目文档 (进度.md / 计划书.md / 合并计划.md / 会话资料存储.md)
 ├── evals/                   # 验收用例 (cases/) 与审查报告归档 (reports/)
 ├── data/                    # 运行时数据 (conversations/<会话ID>/literature/ | kb/ | pdfs/ | chroma/ | research/ | checkpoints/)
 ├── outputs/                 # 统一团队产物 (研究包按 project/snapshot 隔离)

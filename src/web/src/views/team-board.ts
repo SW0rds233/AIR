@@ -1,16 +1,4 @@
-/**
- * 团队状态条与任务详情 (合并计划 §9.2「团队状态条」/ §9.6)。
- *
- * 展示的是**后端产生的**任务与研究记录: 视图不推断科学结论, 也不在页面里另做一套
- * 主控调度。要点:
- * - 一个角色一行 (同一角色多个任务显示**任务数**, 而不是重复头像);
- * - 状态不能只靠颜色区分 —— 每行同时给出文字与图标;
- * - 未知/未同步状态显式显示"未知/待同步", 不假报百分比 (§9.4);
- * - 任务详情展示: 目标、要回答的子问题、预期新信息、依赖、验收标准、失败处理、
- *   实际用量与失败原因 (失败/受阻必须能看到原因, 而不是空白)。
- *
- * 本模块是纯函数 (输入 store/行数据, 输出 HTML 字符串), 可直接在测试里断言。
- */
+/** 团队状态条与任务详情。 */
 
 import type {
   ResearchStore,
@@ -51,9 +39,7 @@ export function statusBadge(status: string): string {
     `<span class="icon" aria-hidden="true">${icon}</span><span class="txt">${esc(label)}</span></span>`;
 }
 
-// ----------------------------------------------------------------------
 // 角色能力卡 (来自 /api/team/roles)
-// ----------------------------------------------------------------------
 export function renderRoleCapability(role: TeamRoleRow): string {
   const unavailable = (role.unavailable ?? []);
   const available = (role.available ?? []);
@@ -82,9 +68,7 @@ export function renderRoleCapabilities(roles: TeamRoleRow[]): string {
   return `<div class="role-grid">${roles.map(renderRoleCapability).join('')}</div>`;
 }
 
-// ----------------------------------------------------------------------
 // 团队状态条
-// ----------------------------------------------------------------------
 export function renderRoleStatusBar(statuses: RoleStatus[]): string {
   if (!statuses.length) {
     return '<div class="empty">当前运行还没有任务记录</div>';
@@ -106,9 +90,7 @@ export function renderRoleStatusBar(statuses: RoleStatus[]): string {
   return `<div class="team-statusbar">${rows.join('')}</div>`;
 }
 
-// ----------------------------------------------------------------------
 // 主控决策摘要
-// ----------------------------------------------------------------------
 export function renderSupervisorHeader(store: ResearchStore): string {
   const decision = latestDecision(store);
   const runId = currentRunId(store);
@@ -157,9 +139,7 @@ export function renderSupervisorHeader(store: ResearchStore): string {
   return parts.join('');
 }
 
-// ----------------------------------------------------------------------
 // 任务列表与详情
-// ----------------------------------------------------------------------
 export function renderTaskRow(task: TeamTaskRow): string {
   const status = String(task.status || 'unknown');
   return (
@@ -212,9 +192,7 @@ export function renderTaskDetail(task: TeamTaskRow): string {
   );
 }
 
-// ----------------------------------------------------------------------
 // 审阅与返工
-// ----------------------------------------------------------------------
 export function renderIssuePanel(store: ResearchStore): string {
   const issues = Object.values(store.entities.issues);
   const blocking = blockingIssues(store);
@@ -240,9 +218,7 @@ export function renderIssuePanel(store: ResearchStore): string {
   );
 }
 
-// ----------------------------------------------------------------------
 // 整块装配
-// ----------------------------------------------------------------------
 export function renderTeamBoard(store: ResearchStore): string {
   const statuses = roleStatuses(store);
   const tasks = visibleTasks(store);

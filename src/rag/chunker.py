@@ -19,8 +19,7 @@ def chunk_text_offsets(text: str, chunk_size: int = 500,
                        overlap: int = 100) -> list[tuple[int, int]]:
     """与 `chunk_text` 相同的切分逻辑, 但返回每块在 `text` 中的 (start, end) 偏移。
 
-    偏移是**精确字符范围**, 用于把片段定位回原文 (计划书 §6.1-3:
-    片段应记录实际起止页/字符范围)。`start` 已对齐到 `chunk_text` 里 strip 之后
+    偏移是精确字符范围，用于把片段定位回原文。`start` 已对齐到 `chunk_text` 里 strip 之后
     的首字符, 因此 `text[start:end] == chunk_text(...)[i]`。
     """
     stripped = text.strip()
