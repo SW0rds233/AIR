@@ -1640,6 +1640,13 @@ def get_conversation(session_id: str):
     record = load_conversation(session_id)
     if record is None:
         raise HTTPException(404, "会话不存在")
+    bound = str(record.get("bound_source_set_id") or "").strip()
+    if bound:
+        from src.kb.store import default_db_path, topic_dir
+
+        canonical_id = topic_dir(bound).name
+        if canonical_id != bound and default_db_path(canonical_id).is_file():
+            record = {**record, "bound_source_set_id": canonical_id}
     return record
 
 

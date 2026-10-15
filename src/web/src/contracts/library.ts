@@ -68,6 +68,8 @@ export interface LibraryImportReport {
   /** 当前对话绑定成功后的会话 ID；未选历史会话时为空。 */
   bound_session_id?: string;
   binding_error?: string;
+  /** 与 /api/sources 列表一致的规范库 ID；topic 保留用户输入原文。 */
+  source_set_id?: string;
 }
 
 /** `GET /api/library/{source_set_id}` 的返回 (`library_summary`)。 */
