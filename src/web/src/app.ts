@@ -749,7 +749,14 @@ function handleEvent(ev: any) {
   switch (ev.type) {
     case 'connected': break;
     case 'node':
-      addMsg(ev.text, 'msg-node');
+      {
+        const kind = String(ev.team_event?.event || '');
+        const cls = kind.startsWith('llm_') ? 'msg-llm'
+          : kind.startsWith('tool_') ? 'msg-tool' : 'msg-node';
+        // Usage counters and internal bookkeeping are available in the event
+        // journal, but should not flood the conversation.
+        if (!['llm_call', 'capability_granted'].includes(kind)) addMsg(ev.text, cls);
+      }
       if (ev.research) updateRunHint(ev.research);
       if (ev.name === 'research_team' && ev.team_event) {
         const source = ev.team_event;

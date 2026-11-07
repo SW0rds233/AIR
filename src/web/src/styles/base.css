@@ -112,6 +112,10 @@
   .msg-user .avatar { background: var(--primary-soft); color: var(--primary); }
   .msg-node { opacity: .8; font-size: 12px; }
   .msg-node .bubble { background: transparent; padding: 2px 0; color: var(--muted); }
+  .msg-llm .bubble { background: #eef2ff; color: #27346d; border-left: 3px solid #5367d7; }
+  .msg-llm .avatar { background: #dfe6ff; color: #27346d; }
+  .msg-tool .bubble { background: #edf7f1; color: #185737; border-left: 3px solid #3b9a65; }
+  .msg-tool .avatar { background: #dbf0e3; color: #185737; }
   .msg-error .bubble { background: var(--danger-soft); color: var(--danger); }
   .msg-done .bubble { background: var(--success-soft); color: var(--success); }
   .msg-system .bubble { background: var(--warn-soft); color: var(--warn); }

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,42 @@ def _atomic_text(path: Path, content: str) -> None:
     finally:
         if os.path.exists(name):
             os.unlink(name)
+
+
+def append_run_event(*, project_id: str, problem_id: str, run_id: str,
+                     kind: str, payload: dict[str, Any]) -> Path:
+    """Durable, bounded event record independent of the final package/SSE buffer."""
+    root = progress_dir(project_id, run_id)
+    root.mkdir(parents=True, exist_ok=True)
+    identity = root / "progress.json"
+    if not identity.exists():
+        _atomic_text(identity, json.dumps({
+            "project_id": project_id, "problem_id": problem_id,
+            "run_id": run_id, "stage": "running",
+            "note": "运行事件已开始记录；研究对象将在任务提交后更新",
+        }, ensure_ascii=False, indent=2))
+    def compact(value: Any, depth: int = 0) -> Any:
+        if depth > 3:
+            return "[嵌套内容已省略]"
+        if isinstance(value, str):
+            return value[:2000]
+        if isinstance(value, dict):
+            return {str(key)[:80]: ("[已隐藏]" if any(secret in str(key).lower()
+                    for secret in ("password", "api_key", "token", "secret", "credential"))
+                    else compact(item, depth + 1))
+                    for key, item in list(value.items())[:30]}
+        if isinstance(value, (list, tuple)):
+            return [compact(item, depth + 1) for item in value[:20]]
+        return value if isinstance(value, (int, float, bool)) or value is None else str(value)[:300]
+    record = {"at": datetime.now(timezone.utc).isoformat(),
+              "project_id": project_id, "problem_id": problem_id,
+              "run_id": run_id, "event": kind, "payload": compact(payload)}
+    path = root / "events.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    return path
 
 
 def write_plan_progress(*, project_id: str, problem_id: str, run_id: str,

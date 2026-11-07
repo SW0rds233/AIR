@@ -82,6 +82,23 @@ def describe_node(node_name: str, node_state: dict) -> str:
             return f"[团队] {agent} 开始: {state.get('objective', '')}"[:180]
         if event == "task_result":
             return f"[团队] {agent} 结果: {state.get('outcome', '')}"[:180]
+        if event == "llm_started":
+            return f"[{agent or '模型'} · 模型] 正在生成本步骤的回应…"
+        if event == "llm_result":
+            preview = str(state.get("output_preview") or "").strip()
+            tools = ", ".join(state.get("tool_names") or [])
+            return (f"[{agent or '模型'} · 模型] " +
+                    (f"请求工具: {tools}" if tools else
+                     f"可见输出摘要: {preview or '(无文本输出)'}") +
+                    ("…（已截断）" if state.get("truncated") else ""))[:1800]
+        if event == "llm_error":
+            return f"[{agent or '模型'} · 模型] 调用失败: {state.get('error', '')}"[:350]
+        if event == "tool_started":
+            return f"[{agent or '智能体'} · 工具] 调用 {state.get('tool', '')}: {state.get('arguments', {})}"[:500]
+        if event == "tool_run":
+            return (f"[{agent or '智能体'} · 工具] {state.get('tool', '')} "
+                    f"{state.get('status', '')} ({state.get('elapsed_ms', 0)} ms): "
+                    f"{state.get('error') or state.get('result_preview') or ''}")[:700]
         if event == "supervisor_decision":
             return (f"[主控] 第 {state.get('round', '?')} 轮决策: "
                     f"{state.get('decision', '')} — {state.get('reason', '')}")[:200]

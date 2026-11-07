@@ -26,7 +26,12 @@ def event_to_message(event: dict[str, Any]) -> dict[str, Any] | None:
     """
     kind = event.get("type")
     if kind in ("node", "log"):
-        return {"role": "node", "text": event.get("text", "")}
+        team_kind = str((event.get("team_event") or {}).get("event") or "")
+        if team_kind in ("llm_call", "capability_granted"):
+            return None
+        role = ("llm" if team_kind.startswith("llm_") else
+                "tool" if team_kind.startswith("tool_") else "node")
+        return {"role": role, "text": event.get("text", "")}
     if kind == "interrupt":
         payload = event.get("payload") or {}
         return {
