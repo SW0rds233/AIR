@@ -53,8 +53,9 @@ class TeamApp:
         while not self.session.team.loop.finished:
             before = len(self.session.bridge.events)
             keep_going = self.session.team.step()
-            for record in self.session.bridge.events[before:]:
-                yield {"research_team": self._node_state(record)}
+            if not self.session.live_events:
+                for record in self.session.bridge.events[before:]:
+                    yield {"research_team": self._node_state(record)}
 
             if self.session._clarification_pending():
                 payload = self.session._clarify_payload()
@@ -200,8 +201,25 @@ class TeamSession:
     def __init__(self, team: TeamRun, *, emit=None, sink=None) -> None:
         self.team = team
         self.events: list[dict[str, Any]] = []
-        # 即使没有外部接收者，也要记录团队事件供 stream() 逐轮产出。
-        outlet = emit if emit is not None else self.events.append
+        # UI sessions publish immediately; waiting for team.step() hid in-task work.
+        self.live_events = emit is not None
+        def outlet(record: dict[str, Any]) -> None:
+            if emit is None:
+                self.events.append(record)
+                return
+            from src.graph.node_progress import describe_node
+            from src.research.progress import append_run_event
+
+            state = TeamApp._node_state(record)
+            try:
+                append_run_event(project_id=team.project_id, problem_id=team.problem_id,
+                                 run_id=team.run_id, kind=record["type"],
+                                 payload=record.get("payload") or {})
+            except Exception as exc:
+                emit({"type": "log", "text": f"过程日志写盘失败: {exc}"})
+            emit({"type": "node", "name": "research_team",
+                  "text": describe_node("research_team", state),
+                  "team_event": state, "run_id": team.run_id})
         self.bridge = _EventBridge(outlet)
         original = team.runtime.sink
         bridge = self.bridge

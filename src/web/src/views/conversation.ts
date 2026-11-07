@@ -25,7 +25,7 @@ const STATE_LABEL: Record<string, string> = {
 
 const MESSAGE_CLASS: Record<string, string> = {
   user: 'msg-user', node: 'msg-node', done: 'msg-done', error: 'msg-error',
-  stopped: 'msg-agent',
+  stopped: 'msg-agent', llm: 'msg-llm', tool: 'msg-tool',
 };
 
 function esc(raw: unknown): string {
@@ -55,6 +55,8 @@ export function messageAvatar(message: ConversationMessage | null): string {
   const role = String((message || {}).role || '');
   if (role === 'user') return '我';
   if (role === 'node') return '·';
+  if (role === 'llm') return '思';
+  if (role === 'tool') return '工';
   return 'AI';
 }
 

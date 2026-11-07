@@ -201,7 +201,8 @@ class BudgetedLLM:
 
     def __init__(self, inner, usage: UsageRecord, budget: TaskBudget,
                  cancel: CancelToken | None = None, task_id: str = "",
-                 stage: str = "team", *, on_usage: Callable[[dict], None] | None = None):
+                 stage: str = "team", *, on_usage: Callable[[dict], None] | None = None,
+                 on_event: Callable[[str, dict], None] | None = None):
         self._inner = inner
         self.usage = usage
         self.budget = budget
@@ -209,6 +210,14 @@ class BudgetedLLM:
         self._task_id = task_id
         self._stage = stage
         self._on_usage = on_usage
+        self._on_event = on_event
+
+    def bind_tools(self, tools, **kwargs):
+        """Keep progress and accounting hooks when LangChain binds tools."""
+        bound = self._inner.bind_tools(tools, **kwargs)
+        return BudgetedLLM(bound, self.usage, self.budget, self._cancel,
+                           self._task_id, self._stage, on_usage=self._on_usage,
+                           on_event=self._on_event)
 
     def invoke(self, *args, **kwargs):
         if self._cancel is not None:
@@ -216,8 +225,27 @@ class BudgetedLLM:
         over = self.budget.exceeded_by(self.usage)
         if over:
             raise TaskCancelled(f"预算已用尽 ({'; '.join(over)})")
-        result = self._inner.invoke(*args, **kwargs)
+        if self._on_event:
+            self._on_event("llm_started", {"task_id": self._task_id, "agent": self._stage})
+        try:
+            result = self._inner.invoke(*args, **kwargs)
+        except Exception as exc:
+            if self._on_event:
+                self._on_event("llm_error", {"task_id": self._task_id,
+                                              "agent": self._stage,
+                                              "error": f"{type(exc).__name__}: {exc}"[:300]})
+            raise
         self._account(result)
+        if self._on_event:
+            content = _public_model_preview(result)
+            calls = getattr(result, "tool_calls", None) or []
+            self._on_event("llm_result", {
+                "task_id": self._task_id, "agent": self._stage,
+                "output_preview": content[:1600],
+                "truncated": len(content) > 1600,
+                "tool_names": [str(call.get("name") or "") for call in calls
+                               if isinstance(call, dict)],
+                "note": "模型可见输出摘要；不包含未提供的内部推理"})
         return result
 
     def _account(self, result) -> None:
@@ -266,11 +294,13 @@ class ToolLoop:
     """
 
     def __init__(self, tools: list[ToolSpec], *, max_rounds: int = 3,
-                 result_budget: int = 6000, sink: ObservationSink | None = None):
+                 result_budget: int = 6000, sink: ObservationSink | None = None,
+                 agent: str = ""):
         self.tools = {t.name: t for t in tools}
         self.max_rounds = max(1, max_rounds)
         self.result_budget = result_budget
         self.sink = sink or _NullSink()
+        self.agent = agent
         self.observations: list[ToolObservation] = []
 
     def run(self, llm, messages: list, *, grant: CapabilityGrant | None = None,
@@ -307,11 +337,17 @@ class ToolLoop:
             if not calls:
                 break
             for call in calls:
+                name = str(call.get("name") or "")
+                self.sink.event("tool_started", {
+                    "task_id": task_id, "agent": self.agent, "tool": name,
+                    "arguments": _safe_tool_arguments(call.get("args"))})
                 observation = self._execute(call, grant=grant)
                 self.observations.append(observation)
                 self.sink.event("tool_run", {
-                    "task_id": task_id, "tool": observation.name,
+                    "task_id": task_id, "agent": self.agent, "tool": observation.name,
                     "status": observation.status, "elapsed_ms": observation.elapsed_ms,
+                    "result_preview": observation.to_dict()["result_preview"],
+                    "error": observation.error[:300],
                 })
                 messages.append(ToolMessage(
                     content=observation_text(observation, self.result_budget),
@@ -373,6 +409,32 @@ def _content_of(result) -> str:
         return "".join(str(part.get("text", part) if isinstance(part, dict) else part)
                        for part in content)
     return str(content or "")
+
+
+def _public_model_preview(result) -> str:
+    """Only the model's visible answer, never provider-private reasoning fields."""
+    import re
+
+    content = getattr(result, "content", "")
+    if isinstance(content, list):
+        text = "".join(str(part.get("text") or "") for part in content
+                       if isinstance(part, dict) and part.get("type", "text") == "text")
+    else:
+        text = str(content or "")
+    text = re.sub(r"<think\b[^>]*>.*?</think\s*>", "", text,
+                  flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<think\b[^>]*>.*$", "", text,
+                  flags=re.IGNORECASE | re.DOTALL)
+    return text.strip()
+
+
+def _safe_tool_arguments(value: Any) -> dict[str, str]:
+    """Small, redacted UI preview; never journal credentials or whole documents."""
+    if not isinstance(value, dict):
+        return {}
+    return {str(key)[:60]: ("[已隐藏]" if any(s in str(key).lower()
+             for s in ("key", "token", "secret", "password", "credential"))
+             else str(item)[:200]) for key, item in list(value.items())[:8]}
 
 
 def observation_text(observation: ToolObservation, budget: int = 6000) -> str:
@@ -528,7 +590,8 @@ class AgentRuntime:
         return BudgetedLLM(inner, usage, task.budget, self.cancel, task.task_id,
                            stage=stage or task.agent,
                            on_usage=lambda rec: self.emit("llm_call", {
-                               "task_id": task.task_id, "agent": task.agent, **rec}))
+                               "task_id": task.task_id, "agent": task.agent, **rec}),
+                           on_event=self.emit)
 
     def llm_available(self, stage: str = "") -> bool:
         """是否真的有可用模型。

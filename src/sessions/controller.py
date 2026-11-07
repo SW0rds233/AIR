@@ -116,6 +116,17 @@ class Session:
     def emit(self, event: dict):
         """登记一个事件: 序号 → 实时队列 → 可重放日志 → (按需) 会话历史。"""
         record = self.event_stream.append(event)
+        if event.get("type") in ("stopped", "error") and self.run_id:
+            try:
+                from src.research.progress import append_run_event
+
+                append_run_event(
+                    project_id=str((self.request or {}).get("project_id") or self.session_id),
+                    problem_id=str((self.request or {}).get("problem_id") or ""),
+                    run_id=self.run_id, kind=str(event["type"]),
+                    payload={"message": str(event.get("message") or "")[:500]})
+            except Exception:
+                pass  # Session termination must not be blocked by diagnostics.
         message = event_to_message(event)
         if message is None:
             return record        # 已进日志/队列, 但不占会话历史 (例如 connected 心跳)

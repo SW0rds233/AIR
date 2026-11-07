@@ -288,7 +288,7 @@ class AgentBase:
                   ) -> tuple[str, list[Any]]:
         """跑一次有界工具循环 (仅在 LLM 可用时调用)。"""
         loop = ToolLoop(tools, max_rounds=max_rounds or runtime.max_tool_rounds,
-                        sink=runtime.sink)
+                        sink=runtime.sink, agent=self.role)
         llm = runtime.llm(task, usage, stage=self.role)
         text, observations = loop.run(llm, messages, grant=grant, cancel=runtime.cancel,
                                      task_id=task.task_id, usage=usage, budget=task.budget)
