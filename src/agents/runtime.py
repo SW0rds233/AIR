@@ -428,13 +428,14 @@ def _public_model_preview(result) -> str:
     return text.strip()
 
 
-def _safe_tool_arguments(value: Any) -> dict[str, str]:
-    """Small, redacted UI preview; never journal credentials or whole documents."""
+def _safe_tool_arguments(value: Any) -> dict[str, Any]:
+    """Small, recursively redacted tool preview."""
     if not isinstance(value, dict):
         return {}
-    return {str(key)[:60]: ("[已隐藏]" if any(s in str(key).lower()
-             for s in ("key", "token", "secret", "password", "credential"))
-             else str(item)[:200]) for key, item in list(value.items())[:8]}
+    from src.utils.event_redaction import redact_event_value
+
+    return redact_event_value(dict(list(value.items())[:8]), max_chars=200,
+                              max_items=8)
 
 
 def observation_text(observation: ToolObservation, budget: int = 6000) -> str:

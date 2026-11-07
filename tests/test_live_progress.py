@@ -6,8 +6,9 @@ from types import SimpleNamespace
 from langchain_core.messages import AIMessage
 
 from src.agents.protocol import TaskBudget, UsageRecord
-from src.agents.runtime import BudgetedLLM, ToolLoop, ToolSpec
+from src.agents.runtime import BudgetedLLM, ToolLoop, ToolSpec, _safe_tool_arguments
 from src.graph.team_session import TeamApp, TeamSession
+from src.research.progress import append_run_event
 
 
 def test_bound_llm_emits_visible_output_but_not_private_reasoning():
@@ -52,6 +53,33 @@ def test_tool_progress_distinguishes_start_and_result():
     assert [kind for kind, _ in events] == ["tool_started", "tool_run"]
     assert events[0][1]["arguments"] == {"query": "paper"}
     assert events[1][1]["result_preview"] == "找到资料"
+
+
+def test_tool_credentials_are_redacted_in_ui_and_journal(tmp_path, monkeypatch):
+    from src import config
+
+    monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path)
+    arguments = {
+        "key": "sk-plain-key-111", "Authorization": "Bearer sk-auth-222",
+        "headers": {"Authorization": "Bearer sk-hdr-333"},
+        "env": "OPENAI_API_KEY=sk-env-444", "apiKey": "sk-camel-777",
+        "passwd": "pw-999", "query": "Bearer sk-query-12345",
+    }
+    emitted = []
+    team = SimpleNamespace(project_id="p", problem_id="q", run_id="r",
+                           runtime=SimpleNamespace(sink=SimpleNamespace(event=lambda *args: None)))
+    TeamSession(team, emit=emitted.append)
+    team.runtime.sink.event("tool_started", {"arguments": arguments})
+    append_run_event(project_id="p", problem_id="q", run_id="direct",
+                     kind="tool_started", payload={"arguments": arguments})
+
+    visible = json.dumps(_safe_tool_arguments(arguments), ensure_ascii=False)
+    live = json.dumps(emitted, ensure_ascii=False)
+    journal = (tmp_path / "research" / "p" / "direct" / "progress" /
+               "events.jsonl").read_text(encoding="utf-8")
+    for secret in ("sk-plain-key-111", "sk-auth-222", "sk-hdr-333",
+                   "sk-env-444", "sk-camel-777", "pw-999", "sk-query-12345"):
+        assert secret not in visible + live + journal
 
 
 def test_team_event_reaches_ui_before_task_finishes_and_is_durable(tmp_path, monkeypatch):
