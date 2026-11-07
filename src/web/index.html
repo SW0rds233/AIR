@@ -40,7 +40,7 @@
 </header>
 
 <details class="adv">
-  <summary>高级选项（精确主题 / 项目与预算 / 资料范围 · 可选）</summary>
+  <summary>高级选项（精确主题 / 项目与预算 / 审阅门槛 · 可选）</summary>
   <!--
     统一入口 (本轮迁移): 这里**不再有运行模式选择器**。
     用户只描述研究, 由服务端决定用什么研究引擎; `mode` 只作为后端返回值用于显示。
@@ -70,31 +70,34 @@
     </label>
     <button class="ghost" id="btn-copy-projid">复制项目 ID</button>
   </div>
-  <div class="adv-row" id="sourcerow">
-    <label>资料库（研究将只使用它）
-      <select id="sourceset">
-        <option value="">（不绑定，按主题名匹配）</option>
-      </select>
-    </label>
-    <button class="ghost" id="btn-refresh-sources">刷新资料库</button>
-    <span class="wb-note" id="sourceinfo"></span>
-  </div>
-  <div class="adv-row" id="policyrow">
-    <label>检索范围
-      <select id="sourcepolicy"
-              title="只用指定资料=仅授权库；自主检索=按方向到外部库检索；两者结合">
-        <option value="user_kb">只用指定资料</option>
-        <option value="autonomous">自主检索</option>
-        <option value="both" selected>两者结合（默认）</option>
-      </select>
-    </label>
-    <span class="wb-note" id="policyhint">自主检索会访问外部文献库，产生检索与费用</span>
+  <div class="adv-row">
     <label>审阅通过分数
       <input id="reviewthreshold" type="number" min="0" max="100" step="1" value="80"
              title="无原则性错误且评分达到该值才通过；科学逻辑和引文重大错误直接大修">
     </label>
   </div>
 </details>
+
+<section class="research-scope" aria-label="研究资料范围">
+  <div class="scope-field">
+    <label for="sourceset">资料库</label>
+    <select id="sourceset">
+      <option value="">（不绑定，按主题名匹配）</option>
+    </select>
+    <button class="ghost" id="btn-refresh-sources" type="button">刷新</button>
+  </div>
+  <div class="scope-field">
+    <label for="sourcepolicy">检索范围</label>
+    <select id="sourcepolicy"
+            title="只用指定资料=仅授权库；自主检索=按方向到外部库检索；两者结合">
+      <option value="user_kb">只用指定资料</option>
+      <option value="autonomous">自主检索</option>
+      <option value="both" selected>两者结合（默认）</option>
+    </select>
+  </div>
+  <span class="scope-info" id="sourceinfo" aria-live="polite"></span>
+  <span class="scope-hint" id="policyhint">自主检索会访问外部文献库，产生检索与费用</span>
+</section>
 
 <main>
   <div class="panel chat">
@@ -105,7 +108,7 @@
     </div>
     <div id="log"></div>
     <div id="inputbar">
-      <textarea id="reply" rows="1" placeholder="用一句话描述研究（建议含英文检索形式/缩写），回车发送"></textarea>
+      <textarea id="reply" rows="1" placeholder="用中文描述研究问题；系统会扩展中英文检索词。回车启动"></textarea>
       <button id="btn-send">启动</button>
       <button id="btn-stop" class="danger" disabled>停止</button>
     </div>
@@ -158,7 +161,7 @@
         <button class="tab" data-tab="workbench" role="tab" aria-selected="false">科研工作台</button>
         <button class="tab" data-tab="library" role="tab" aria-selected="false">资料库</button>
         <button class="tab" data-tab="paper" role="tab" aria-selected="false">论文与追溯</button>
-        <button class="tab" data-tab="files" role="tab" aria-selected="false">outputs/ 文件</button>
+        <button class="tab" data-tab="files" role="tab" aria-selected="false">运行文件</button>
       </div>
     </div>
     <div id="preview" role="tabpanel">
