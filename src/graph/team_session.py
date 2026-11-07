@@ -156,7 +156,9 @@ class _EventBridge:
         self.events: list[dict[str, Any]] = []
 
     def event(self, kind: str, payload: dict[str, Any]) -> None:
-        record = {"type": kind, "payload": dict(payload)}
+        from src.utils.event_redaction import redact_event_value
+
+        record = {"type": kind, "payload": redact_event_value(payload)}
         self.events.append(record)
         try:
             self._emit(record)
