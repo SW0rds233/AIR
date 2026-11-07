@@ -60,6 +60,18 @@
   .adv-row label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 4px; }
   .adv-row input[type=text] { min-width: 180px; }
 
+  .research-scope {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px;
+    padding: 7px 12px; background: var(--card); border-bottom: 1px solid var(--border);
+  }
+  .scope-field { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .scope-field label { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .scope-field select { min-width: 160px; }
+  .scope-field button { padding: 4px 9px; font-size: 12px; }
+  .scope-info, .scope-hint { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+  .scope-info { flex: 1 1 180px; min-width: 0; }
+  .scope-info:empty { display: none; }
+
   main { flex: 1; display: flex; gap: 12px; padding: 12px; min-height: 0; }
   .panel {
     background: var(--card); border: 1px solid var(--border); border-radius: 10px;
@@ -71,11 +83,16 @@
     display: flex; align-items: center; gap: 8px; padding: 8px 12px;
     border-bottom: 1px solid var(--border); font-weight: 600; font-size: 13px;
   }
-  .tabs { margin-left: auto; display: flex; gap: 4px; }
+  .panel.output .panel-head { min-width: 0; }
+  #outtitle { flex: 0 0 auto; }
+  .tabs {
+    margin-left: auto; display: flex; gap: 4px; min-width: 0;
+    overflow-x: auto; scrollbar-width: thin;
+  }
   .tab {
     font-size: 12px; padding: 3px 10px; border-radius: 6px; cursor: pointer;
     color: var(--muted); border: 1px solid transparent; background: none;
-    font-family: inherit;
+    font-family: inherit; flex: 0 0 auto; white-space: nowrap;
   }
   .tab.active { background: var(--primary-soft); color: var(--primary); border-color: #c7ddfd; }
   .tab:focus-visible, .claim-link:focus-visible, button:focus-visible {
@@ -91,6 +108,10 @@
     .tabs { margin-left: 0; }
     #inputbar { flex-wrap: wrap; }
     #inputbar textarea { flex: 1 1 100%; }
+  }
+  @media (max-width: 720px) {
+    .scope-field, .scope-info, .scope-hint { flex: 1 1 100%; }
+    .scope-field select { flex: 1 1 auto; max-width: none; }
   }
 
   /* 表格长内容可横向滚动; 长文本可展开查看 */
@@ -140,7 +161,9 @@
   .attach-pick:hover { background: var(--primary-soft); }
   .attach-pick input[type=file] { display: none; }
 
-  #preview, #workbench, #files { flex: 1; overflow-y: auto; padding: 14px; }
+  #preview, #workbench, #library, #paper, #files {
+    flex: 1; min-height: 0; min-width: 0; overflow: auto; padding: 14px;
+  }
   #files { display: none; }
   .empty { color: var(--muted); font-size: 13px; padding: 20px 0; text-align: center; }
   .file-item {
