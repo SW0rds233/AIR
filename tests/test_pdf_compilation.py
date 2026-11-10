@@ -102,6 +102,18 @@ class PDFCompilationTest(unittest.TestCase):
         self.assertIn("x_i", formula)
         self.assertIn("y^2", formula)
 
+    def test_display_math_inside_text_block_keeps_math_commands(self):
+        source = r"结论：\[\mathrm{NPV}_i=\sum_{t=1}^{T} b_t\] 仍待检验。"
+        rendered = escape_latex(source)
+        self.assertIn(r"\[\mathrm{NPV}_i=\sum_{t=1}^{T} b_t\]", rendered)
+        self.assertNotIn(r"\$mathrm", rendered)
+        self.assertNotIn("\x00", rendered)
+
+        other = escape_latex(r"$$ \Delta\pi_i=\sum_t b_t $$，且 \(A_c\subseteq F_c\)")
+        self.assertIn(r"\[ \Delta\pi_i=\sum_t b_t \]", other)
+        self.assertIn(r"\(A_c\subseteq F_c\)", other)
+        self.assertNotIn("\x00", other)
+
     def test_model_authored_tags_become_one_numbered_equation_each(self):
         r"""回归（transfer-eval2 / snap-c42273b2）：模型在一个数学块里写多条带编号的公式。
 

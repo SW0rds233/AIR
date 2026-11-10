@@ -47,8 +47,8 @@ _SEVERITY_ORDER = {
     IssueSeverity.advisory.value: 3,
 }
 
-_CATEGORY_WEIGHTS = {"science": 25, "fidelity": 20, "citation": 20,
-                     "readability": 15, "figure": 10, "completeness": 10}
+_CATEGORY_WEIGHTS = {"science": 30, "fidelity": 15, "citation": 15,
+                     "readability": 25, "figure": 5, "completeness": 10}
 
 
 def judge_review(issues: list[ReviewIssueRef], *, threshold: int = 80,
@@ -104,6 +104,11 @@ class ReviewAgent(AgentBase):
   方法比较与结果解释，不将无关论文、预印本或摘要堆列为研究“依据”。
 - figure: 图注与正文说法是否一致、单位与数据来源是否交代;
 - completeness: 未决项与局限是否如实交代。
+
+开放性研究允许没有确定的方向性结论。只要稿件把竞争性解释、前提、证据缺口和
+可区分的后续检验连成清楚的论证链，并如实标明未决，就不得仅因“没有定论”扣分。
+优先审阅段落之间的推理是否连贯、术语和变量是否一致、每一步是否由前提或证据支撑；
+把“行文合理”与“事实已证实”分开评价，不能为追求可读性放松引文和越权断言检查。
 
 纪律:
 - 你只能**提出意见**与建议降级; 你不得宣称某条结论成立 (不得升级);

@@ -165,6 +165,16 @@
     flex: 1; min-height: 0; min-width: 0; overflow: auto; padding: 14px;
   }
   #files { display: none; }
+  #live-summary:not(:empty) {
+    position: sticky; top: -14px; z-index: 1; margin: -14px -14px 14px;
+    padding: 9px 14px; background: var(--primary-soft); color: var(--text);
+    border-bottom: 1px solid var(--border); font-size: 12px;
+  }
+  #live-activity:not(:empty) { display: grid; gap: 8px; margin-bottom: 16px; }
+  .live-activity-item {
+    padding: 9px 11px; border: 1px solid var(--border); border-radius: 7px;
+    background: var(--card); font-size: 13px; line-height: 1.5;
+  }
   .empty { color: var(--muted); font-size: 13px; padding: 20px 0; text-align: center; }
   .file-item {
     display: flex; justify-content: space-between; gap: 8px; padding: 5px 8px;

@@ -346,6 +346,18 @@ def escape_latex(text: str) -> str:
             _fix_text_groups(match.group(0))))
         return f"\x00MATH{len(math_blocks) - 1}\x00"
 
+    # 正文块也可能包含展示公式；先保护整块，避免把其中的命令当成普通文本转义。
+    def _protect_display(match: "re.Match[str]") -> str:
+        math_blocks.append(r"\[" + escape_math(match.group(1)) + r"\]")
+        return f"\x00MATH{len(math_blocks) - 1}\x00"
+
+    def _protect_inline_delimited(match: "re.Match[str]") -> str:
+        math_blocks.append(r"\(" + escape_math(match.group(1)) + r"\)")
+        return f"\x00MATH{len(math_blocks) - 1}\x00"
+
+    text = re.sub(r"\$\$(.*?)\$\$", _protect_display, text or "", flags=re.DOTALL)
+    text = re.sub(r"\\\[(.*?)\\\]", _protect_display, text, flags=re.DOTALL)
+    text = re.sub(r"\\\((.*?)\\\)", _protect_inline_delimited, text, flags=re.DOTALL)
     # 原有的 $...$ 先摘出来, 下面所有替换都不碰数学模式内部
     text = re.sub(r"\$[^$]*\$", _protect, text or "")
     # Keep a relational expression together instead of emitting '$-$' per symbol.

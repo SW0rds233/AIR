@@ -47,16 +47,21 @@ import {
   workbenchQueryTarget,
   type RunStatus,
   type TabName,
+  type TaskStatus,
+  type TeamRole,
 } from './state/research-store';
 import { researchLabel, researchView } from './current-research';
 // 论文/公式/图表追溯 (纯函数视图; 取数与 DOM 装配在这里)
 import {
   numberingView,
   renderFigureGallery,
+  renderClaimEvidence,
   renderNumbering,
   renderPaperTraceability,
   type ArtifactEntryView,
+  type ClaimEvidence,
   type DeliveryManifestView,
+  type EvidenceLink,
 } from './views/paper';
 import {
   renderResearchOverview,
@@ -502,9 +507,9 @@ function loadContextNotes(topic: any) {
   pageApi().json(ENDPOINTS.contextNotes(String(topic)))
     .then((d: any) => {
       if (d.notes) {
-        renderMarkdown(byId('preview'), '# ' + overviewEsc(d.topic || topic) + '\n\n' + d.notes);
+        renderMarkdown(byId('preview-body'), '# ' + overviewEsc(d.topic || topic) + '\n\n' + d.notes);
       } else {
-        renderMarkdown(byId('preview'),
+        renderMarkdown(byId('preview-body'),
           '# ' + overviewEsc(d.topic || topic) + '\n\n该上下文暂无综述笔记。');
       }
       switchTab('preview');
@@ -593,7 +598,7 @@ function loadArtifact(name: any) {
   pageApi().json(ENDPOINTS.artifact(String(name))).then((data: any) => {
     if (data.binary) { window.open(data.url, '_blank'); }
     else if (data.error) { addMsg('读取失败: ' + data.error, 'msg-error'); }
-    else { renderMarkdown(byId('preview'), data.content || ''); switchTab('preview'); }
+    else { renderMarkdown(byId('preview-body'), data.content || ''); switchTab('preview'); }
   }).catch(() => {});
 }
 
@@ -640,10 +645,27 @@ async function refreshPaperTrace() {
     manifestReason = listReason;
   }
 
+  async function packageRows(name: string): Promise<any[]> {
+    const prefix = String(manifestEntry?.name || '').replace(/\\/g, '/').replace(/[^/]+$/, '');
+    const entry = files.find((file) =>
+      String(file.name || '').replace(/\\/g, '/') === prefix + name);
+    if (!entry) return [];
+    try {
+      const body = await pageApi().json<Record<string, unknown>>(ENDPOINTS.artifact(entry.name));
+      const rows = typeof body.content === 'string' ? JSON.parse(body.content) : body;
+      return Array.isArray(rows) ? rows : [];
+    } catch { return []; }
+  }
+  const [claims, evidenceLinks] = manifest
+    ? await Promise.all([packageRows('claims.json'), packageRows('evidence_links.json')])
+    : [[], []];
+
   const numbering = manifest
     ? renderNumbering(numberingView((manifest as Record<string, unknown>).numbering))
     : renderNumbering(numberingView(null));
-  const parts = [renderPaperTraceability(manifest), numbering,
+  const parts = [renderPaperTraceability(manifest),
+                 renderClaimEvidence(manifest, claims as ClaimEvidence[], evidenceLinks as EvidenceLink[]),
+                 numbering,
                  renderFigureGallery(files, identity, '')];
   if (listReason) {
     parts.unshift('<div class="wb-note" style="color:var(--warn)">读取交付物清单失败: ' +
@@ -745,17 +767,42 @@ function team(): TeamMount {
 }
 
 /* ---------------- 事件流 ---------------- */
+let activityRunId = '';
+function showLiveActivity(ev: any, kind: string): void {
+  if (!['supervisor_decision', 'task_started', 'task_result',
+        'review_issue', 'run_finished'].includes(kind)) return;
+  const target = byId('live-activity');
+  if (!target) return;
+  const runId = String(ev.run_id || selectionOf().runId || '');
+  if (runId && runId !== activityRunId) {
+    target.replaceChildren();
+    activityRunId = runId;
+  }
+  const item = document.createElement('div');
+  item.className = 'live-activity-item';
+  item.textContent = String(ev.text || '');
+  target.prepend(item);
+  while (target.children.length > 6) target.lastElementChild?.remove();
+}
+
 function handleEvent(ev: any) {
   switch (ev.type) {
-    case 'connected': break;
+    case 'connected': setText('live-summary', '研究已连接，等待任务进度…'); break;
     case 'node':
       {
         const kind = String(ev.team_event?.event || '');
+        if (['supervisor_decision', 'task_started', 'task_result',
+             'llm_started', 'llm_result', 'tool_started', 'tool_run',
+             'review_issue'].includes(kind)) setText('live-summary', String(ev.text || ''));
+        showLiveActivity(ev, kind);
         const cls = kind.startsWith('llm_') ? 'msg-llm'
           : kind.startsWith('tool_') ? 'msg-tool' : 'msg-node';
-        // Usage counters and internal bookkeeping are available in the event
-        // journal, but should not flood the conversation.
-        if (!['llm_call', 'capability_granted'].includes(kind)) addMsg(ev.text, cls);
+        const visibleInChat = new Set([
+          'brief_ready', 'plan_ready', 'supervisor_decision', 'task_started',
+          'task_result', 'task_finished', 'commit_failed', 'review_issue',
+          'run_finished', 'llm_error', 'progress_export_failed',
+        ]);
+        if (!kind || visibleInChat.has(kind)) addMsg(ev.text, cls);
       }
       if (ev.research) updateRunHint(ev.research);
       if (ev.name === 'research_team' && ev.team_event) {
@@ -835,7 +882,7 @@ function onInterrupt(p: any) {
   byId('log')!.appendChild(buildInterruptCard(p));
   scrollToBottom('log');
 
-  renderMarkdown(byId('preview'), p.content || '');
+  renderMarkdown(byId('preview-body'), p.content || '');
   switchTab('preview');
 
   setDisabled('reply', false);
@@ -856,6 +903,17 @@ function on(id: any, event: any, fn: any) {
 }
 
 function bindStaticHandlers() {
+  byId('workbench')?.addEventListener('change', (event) => {
+    const select = event.target;
+    if (!(select instanceof HTMLSelectElement)) return;
+    if (select.dataset.filter === 'agent') {
+      dispatch({ type: 'ui/filter', agent: select.value as TeamRole | '' });
+      refreshTeamSection();
+    } else if (select.dataset.filter === 'status') {
+      dispatch({ type: 'ui/filter', taskStatus: select.value as TaskStatus | '' });
+      refreshTeamSection();
+    }
+  });
   const reply = byId<HTMLTextAreaElement>('reply')!;
   if (reply) reply.addEventListener('input', autoGrowReply);
   if (reply) {
