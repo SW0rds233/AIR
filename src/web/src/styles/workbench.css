@@ -55,6 +55,9 @@
   .wb-event { display: flex; gap: 8px; font-size: 12px; }
   .wb-event .seq { color: var(--muted); font-family: ui-monospace, monospace; flex: 0 0 34px; }
   .wb-note { font-size: 11px; color: var(--muted); margin-top: 4px; white-space: pre-wrap; }
+  .paper-claim { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; }
+  .paper-claim summary { cursor: pointer; line-height: 1.5; }
+  .paper-evidence { margin-top: 8px; padding: 7px 9px; border-left: 3px solid var(--border); background: #f8fafc; overflow-wrap: anywhere; }
   .gate-box {
     border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
     background: #f8fafc; white-space: pre-wrap; font-size: 12px; margin-top: 6px;

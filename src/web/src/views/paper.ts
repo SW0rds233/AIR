@@ -11,12 +11,13 @@ export {
   claimTraceRows,
   gateClass,
   gateLabel,
+  renderClaimEvidence,
   renderPaperTraceability,
   sourceIndex,
   traceStatusBadge,
   TRACE_STATUS_LABEL,
 } from './paper/traceability';
-export type { SourceIndexRow, TraceRow } from './paper/traceability';
+export type { ClaimEvidence, EvidenceLink, SourceIndexRow, TraceRow } from './paper/traceability';
 
 export { figureRows, renderFigureGallery } from './paper/figure-gallery';
 export type { FigureRow } from './paper/figure-gallery';

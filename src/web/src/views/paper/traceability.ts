@@ -81,6 +81,62 @@ export interface SourceIndexRow {
   locator: string;
 }
 
+export interface ClaimEvidence {
+  id?: string;
+  statement?: string;
+  status?: string;
+  evidence_grade?: string;
+  dependencies?: string[];
+}
+
+export interface EvidenceLink {
+  claim_ref?: { id?: string };
+  source_ref?: { id?: string };
+  relation?: string;
+  locator?: string;
+  excerpt?: string;
+  condition_notes?: string;
+}
+
+export function renderClaimEvidence(manifest: DeliveryManifestView | null,
+                                    claims: ClaimEvidence[], links: EvidenceLink[]): string {
+  if (!manifest) return '';
+  if (!claims.length) return '<div class="paper-section"><h3>逐条核验论断与证据</h3>' +
+    '<div class="wb-note">交付包未提供可读取的命题清单。</div></div>';
+  const titles = new Map(sourceIndex(manifest).map((source) =>
+    [source.source_id, source.title]));
+  const claimTitles = new Map(claims.map((claim) => [claim.id, claim.statement]));
+  const cards = claims.map((claim) => {
+    const id = String(claim.id || '');
+    const statement = String(claim.statement || id);
+    const related = links.filter((link) => link.claim_ref?.id === id);
+    const anchor = manifest.writing_map?.[id] || '';
+    const dependencies = (claim.dependencies || []).map((dependency) =>
+      esc(claimTitles.get(dependency) || dependency)).join('；');
+    const sources = related.length ? related.map((link) => {
+      const sourceId = String(link.source_ref?.id || '');
+      return '<div class="paper-evidence">' +
+        `<b>${esc(titles.get(sourceId) || sourceId || '未登记来源')}</b> ` +
+        `<span class="mono">${esc(sourceId)}</span>` +
+        ` · ${esc(link.relation || '关系未判定')} · ${esc(link.locator || '无定位')}` +
+        (link.excerpt ? `<div class="wb-note">原文摘录：${esc(link.excerpt)}</div>` : '') +
+        (link.condition_notes ? `<div class="wb-note">核验说明：${esc(link.condition_notes)}</div>` : '') +
+        '</div>';
+    }).join('') : '<div class="wb-note">尚无命题与来源的证据链接。</div>';
+    return '<details class="paper-claim">' +
+      `<summary><span class="tag t-neutral">${esc(claim.status || '未判定')}</span> ` +
+      `${esc(statement.slice(0, 170))}</summary>` +
+      `<div class="wb-note">完整命题：${esc(statement)}</div>` +
+      `<div class="wb-note">命题 ${esc(id)} · 正文位置 ${esc(anchor || '未映射')} · ` +
+      `${related.length} 条证据链接 · 证据等级 ${esc(claim.evidence_grade || '未判定')}</div>` +
+      (dependencies ? `<div class="wb-note">依赖命题：${dependencies}</div>` : '') +
+      `${sources}</details>`;
+  }).join('');
+  return '<div class="paper-section"><h3>逐条核验论断与证据</h3>' +
+    '<div class="wb-note">展开命题，可核对正文位置、来源关系、原文定位和摘录；' +
+    '“insufficient”不代表支持该命题。</div>' + cards + '</div>';
+}
+
 export function sourceIndex(manifest: DeliveryManifestView | null | undefined): SourceIndexRow[] {
   const docs = manifest?.source_set?.documents ?? [];
   return docs.map((doc) => ({
