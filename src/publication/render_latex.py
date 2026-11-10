@@ -348,7 +348,7 @@ def escape_latex(text: str) -> str:
 
     # 正文块也可能包含展示公式；先保护整块，避免把其中的命令当成普通文本转义。
     def _protect_display(match: "re.Match[str]") -> str:
-        math_blocks.append(r"\[" + escape_math(match.group(1)) + r"\]")
+        math_blocks.append(r"\[" + _display_math(match.group(1)) + r"\]")
         return f"\x00MATH{len(math_blocks) - 1}\x00"
 
     def _protect_inline_delimited(match: "re.Match[str]") -> str:
@@ -486,16 +486,20 @@ def _display_math(value: str) -> str:
         elif char in "})]" and (index == 0 or body[index - 1] != "\\"):
             depth = max(0, depth - 1)
         elif char == ";" and depth == 0:
-            rows.append(body[start:index].strip())
+            if body[start:index].strip():
+                rows.append(body[start:index].strip())
             start = index + 1
         elif depth == 0 and len(body) > 110 and body.startswith(r"\qquad", index):
-            rows.append(body[start:index].strip())
+            if body[start:index].strip():
+                rows.append(body[start:index].strip())
             index += len(r"\qquad")
             start = index
             continue
         index += 1
-    rows.append(body[start:].strip())
-    if len(rows) > 1 and all(rows):
+    if body[start:].strip():
+        rows.append(body[start:].strip())
+    rows = [part for row in rows for part in _wrap_math_row(row)]
+    if len(rows) > 1:
         # 用 aligned 包住各行时, 模型写在公式末尾的 `\tag` 会被卷进内部环境 ——
         # 先摘出来, 拼到 `\end{aligned}` 之后（编号属于公式层, 不属于内部环境）
         tags = [tag for row in rows for tag in _TAG_RE.findall(row)]
@@ -504,6 +508,42 @@ def _display_math(value: str) -> str:
         return (r"\begin{aligned}" + r" \\ ".join("&" + row for row in rows)
                 + r"\end{aligned}" + "".join(tags))
     return _hoist_inner_tags(body)
+
+
+def _wrap_math_row(row: str, limit: int = 100) -> list[str]:
+    """Break a long equation at operators outside TeX groups."""
+    if len(row) <= limit:
+        return [row]
+    breaks: list[int] = []
+    depth = 0
+    index = 0
+    while index < len(row):
+        char = row[index]
+        if char in "{([" and (index == 0 or row[index - 1] != "\\"):
+            depth += 1
+        elif char in "})]" and (index == 0 or row[index - 1] != "\\"):
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            if row.startswith(r"\quad", index):
+                breaks.append(index)
+                index += len(r"\quad")
+                continue
+            if char in "+-=" and index > 20:
+                breaks.append(index)
+        index += 1
+    parts: list[str] = []
+    start = 0
+    while len(row) - start > limit:
+        candidates = [pos for pos in breaks if start + 25 <= pos <= start + limit]
+        if not candidates:
+            break
+        split = candidates[-1]
+        parts.append(row[start:split].strip())
+        start = split
+        if row.startswith(r"\quad", start):
+            start += len(r"\quad")
+    parts.append(row[start:].strip())
+    return parts
 
 
 #: 模型自撰的方程编号（`\tag{3.4}` 与 `\tag*{...}` 两种写法）。

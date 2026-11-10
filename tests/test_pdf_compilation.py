@@ -150,6 +150,31 @@ class PDFCompilationTest(unittest.TestCase):
         self.assertEqual(tex.count(r"\begin{equation}"), 1)
         self.assertNotIn(r"\tag", tex)
 
+    def test_long_equations_from_latest_run_are_wrapped(self):
+        formulas = [
+            (r"\sum_{i\in A_c(t)}b_i(t)\le C_c,\quad A_c(t)=\{i\in F_c: D_i=1\};"
+             r"\qquad \mathrm{TE}=\sum_{i=1}^{N}D_i\Delta\pi_i="
+             r"N\cdot P(D_i=1)\cdot E[\Delta\pi_i\mid D_i=1]"),
+            (r"\Delta\pi_i=\Delta(p_i q_i)-\Delta C_i^{\mathrm{comm}}"
+             r"-\Delta C_i^{\mathrm{fuel}}-\Delta C_i^{\mathrm{time}}"
+             r"-\Delta C_i^{\mathrm{compliance}}-\Delta\mathrm{Penalty}_i"
+             r"+\Delta S_i,\quad \Delta\mathrm{Penalty}_i\ge 0"),
+        ]
+        for formula in formulas:
+            with self.subTest(formula=formula):
+                tex = render_latex(Manuscript(sections=[
+                    Section(heading="模型", blocks=[Block(math=formula)])]))
+                self.assertIn(r"\begin{aligned}", tex)
+                self.assertIn(r" \\ ", tex)
+                self.assertIn(r"\end{aligned}", tex)
+
+    def test_long_display_math_in_text_is_wrapped(self):
+        formula = (r"\Delta\pi_i=\Delta(p_i q_i)-\Delta C_i^{\mathrm{comm}}"
+                   r"-\Delta C_i^{\mathrm{fuel}}-\Delta C_i^{\mathrm{time}}"
+                   r"-\Delta C_i^{\mathrm{compliance}}-\Delta\mathrm{Penalty}_i"
+                   r"+\Delta S_i")
+        self.assertIn(r"\begin{aligned}", escape_latex(f"$${formula}$$"))
+
     def test_glued_control_word_gets_separated(self):
         r"""回归（transfer-eval2）：模型写 `$0\leqz\leqL$`，TeX 把 `\leqz` 当成未定义命令。
 
