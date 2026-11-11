@@ -39,6 +39,75 @@ def test_entire_quote_must_exist_in_source():
     assert not quote_is_locatable(item, 'The mobile service improved income by 90 percent.')
 
 
+def test_quote_matches_across_whitespace_differences():
+    """PDF 原文的换行与模型引文的空格只差空白，不应把真实支持判成待审。"""
+    wrapped = SourceEvidence(
+        excerpt='The mobile service\nimproved   market access.\n\nReported in 2025.',
+        location='p3')
+    assert quote_is_locatable(wrapped, 'The mobile service improved market access.')
+    assert quote_is_locatable(wrapped, 'improved market access. Reported in 2025.')
+    # 折叠空白不放宽"逐字一致": 改写过的数字仍然不能命中
+    assert not quote_is_locatable(wrapped, 'improved market access. Reported in 2026.')
+
+
+def test_assessment_skips_when_evidence_model_missing():
+    """只有主控配了模型时，证据任务应跳过判定，而不是在取模型时崩溃。"""
+    from src.agents.evidence import EvidenceAgent
+    from src.agents.protocol import UsageRecord
+    from src.research.schemas import Claim
+
+    calls = []
+
+    def _llm(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError('证据模型不可用时不应取模型')
+
+    runtime = SimpleNamespace(
+        llm_available=lambda stage='': stage == 'supervisor',
+        llm=_llm, emit=lambda *args: None)
+    rows = [{'source_id': 'doc-1', 'excerpt': 'text', 'locator': 'abstract',
+             'relation': 'insufficient'}]
+    claim = Claim(statement='Mobile service improved market access.')
+    context = ContextPack(objects={'claim': [claim.model_dump(mode='json')]})
+    judged = EvidenceAgent().assess_sources(
+        AgentTask(agent='evidence', objective='test'), context, runtime, UsageRecord(), rows)
+    assert judged == rows
+    assert calls == []
+
+
+def test_assessment_degrades_when_model_lookup_fails():
+    """取模型抛错时保留未判定行，检索任务不得整体失败。"""
+    from src.agents.evidence import EvidenceAgent
+    from src.agents.protocol import UsageRecord
+    from src.research.schemas import Claim
+
+    def _explode(*args, **kwargs):
+        raise RuntimeError('运行时未注入可用的 LLM (离线模式请用确定性实现)')
+
+    runtime = SimpleNamespace(llm_available=lambda *_: True, llm=_explode,
+                              emit=lambda *args: None)
+    rows = [{'source_id': 'doc-1', 'excerpt': 'text', 'locator': 'abstract',
+             'relation': 'insufficient'}]
+    claim = Claim(statement='Mobile service improved market access.')
+    context = ContextPack(objects={'claim': [claim.model_dump(mode='json')]})
+    judged = EvidenceAgent().assess_sources(
+        AgentTask(agent='evidence', objective='test'), context, runtime, UsageRecord(), rows)
+    assert judged == rows
+
+
+def test_default_llm_timeout_keeps_reviewer_headroom_and_is_bounded():
+    import os
+
+    from src import config
+
+    if os.getenv('LLM_TIMEOUT'):
+        import pytest
+
+        pytest.skip('环境显式设置了 LLM_TIMEOUT, 默认值断言不适用')
+    # 实测审阅单次约 158s: 默认值既要有余量, 也不能让失控调用拖到 45 分钟
+    assert 240 <= config.LLM_TIMEOUT <= 600
+
+
 def test_semantic_judgment_keeps_claim_binding_and_quote():
     from src.agents.evidence import EvidenceAgent
     from src.agents.protocol import UsageRecord

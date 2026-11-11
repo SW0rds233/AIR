@@ -349,7 +349,10 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
         from src.publication.references import citation_eligible
         from src.research.schemas import Claim, SourceEvidence, SupportKindOfEvidence
 
-        if not runtime.llm_available():
+        # 按**证据角色**判断模型是否可用, 与后面取模型用的 stage 保持一致;
+        # 用默认(主控)判断会在"只给主控配了模型"的部署里放行, 然后取模型抛错。
+        stage = self.role or "evidence"
+        if not runtime.llm_available(stage):
             return rows
         claims = [claim for claim in (_parse_claim(row) for row in
                   context.objects.get("claim", [])) if claim is not None]
@@ -359,7 +362,13 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
             if not claims:
                 return rows
         targets = claims[:4] or [Claim(statement=context.request or task.objective)]
-        judge = build_support_judge(runtime.llm(task, usage, stage="evidence"))
+        try:
+            judge = build_support_judge(runtime.llm(task, usage, stage=stage))
+        except RuntimeError:
+            # 角色模型取不到时保留未判定行: 关系宁可不判, 也不能让检索任务整体失败。
+            return rows
+        if judge is None:
+            return rows
         # 全文优先，单任务最多审查 12 个来源、每个最多 4 个命题。
         ordered = sorted(rows, key=lambda row: (
             not citation_eligible(row), row.get("content_level") != "fulltext"))

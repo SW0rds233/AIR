@@ -219,8 +219,10 @@ HTTP_CIRCUIT_BREAKER_COOLDOWN = int(os.getenv("HTTP_CIRCUIT_BREAKER_COOLDOWN", "
 HTTP_BACKOFF_BASE = float(os.getenv("HTTP_BACKOFF_BASE", "2"))
 HTTP_429_BACKOFF_BASE = float(os.getenv("HTTP_429_BACKOFF_BASE", "4"))
 
-# LLM 调用超时: 推理模型 (kimi-k2.6 等) 审稿/写作耗时长, 需要更宽容的超时
-LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "180"))
+# LLM 调用超时: 推理模型 (kimi-k2.6 等) 审稿/写作耗时长, 需要更宽容的超时。
+# 300s 的依据: 上一轮实测审阅单次约 158s (kimi 关 thinking 后 1-3 分钟), 留出
+# 近一倍余量; 900s 会让失控调用叠加重试拖到 45 分钟 (实测一次 2178s)。
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "300"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
 
 # ===== 理论研究模式的资源预算 =====

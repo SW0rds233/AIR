@@ -95,18 +95,27 @@ def _effect_sign(text: str) -> int:
     return (1 if pos > neg else (-1 if neg > pos else 0))
 
 
+def _collapse_whitespace(value: str) -> str:
+    """把换行/多空格折叠成单空格: PDF 原文与模型引文只差空白时不应判为失效。"""
+    return " ".join(str(value or "").split())
+
+
 def quote_is_locatable(item: SourceEvidence, quote: str) -> bool:
     """引文是否可在**已读取原文**中精确定位 (P0-4 硬约束)。
 
     要求: 非空且足够长、有页/节定位、且真的出现在原文片段里。
     只有满足这三条, 才允许把关系判成支持或反对。
+
+    比较前两侧折叠空白。PDF 抽取的原文常带换行, 模型引文常把换行写成空格;
+    仅因空白差异就降级, 会把真实支持误判成待审 (上一轮"判定跑过但 0 条支持"
+    的风险之一)。折叠空白**不放宽**逐字一致: 编造或改写的内容仍然无法命中。
     """
-    text = (quote or "").strip()
+    text = _collapse_whitespace(quote)
     if len(text) < 6:
         return False
     if not (item.location or item.page):
         return False
-    return text in (item.excerpt or "")
+    return text in _collapse_whitespace(item.excerpt)
 
 
 def mark_pending(item: SourceEvidence, reason: str, *, original: str = "") -> SourceEvidence:
