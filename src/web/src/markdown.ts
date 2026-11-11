@@ -37,7 +37,7 @@ export function safeHref(raw: unknown): string {
 // 把一段文本按行内语法拆成 DOM 片段 (加粗/斜体/行内代码/链接)
 function inlineInto(parent: HTMLElement, text: unknown): void {
   const source = String(text == null ? '' : text);
-  const pattern = /(`[^`]*`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(\[[^\]]+\]\([^)\s]+\))/g;
+  const pattern = /(`[^`]*`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(\[[^\]]+\]\([^)\s]+\))|(?<!\\)\$[^$\n]+\$/g;
   let cursor = 0;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(source)) !== null) {
@@ -45,7 +45,12 @@ function inlineInto(parent: HTMLElement, text: unknown): void {
       parent.appendChild(document.createTextNode(source.slice(cursor, match.index)));
     }
     const token = match[0];
-    if (token.startsWith('`')) {
+    if (token.startsWith('$')) {
+      const code = document.createElement('code');
+      code.className = 'math-inline';
+      code.textContent = token.slice(1, -1);
+      parent.appendChild(code);
+    } else if (token.startsWith('`')) {
       const code = document.createElement('code');
       code.textContent = token.slice(1, -1);
       parent.appendChild(code);
@@ -102,6 +107,34 @@ export function render(text: unknown, options: RenderOptions = {}): HTMLElement 
 
   while (i < lines.length) {
     const line = lines[i];
+
+    const anchor = /^\s*<!--\s*block:([^>]+?)\s*-->\s*$/.exec(line);
+    if (anchor) {
+      const mark = document.createElement('span');
+      mark.id = anchor[1].trim();
+      mark.hidden = true;
+      host.appendChild(mark);
+      i += 1;
+      continue;
+    }
+
+    // A readable, safe fallback without executing TeX or injecting HTML.
+    if (/^\s*\$\$/.test(line)) {
+      closeList();
+      let formula = line.trim().slice(2);
+      i += 1;
+      while (!formula.trimEnd().endsWith('$$') && i < lines.length) {
+        formula += '\n' + lines[i++];
+      }
+      const pre = document.createElement('pre');
+      pre.className = 'math-display';
+      pre.setAttribute('aria-label', '公式');
+      const code = document.createElement('code');
+      code.textContent = formula.replace(/\$\$\s*$/, '').trim();
+      pre.appendChild(code);
+      host.appendChild(pre);
+      continue;
+    }
 
     // 围栏代码块
     if (/^\s*```/.test(line)) {
@@ -207,7 +240,7 @@ export function render(text: unknown, options: RenderOptions = {}): HTMLElement 
     const chunk = [line.trim()];
     i += 1;
     while (i < lines.length && lines[i].trim()
-           && !/^\s*(#{1,6}\s|[-*+]\s|\d+[.)]\s|>|```)/.test(lines[i])
+           && !/^\s*(#{1,6}\s|[-*+]\s|\d+[.)]\s|>|```|\$\$|<!--\s*block:)/.test(lines[i])
            && lines[i].indexOf('|') < 0) {
       chunk.push(lines[i].trim());
       i += 1;

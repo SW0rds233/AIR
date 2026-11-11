@@ -632,6 +632,7 @@ class SourceEvidence(PublicationMetadata):
     # 命题归属: 该证据是为哪条命题召回的。
     # 逐命题缺口统计只读这个字段 + 版本化的 EvidenceLink, 不从全局证据列表推断。
     claim_id: str = ""
+    claim_version: int = 1
     chunk_id: str = ""          # 段落/分块稳定 ID
     page: int = 0
     char_start: int = -1        # 片段在原文中的字符范围

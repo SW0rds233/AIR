@@ -143,7 +143,7 @@ def _embed_chunks(topic: str, doc_id: str, chunks: list[Chunk], record: LitRecor
     except Exception:  # noqa: BLE001
         return 0
     chunk_dicts = [{"title": record.title, "chunk_index": c.index, "text": c.text} for c in chunks]
-    meta = {"authors": record.authors, "year": record.year,
+    meta = {"doc_id": doc_id, "authors": record.authors, "year": record.year,
             "source": record.venue or record.doc_type.value, "url": record.url, "bibtex": ""}
     from src.utils.file_utils import sanitize_filename
 

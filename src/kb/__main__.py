@@ -69,10 +69,21 @@ def _cards(args) -> int:
     return 0
 
 
+def _reindex(args) -> int:
+    from src.kb.reindex import reindex_library
+    report = reindex_library(args.topic)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report["ok"] else 1
+
+
 def main() -> int:
     ensure_utf8_console()
     parser = argparse.ArgumentParser(description="主题文献知识底座 (KB)")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p_reindex = sub.add_parser("reindex", help="为已登记分块补建向量索引（可续跑）")
+    p_reindex.add_argument("--topic", required=True)
+    p_reindex.set_defaults(func=_reindex)
 
     p_ing = sub.add_parser("ingest", help="导入人工文献 / 机器检索结果")
     p_ing.add_argument("--topic", required=True)

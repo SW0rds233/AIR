@@ -135,6 +135,8 @@ class ReasoningAgent(AgentBase):
 
     def _run(self, task: AgentTask, context: ContextPack, runtime: AgentRuntime,
              usage: UsageRecord, tools: list[ToolSpec]) -> AgentResult:
+        if task.hints.get("evidence_support_only"):
+            return self.recheck_evidence(task, context, runtime, usage)
         topic = _topic_of(context)
         strategy = classify_strategy(
             f"{task_intent(task)}\n{_research_text(context)}",
@@ -337,6 +339,34 @@ class ReasoningAgent(AgentBase):
                               usage=usage, payload=payload_out, replan=replan)
 
     # ---- 形式化推导: 团队闭环 ----
+    def recheck_evidence(self, task: AgentTask, context: ContextPack,
+                         runtime: AgentRuntime, usage: UsageRecord) -> AgentResult:
+        claim, obligations, evidence = _formalisable_subject(context, task)
+        if claim is None:
+            return self.blocked(task, "证据复核目标不存在", usage=usage)
+        # Unbound sources and evidence for another version cannot close this claim.
+        evidence = [item for item in evidence if item.claim_id == claim.id
+                    and item.claim_version == claim.version]
+        changes: list[ChangeProposal] = []
+        closed = 0
+        for obligation in obligations:
+            if obligation.kind != "evidence_support" or obligation.status == "closed":
+                continue
+            outcome = runtime.run_verification(task, claim, obligation, evidence=evidence)
+            usage.tool_calls += int(outcome.evaluated)
+            closed += int(outcome.closed)
+            changes.append(build_proposal("obligation", object_id=obligation.id,
+                payload={**obligation.model_dump(mode="json"), **outcome.obligation_updates},
+                rationale="新证据入库后的确定性复核", input_versions={claim.id: claim.version}))
+            if outcome.record is not None:
+                changes.append(build_proposal("verification", object_id=outcome.record.id,
+                    payload={"record": outcome.record.model_dump(mode="json"),
+                             "result": outcome.result.model_dump(mode="json") if outcome.result else {},
+                             "obligation_id": obligation.id},
+                    rationale="证据义务复核记录",
+                    input_versions=dict(outcome.record.verification_closure or {})))
+        return self.completed(task, f"证据复核关闭 {closed} 条义务", changes=changes, usage=usage)
+
     def formal_closure(self, task: AgentTask, context: ContextPack,
                        runtime: AgentRuntime,
                        usage: UsageRecord) -> AgentResult | None:

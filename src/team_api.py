@@ -266,6 +266,13 @@ def library_detail(source_set_id: str) -> dict[str, Any]:
     return {**summary, "source_set": source.to_dict()}
 
 
+@router.post("/api/library/{source_set_id}/reindex")
+def library_reindex(source_set_id: str) -> dict[str, Any]:
+    from src.kb.reindex import reindex_library
+    library_detail(source_set_id)  # Existing library only; never create one by typo.
+    return reindex_library(source_set_id)
+
+
 @router.delete("/api/library/{source_set_id}")
 def library_delete(source_set_id: str, delete_records: bool = False) -> dict[str, Any]:
     """只解除**该库**的登记; 不删除用户原文件, 不清空共享向量库。"""

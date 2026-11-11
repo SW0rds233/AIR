@@ -659,16 +659,17 @@ def _render_block(block: Block, citations: dict[str, int],
     if block.math:
         # 公式体**必须**先过 escape_math: 模型常直接写 Unicode (λ/≡/×/−/，),
         # 原样落进 equation 会缺字形, 落到文本模式还会中断整篇编译。
-        tagged = _tagged_equations(block.math)
-        if tagged:
-            # 模型自撰编号: 逐条 `equation*` 承载各自的 \tag —— 见 `_tagged_equations`
-            # 的实测说明 (整块塞进 equation 会报 Multiple \tag, 整篇编译失败)
-            out.append("")
-            out += [f"\\begin{{equation*}}{_display_math(part)}\\end{{equation*}}"
-                    for part in tagged]
-            out.append("")
-        else:
-            out += ["", f"\\begin{{equation}}{_display_math(block.math)}\\end{{equation}}", ""]
+        from src.publication.math_content import math_parts
+        for is_math, content in math_parts(block.math):
+            if not is_math:
+                out.extend([escape_latex(content), ""])
+                continue
+            tagged = _tagged_equations(content)
+            if tagged:
+                out += [f"\\begin{{equation*}}{_display_math(part)}\\end{{equation*}}"
+                        for part in tagged]
+            else:
+                out += ["", f"\\begin{{equation}}{_display_math(content)}\\end{{equation}}", ""]
     marks = [f"\\cite{{ref{citations[ref.id]}}}"
              for kind, ref in zip(block.ref_kinds, block.refs)
              if kind == RefKind.source.value and ref.id in citations]

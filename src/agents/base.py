@@ -247,6 +247,12 @@ class AgentBase:
         role = role_of(self.role) or self.role
         usage = UsageRecord()
         tools = self.tools(task, context, runtime)
+        if task.source_set_ids:
+            from dataclasses import replace
+            tools = [replace(spec, default_arguments={**spec.default_arguments,
+                           "topic": task.source_set_ids[0]})
+                     if spec.name in {"search_local_kb", "read_source"} else spec
+                     for spec in tools]
         try:
             runtime.cancel.raise_if_cancelled(task.task_id)
         except TaskCancelled as e:

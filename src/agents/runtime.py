@@ -153,6 +153,7 @@ class ToolSpec:
     fn: Callable[..., Any]
     description: str = ""
     parameters: dict[str, Any] = field(default_factory=dict)
+    default_arguments: dict[str, Any] = field(default_factory=dict)
     capability: str = ""
     read_scope: str = ""
     llm_visible: bool = True
@@ -382,6 +383,8 @@ class ToolLoop:
         if spec is None:
             return ToolObservation(name=name, arguments=args, status="tool_error",
                                    error=f"工具 {name!r} 不存在于本任务的工具集")
+        args = {**args, **{key: value for key, value in spec.default_arguments.items()
+                           if not args.get(key)}}
         # 权限检查: 可写能力必须由运行时签发的令牌授权
         if spec.capability and (grant is None or not grant.allows_tool(spec.capability)):
             return ToolObservation(

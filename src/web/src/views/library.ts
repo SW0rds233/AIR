@@ -288,6 +288,8 @@ export function renderLibraryWorkspace(
         (item.readable ? '' : ' · <span class="warn">不可读</span>') + '</div>' +
         roots + files + missing +
         (item.note ? `<div class="wb-note">${esc(item.note)}</div>` : '') +
+        '<button class="ghost" data-action="reindexLibrary" data-id="' +
+        esc(item.source_set_id) + '">补建向量索引（调用 Embedding 服务）</button>' +
         '<button class="ghost" data-action="deleteLibrary" data-id="' +
         esc(item.source_set_id) + '">解除登记</button>' +
         '<span class="wb-note">只解除库登记，不删除你的原文件。</span>' +
