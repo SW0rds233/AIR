@@ -13,6 +13,17 @@ def counterexample_check(claim: Claim, available: dict[str, bool] | None = None)
     available = available or {}
     if not available.get("sympy", True):
         return None
+    # 自然语言/Unicode 微分记号不能直接当 Python 表达式执行。
+    # 保留为未决，调用方会返回结构化形式缺失与可操作的恢复条件。
+    import ast
+    expressions = ([claim.expr] if claim.expr and claim.wrt else [claim.lhs, claim.rhs])
+    try:
+        for expression in expressions:
+            if not expression or any('\u4e00' <= char <= '\u9fff' for char in expression):
+                return None
+            ast.parse(expression.replace('^', '**'), mode='eval')
+    except (SyntaxError, ValueError):
+        return None
     if claim.expr and claim.wrt:
         return PlannedCheck("sympy", "find_counterexample", {
             "expr": claim.expr, "wrt": claim.wrt, "direction": claim.direction,

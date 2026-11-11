@@ -231,6 +231,9 @@ class BudgetedLLM:
             result = self._inner.invoke(*args, **kwargs)
         except Exception as exc:
             if self._on_event:
+                if isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower():
+                    self._on_event("llm_timeout", {"task_id": self._task_id,
+                        "agent": self._stage, "error": "模型调用超时，已耗尽客户端重试"})
                 self._on_event("llm_error", {"task_id": self._task_id,
                                               "agent": self._stage,
                                               "error": f"{type(exc).__name__}: {exc}"[:300]})

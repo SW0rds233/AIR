@@ -232,6 +232,10 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
             )
 
         evidence_items, coverage, unresolved = collected
+        runtime.emit("evidence_retrieval", {
+            "task_id": task.task_id, "agent": self.role,
+            **_coverage_dict(coverage), "sources": len(evidence_items),
+        })
         if not evidence_items and not coverage.executed:
             return self.blocked(
                 task, coverage.uncovered[0] if coverage.uncovered else "检索未执行",
@@ -244,6 +248,7 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                 usage=usage,
                 changes=novelty_changes)
 
+        evidence_items = self.assess_sources(task, context, runtime, usage, evidence_items)
         locatable = [e for e in evidence_items if e.get("locator")]
         changes = [self._evidence_proposal(task, e, topic) for e in evidence_items]
         # 证据归属: 证据必须绑定到**具体命题版本**, 否则同一批证据会被所有命题
@@ -257,6 +262,15 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
         # 对照来源 (本地库优先, 否则外部检索)。
         changes.extend(novelty_changes)
         needs = self._needs_from(evidence_items, locatable, coverage)
+        for claim_id in dict.fromkeys(str(row.get("claim_id") or "") for row in evidence_items
+                                     if row.get("relation") in {"supports", "partially_supports"}):
+            if claim_id:
+                needs.append(ResearchNeed(
+                    kind=NeedKind.derivation, statement="核验已完成证据判定的命题义务",
+                    why="支持关系已登记，仍需通过义务核验，不能直接提升结论等级",
+                    hints={"claim_id": claim_id, "trigger_id": f"support:{task.task_id}:{claim_id}"},
+                    acceptance=["依据具体命题的证据核验必要义务，保留未闭合条件"],
+                    blocking=False))
         if evidence_items and str((task.hints or {}).get("need_kind", "")) == "more_sources":
             if task.hints.get("research_context") == "reasoning_lookup":
                 needs.append(ResearchNeed(
@@ -265,12 +279,16 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                     why="推理阶段的新命中文献已经登记，需要完成原文与论断的对应核查",
                     acceptance=["标出所用来源及适用范围，不把摘要或书目当作已核验结论"],
                     hints={"trigger_id": f"source-reasoning:{task.hints.get('query', '')}"}))
-            needs.append(ResearchNeed(
-                kind=NeedKind.manuscript_revision,
-                statement="将新检索到的来源接入论文论证与参考文献",
-                why="定向检索结果必须回到对应的研究论断，完成文献与写作闭环",
-                acceptance=["在对应论证段落引用已登记来源，更新参考文献与检索范围"],
-            ))
+            from src.publication.references import research_citation_eligible
+            if any(research_citation_eligible(row) for row in evidence_items):
+                needs.append(ResearchNeed(
+                    kind=NeedKind.manuscript_revision,
+                    statement="将已审查的来源接入论文论证与参考文献",
+                    why="已形成可引用来源，按支持范围引用，不将背景当成证明",
+                    acceptance=["在对应论证段落引用已登记来源，更新参考文献与检索范围"],
+                ))
+            else:
+                unresolved.append("0 条可引用来源：需完成来源判定或出版核实，未派发引用修订")
         for link in links:
             payload = link.payload
             if payload.get("relation") != "contradicts" or not payload.get("locator"):
@@ -291,7 +309,7 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
             ))
         summary = (
             f"检索{kinds_note(policy)}: 命中 {coverage.hits} 条 / 入库 {coverage.ingested}, "
-            f"可引用 {len(locatable)} 条 (仅摘要 {coverage.abstract_only}); "
+            f"可定位 {len(locatable)} 条 (仅摘要 {coverage.abstract_only}); "
             f"检索式 {len(coverage.queries)} 条"
         )
         if llm_note:
@@ -321,6 +339,77 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                             usage=usage, payload=payload)
 
     # ---- 确定性检索 ----
+    def assess_sources(self, task, context, runtime, usage, rows):
+        """在团队路径真正调用语义审查；无模型/无引文时不提升关系。
+
+        每份来源只登记一个具体命题的判断，其他命题仍需独立审查。
+        首轮还没有命题时只建立研究背景关系，不把研究问题当成已证结论。
+        """
+        from src.research.evidence import build_support_judge, grade_evidence
+        from src.publication.references import citation_eligible
+        from src.research.schemas import Claim, SourceEvidence, SupportKindOfEvidence
+
+        if not runtime.llm_available():
+            return rows
+        claims = [claim for claim in (_parse_claim(row) for row in
+                  context.objects.get("claim", [])) if claim is not None]
+        target = str(task.hints.get("claim_id") or "")
+        if target:
+            claims = [claim for claim in claims if claim.id == target]
+            if not claims:
+                return rows
+        targets = claims[:4] or [Claim(statement=context.request or task.objective)]
+        judge = build_support_judge(runtime.llm(task, usage, stage="evidence"))
+        # 全文优先，单任务最多审查 12 个来源、每个最多 4 个命题。
+        ordered = sorted(rows, key=lambda row: (
+            not citation_eligible(row), row.get("content_level") != "fulltext"))
+        result = []
+        assessed = 0
+        calls = 0
+        for index, row in enumerate(ordered):
+            if index >= 12 or calls >= 16 or task.budget.exceeded_by(usage):
+                result.append(row)
+                continue
+            chosen = None
+            chosen_claim = None
+            for claim in targets:
+                if calls >= 16 or task.budget.exceeded_by(usage):
+                    break
+                raw = {key: value for key, value in row.items()
+                       if key in SourceEvidence.model_fields}
+                raw.update(location=row.get("locator") or row.get("location") or "",
+                           claim_id=claim.id, support="insufficient", support_evidence="")
+                item = judge(claim, SourceEvidence.model_validate(raw))
+                calls += 1
+                # 解析失败回落的词面匹配没有引文，不能作为已审查证据。
+                if item.reviewer != "llm":
+                    item.support = SupportKindOfEvidence.insufficient
+                if not claims:
+                    if item.support != SupportKindOfEvidence.insufficient:
+                        item.support = SupportKindOfEvidence.background
+                        item.support_reason = "与研究问题相关的背景资料；尚未判定对具体命题的支持"
+                    item.claim_id = ""
+                if item.content_level == "abstract":
+                    item.notes = (item.notes + " 支持关系判定仅基于摘要，未核对全文").strip()
+                item.evidence_grade = grade_evidence([item])
+                if chosen is None or item.support.value != "insufficient":
+                    chosen = item
+                    chosen_claim = claim
+                if item.support.value in {"supports", "partially_supports", "contradicts"}:
+                    break
+            if chosen is None:
+                result.append(row)
+                continue
+            assessed += 1
+            result.append({**row, **_evidence_row(chosen),
+                           "claim_version": chosen_claim.version if claims else 0})
+        runtime.emit("evidence_assessed", {
+            "task_id": task.task_id, "agent": self.role, "assessed": assessed,
+            "usable": sum(row.get("relation") in {"supports", "partially_supports", "contradicts", "background"}
+                          for row in result),
+        })
+        return result
+
     def retrieve(self, task: AgentTask, context: ContextPack, runtime: AgentRuntime,
                  *, topic: str, query: str, policy: str,
                  selected_queries: list[str] | None = None,
@@ -565,6 +654,8 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                 target_id = str(item.get("claim_id") or "")
                 if target_id and target_id != claim_id:
                     continue
+                if target_id and item.get("claim_version", claim_version) != claim_version:
+                    continue
                 relation = str(item.get("relation", "insufficient") or "insufficient")
                 if relation not in valid:
                     relation = "insufficient"
@@ -575,7 +666,7 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                     claim_ref=ObjectRef(id=claim_id, version=claim_version),
                     source_ref=ObjectRef(id=source_id or str(item.get("id", "")), version=1),
                     relation=SupportKindOfEvidence(relation),
-                    excerpt=str(item.get("excerpt", "") or "")[:300],
+                    excerpt=str(item.get("support_evidence") or item.get("excerpt") or "")[:300],
                     locator=str(item.get("locator", "") or ""),
                     # 只有真的支持本命题时才说"条件匹配"; 其余情况不得默认成立
                     condition_match=relation in ("supports", "partially_supports"),
@@ -628,6 +719,14 @@ def _evidence_row(item: Any) -> dict[str, Any]:
         "char_end": int(getattr(item, "char_end", -1)),
         "excerpt": clip(getattr(item, "excerpt", "") or "", 1600),
         "relation": relation if isinstance(relation, str) else "insufficient",
+        "claim_id": getattr(item, "claim_id", ""),
+        "support": relation,
+        "support_evidence": getattr(item, "support_evidence", ""),
+        "support_reason": getattr(item, "support_reason", ""),
+        "reviewer": getattr(item, "reviewer", ""),
+        "evidence_grade": getattr(getattr(item, "evidence_grade", None), "value", "unsupported"),
+        "peer_reviewed": getattr(item, "peer_reviewed", False),
+        "study_design": getattr(getattr(item, "study_design", None), "value", "observational"),
         "credibility": str(getattr(getattr(item, "credibility", None), "value", "")
                            or getattr(item, "credibility", "") or ""),
         "source_kind": str(getattr(getattr(item, "source_kind", None), "value", "")

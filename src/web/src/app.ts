@@ -1,4 +1,5 @@
 /** 装配页面、控制器和视图；可写状态集中在 research-store。 */
+import { appendMessage } from './views/conversation';
 import {
   byId, scrollToBottom, setDisabled, setHtml, setPlaceholder, setProp,
   setText, setVal, val,
@@ -172,18 +173,7 @@ function defaultPlaceholder() {
 }
 
 function addMsg(text: any, cls: any) {
-  const row = document.createElement('div');
-  row.className = 'msg ' + cls;
-  const avatar = document.createElement('div');
-  avatar.className = 'avatar';
-  avatar.textContent = cls === 'msg-user' ? '我' : (cls === 'msg-node' ? '·' : 'AI');
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
-  bubble.textContent = text;
-  row.appendChild(avatar);
-  row.appendChild(bubble);
-  byId('log')!.appendChild(row);
-  scrollToBottom('log');
+  appendMessage(byId('log')!, { text: String(text || ''), role: String(cls || '').replace(/^msg-/, '') });
 }
 
 /* ---------------- 统一输入的准备 (取代旧的"模式切换") ----------------
@@ -801,6 +791,7 @@ function handleEvent(ev: any) {
           'brief_ready', 'plan_ready', 'supervisor_decision', 'task_started',
           'task_result', 'task_finished', 'commit_failed', 'review_issue',
           'run_finished', 'llm_error', 'progress_export_failed',
+          'evidence_retrieval', 'evidence_assessed', 'llm_timeout',
         ]);
         if (!kind || visibleInChat.has(kind)) addMsg(ev.text, cls);
       }

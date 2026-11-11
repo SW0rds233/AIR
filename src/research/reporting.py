@@ -347,9 +347,13 @@ def summarize_event(kind: str, payload: dict | None) -> str:
     if kind == "design_necessity_evaluated":
         state = "已关闭" if payload.get("closed") else "未满足"
         return f"设计存在性必要条件 {state}: {payload.get('statement') or ''}"[:160]
-    if kind == "retrieval_coverage":
+    if kind == "evidence_assessed":
+        return f"证据审查: 已判定 {payload.get('assessed', 0)} 条，可用关系 {payload.get('usable', 0)} 条"
+    if kind == "llm_timeout":
+        return "模型调用超时，已耗尽客户端重试；本次任务保留失败原因"
+    if kind in {"retrieval_coverage", "evidence_retrieval"}:
         return (f"检索覆盖: 命中 {payload.get('hits', 0)} 条, "
-                f"入库 {payload.get('ingested', 0)} 条"
+                f"入库 {payload.get('ingested', 0)} 条，仅摘要 {payload.get('abstract_only', 0)} 条"
                 + (f", 未覆盖 {len(payload.get('uncovered') or [])} 项"
                    if payload.get("uncovered") else ""))
     if kind == "brief_ready":

@@ -27,6 +27,10 @@ def _spec(kind: str, required: tuple[str, ...] = (), summary: str = "",
 
 # 事件目录 (唯一权威)
 EVENT_SPECS: dict[str, EventSpec] = dict([
+    _spec("evidence_retrieval", ("task_id", "hits", "ingested", "abstract_only"),
+          "后台检索覆盖", surface=True),
+    _spec("evidence_assessed", ("task_id", "assessed", "usable"), "证据关系审查", surface=True),
+    _spec("llm_timeout", ("task_id", "agent"), "模型调用超时", surface=True),
     # 生命周期
     _spec("run_start", ("project_id", "problem_id"), "研究运行开始", surface=True),
     _spec("formulated", ("claims", "obligations", "problem_id"),

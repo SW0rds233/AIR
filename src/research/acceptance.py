@@ -480,6 +480,12 @@ def missing_section_references(text: str) -> list[str]:
 
 def _cited_numbers(text: str) -> set[int]:
     """正文里出现的引用编号: `[1]` / `[1,2]` / `\\cite{...}` / `\\upcite{...}`。"""
+    # 数学区间、数组下标和示例代码不是文献引用。
+    text = re.sub(r"```.*?```|~~~.*?~~~|`[^`\n]*`", "", text or "", flags=re.S)
+    text = re.sub(r"\$\$.*?\$\$|(?<!\\)\$[^$]*?(?<!\\)\$|\\\(.*?\\\)|\\\[.*?\\\]",
+                  "", text, flags=re.S)
+    text = re.sub(r"\\begin\{(equation\*?|align\*?|gather\*?|displaymath|math)\}.*?\\end\{\1\}",
+                  "", text, flags=re.S)
     numbers: set[int] = set()
     for group in re.findall(r"\[(\d+(?:\s*[,\-–]\s*\d+)*)\]", text or ""):
         for part in re.split(r"[,\-–]", group):
@@ -524,7 +530,7 @@ def _dangling_refs(text: str) -> list[str]:
 
 # 允许的占位符: 必须带"待补"标注, 否则视为未标注占位符
 _PLACEHOLDER_ALLOWED = ("待作者补充", "待补", "占位", "TODO(作者)")
-_PLACEHOLDER_PAT = re.compile(r"(XXXX|xxx+|待填写|待定|\{作者\}|作者姓名|单位名称)")
+_PLACEHOLDER_PAT = re.compile(r"(XXXX|xxx+|待填写|\{作者\}|作者姓名|单位名称)")
 
 
 def _unlabelled_placeholders(text: str) -> list[str]:
