@@ -62,7 +62,7 @@ def export_package(
             fh.write(json.dumps(decision, ensure_ascii=False) + "\n")
 
     (root / "novelty_review.md").write_text(_render_novelty(snapshot), encoding="utf-8")
-    (root / "unresolved.md").write_text(_render_unresolved(snapshot, notes or []), encoding="utf-8")
+    write_unresolved_report(root, snapshot, notes or [])
     (root / "manuscript.md").write_text(manuscript_md, encoding="utf-8")
     if manuscript_tex:
         (root / "paper.tex").write_text(manuscript_tex, encoding="utf-8")
@@ -341,7 +341,9 @@ def _render_unresolved(snapshot: ResearchSnapshot, notes: list[str]) -> str:
             groups.setdefault(category, []).append(value)
         for category, items in groups.items():
             lines += ["", f"### {category}（{len(items)}）", ""]
-            lines.extend(f"- {item}" for item in items)
+            lines.extend(f"- {item}" for item in items[:8])
+            if len(items) > 8:
+                lines.append(f"- 另有 {len(items) - 8} 条；见 [完整交付说明](unresolved-details.json)。")
     return "\n".join(lines) + "\n"
 
 
@@ -350,6 +352,9 @@ def write_unresolved_report(base_dir: str | Path, snapshot: ResearchSnapshot,
     """写入与最终交付评估一致的未决项报告。"""
     target = Path(base_dir) / "unresolved.md"
     target.write_text(_render_unresolved(snapshot, list(notes or [])), encoding="utf-8")
+    (Path(base_dir) / "unresolved-details.json").write_text(
+        json.dumps(list(dict.fromkeys(str(note) for note in (notes or []))),
+                   ensure_ascii=False, indent=2), encoding="utf-8")
     return target
 
 

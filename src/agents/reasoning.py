@@ -617,9 +617,17 @@ def _formalisable_subject(context: ContextPack, task: AgentTask | None = None):
     obligations = [o for o in (_parse(ProofObligation, row)
                                for row in context.objects.get("obligation") or [])
                    if o is not None and o.claim_id in ("", claim.id) and o.claim_version == claim.version]
-    evidence = [e for e in (_parse(SourceEvidence, row)
-                            for row in context.objects.get("evidence") or [])
-                if e is not None]
+    from src.research.snapshot import _evidence_of
+    evidence = []
+    for row in context.objects.get("evidence") or []:
+        if row.get("claim_id") not in (None, "", claim.id):
+            continue
+        if row.get("claim_id") and row.get("claim_version", claim.version) != claim.version:
+            continue
+        try:
+            evidence.append(_evidence_of(row))
+        except (ValueError, TypeError):
+            continue
     return claim, obligations, evidence
 
 
@@ -741,6 +749,10 @@ def _evidence_links_for(task: AgentTask, claim: Any,
     valid = {kind.value for kind in SupportKindOfEvidence}
     out: list[ChangeProposal] = []
     for row in (context.objects.get("evidence") or [])[:20]:
+        if row.get("claim_id") not in (None, "", claim.id):
+            continue
+        if row.get("claim_id") and row.get("claim_version", claim.version) != claim.version:
+            continue
         source_id = str(row.get("source_id") or row.get("id") or "")
         if not source_id:
             continue
@@ -753,7 +765,7 @@ def _evidence_links_for(task: AgentTask, claim: Any,
             source_ref=ObjectRef(id=source_id,
                                  version=int(row.get("version", 1) or 1)),
             relation=SupportKindOfEvidence(relation),
-            excerpt=str(row.get("excerpt", "") or "")[:300],
+            excerpt=str(row.get("support_evidence") or row.get("excerpt") or "")[:300],
             locator=str(row.get("locator", "") or row.get("location", "") or ""),
             condition_match=relation in ("supports", "partially_supports"),
             condition_notes=str(row.get("note", "") or ""),

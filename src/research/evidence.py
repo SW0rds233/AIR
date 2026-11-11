@@ -106,7 +106,7 @@ def quote_is_locatable(item: SourceEvidence, quote: str) -> bool:
         return False
     if not (item.location or item.page):
         return False
-    return text[:20] in (item.excerpt or "")
+    return text in (item.excerpt or "")
 
 
 def mark_pending(item: SourceEvidence, reason: str, *, original: str = "") -> SourceEvidence:

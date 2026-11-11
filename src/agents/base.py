@@ -268,8 +268,8 @@ class AgentBase:
         if not result.agent_run_id:
             result.agent_run_id = new_id("run")
         # 用量以基类统计为准 (角色实现不应各记一份)
-        result.usage = usage.merge(result.usage) if usage.llm_calls or usage.tool_calls \
-            else result.usage
+        if result.usage is not usage and (usage.llm_calls or usage.tool_calls):
+            result.usage = usage.merge(result.usage)
         return result
 
     # ---- 供子类覆盖 ----

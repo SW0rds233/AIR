@@ -453,6 +453,9 @@ class TeamSession:
                 on_skip=None)
             _rewrite_manifest(package, self.delivery, compile_status, compile_log)
         from src.research.package import write_unresolved_report
+        # 旧运行汇总包含编译前评估；导出时只采用本次最终出版判定。
+        package_notes = [note for note in package_notes
+                         if "尚未尝试编译 .tex" not in note]
         delivery_result = self.delivery.to_dict()
         previous_review = self.team.outcome.delivery.get("review")
         if previous_review is not None:
@@ -483,7 +486,7 @@ class TeamSession:
         # `compilation ok` 而包里没有 PDF, 那正是"看起来完整"。
         has_pdf = pdf_path.is_file() and pdf_path.stat().st_size > 1024
         if ok and has_pdf:
-            return "ok", log[-2000:]
+            return "ok", log
         # 失败时保留部分 PDF 供诊断，但不得让它冒充交付件。
         if pdf_path.is_file():
             try:
@@ -656,6 +659,8 @@ def _rewrite_manifest(package: Path, assessment, compile_status: str,
     manifest["compilation_status"] = compile_status
     from src.publication.compiler import layout_diagnostics
     manifest["layout_diagnostics"] = layout_diagnostics(compile_log)
+    if manifest["layout_diagnostics"]["severity"] == "warning":
+        manifest["layout_warning"] = "PDF 已生成，存在轻度排版越界，建议检查标记位置"
     if compile_status == "ok":
         manifest["compilation_log_tail"] = ""
     else:

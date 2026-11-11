@@ -55,6 +55,12 @@ class PDFCompilationTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("111.16", log)
 
+    def test_fishery_run_moderate_overflow_keeps_pdf_with_warning(self):
+        from src.publication.compiler import layout_diagnostics
+        (ok, log), _ = self.run_compiler([(0, "Overfull \\hbox (20.34pt too wide) at line 75\nOutput written")])
+        self.assertTrue(ok)
+        self.assertEqual(layout_diagnostics(log)['severity'], 'warning')
+
     def test_test_machine_math_escape_fixes_are_preserved(self):
         text = escape_latex("{0,1}^667 M^T c_i λ ∈")
         self.assertIn(r"$\{0,1\}^{667}$", text)

@@ -39,6 +39,24 @@ from src.research.task_store import (
 
 logger = logging.getLogger(__name__)
 
+
+def _final_review_task(results, task_order):
+    """每个最后稿件至少审阅一次；失败的写作调用没有新稿件可复审。"""
+    latest_writer = -1
+    latest_review = -1
+    for index, task_id in enumerate(task_order):
+        result = results.get(task_id)
+        if result is None:
+            continue
+        if result.agent == "writing" and result.outcome in (TaskOutcome.completed, TaskOutcome.partial):
+            latest_writer = index
+        elif result.agent == "review":
+            latest_review = index
+    if latest_writer > latest_review:
+        return AgentTask(agent="review", objective="独立审阅最后一版稿件及引用，更新交付结论",
+                         hints={"final_review_for": task_order[latest_writer]})
+    return None
+
 __all__ = [
     "TeamLoopState",
     "TeamRun",
@@ -414,6 +432,12 @@ class TeamRun:
             remaining_budget=self.runtime.run_budget,
             clarifications_asked=state.clarifications, objectives=state.objectives,
             pending_retries=state.pending_retries, dispatched=state.dispatched)
+        if decision.decision == DecisionKind.deliver:
+            final_review = _final_review_task(state.results, self.outcome.task_order)
+            if final_review is not None and state.rounds < self.max_rounds:
+                decision = SupervisorDecision(
+                    decision=DecisionKind.dispatch, tasks=[final_review],
+                    reason="最后一版稿件晚于审阅，先复审再评估交付")
         self.outcome.decisions.append(decision)
         self.runtime.emit("supervisor_decision", {
             "round": state.rounds, "decision": decision.decision.value,
@@ -575,6 +599,8 @@ class TeamRun:
                 "accepted": bool(judgement.get("accepted")),
                 "current": review_index > writing_index}
             self.outcome.delivery = apply_review_gate(self.outcome.delivery, review)
+            if not review["current"]:
+                self.outcome.stop_reason = "研究已封存，最后一版稿件未复审"
         self.outcome.unresolved_report["delivery"] = dict(self.outcome.delivery)
         if not self.outcome.delivery["accepted"]:
             self.outcome.status = TaskStatus.partial.value

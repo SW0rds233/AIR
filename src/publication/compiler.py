@@ -15,6 +15,8 @@ MAX_COMPILE_ROUNDS = 3
 # Retry transient Windows PDF locks with 2/4/6-second backoff.
 PASS_RETRY_ATTEMPTS = 4
 OVERFULL_TOLERANCE_PT = 2.0
+# 小幅越界保留有效 PDF 并显式告警；严重越界仍阻断交付。
+OVERFULL_BLOCKING_PT = 24.0
 
 
 def layout_diagnostics(log: str) -> dict:
@@ -22,6 +24,10 @@ def layout_diagnostics(log: str) -> dict:
         r"Overfull \\[hv]box\s*\(([\d.]+)pt too (?:wide|high)\)", log or "")]
     return {"overfull_count": len(boxes), "max_overfull_pt": max(boxes, default=0.0),
             "tolerance_pt": OVERFULL_TOLERANCE_PT,
+            "blocking_pt": OVERFULL_BLOCKING_PT,
+            "severity": ("error" if max(boxes, default=0.0) > OVERFULL_BLOCKING_PT
+                         else "warning" if max(boxes, default=0.0) > OVERFULL_TOLERANCE_PT
+                         else "ok"),
             "missing_glyphs": list(dict.fromkeys(re.findall(r"Missing character:[^\r\n]+", log or "")))}
 _RERUN_PATTERNS = (
     r"Rerun to get cross-references right",
@@ -117,9 +123,9 @@ def compile_latex(tex_path: str, workdir: str | None = None, engine: str = "xela
     if remaining:
         return False, "交叉引用/标签经过多遍编译仍未稳定:\n" + last_log[-2000:]
     diagnostics = layout_diagnostics(last_log)
-    if diagnostics["max_overfull_pt"] > OVERFULL_TOLERANCE_PT:
+    if diagnostics["max_overfull_pt"] > OVERFULL_BLOCKING_PT:
         return False, (f"LaTeX 排版溢出 {diagnostics['max_overfull_pt']:.2f}pt "
-                       f"(容差 {OVERFULL_TOLERANCE_PT:.1f}pt)，请修正后再交付\n" + last_log)
+                       f"(阻断阈值 {OVERFULL_BLOCKING_PT:.1f}pt)，请修正后再交付\n" + last_log)
 
     # A valid short article can be smaller than 10 KB. Check the PDF signature,
     # after confirming successful compilation and stable references above.

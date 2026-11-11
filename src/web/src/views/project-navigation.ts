@@ -3,8 +3,7 @@
 import {
   fmtTime,
   historyItemHtml,
-  messageAvatar,
-  messageClass,
+  messageElement,
   statusLabel,
   type ConversationMessage,
   type ConversationSummary,
@@ -79,9 +78,7 @@ function toLogEntry(m: ConversationMessage): HistoryLogEntry {
   }
   return {
     kind: 'message',
-    html: '<div class="msg ' + esc(messageClass(m)) + '">' +
-      '<div class="avatar">' + esc(messageAvatar(m)) + '</div>' +
-      '<div class="bubble">' + esc(m.text || '') + '</div></div>',
+    html: messageElement(m).outerHTML,
   };
 }
 

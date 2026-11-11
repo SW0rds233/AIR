@@ -141,6 +141,36 @@
   .msg-done .bubble { background: var(--success-soft); color: var(--success); }
   .msg-system .bubble { background: var(--warn-soft); color: var(--warn); }
 
+  #log { padding: 20px clamp(12px, 3vw, 28px); scroll-behavior: auto; }
+  .msg { gap: 10px; margin: 0 0 20px; line-height: 1.65; }
+  .message-body { flex: 1; min-width: 0; max-width: 100%; }
+  .message-label { color: var(--muted); font-size: 11px; margin: 0 0 5px 2px; font-weight: 600; }
+  .message-content { white-space: normal; padding: 10px 14px; border: 1px solid var(--border); border-radius: 12px; }
+  .message-content > :first-child { margin-top: 0; }
+  .message-content > :last-child { margin-bottom: 0; }
+  .message-content p { margin: 0 0 10px; }
+  .message-content pre { overflow-x: auto; padding: 10px; background: rgba(0,0,0,.04); border-radius: 6px; }
+  .message-content code { overflow-wrap: anywhere; }
+  .message-content table { display: block; max-width: 100%; overflow-x: auto; }
+  .message-content a { text-decoration: underline; overflow-wrap: anywhere; }
+  .msg-user { flex-direction: row-reverse; margin-left: 8%; }
+  .msg-user .message-label { text-align: right; }
+  .msg-user .message-content a { color: inherit; }
+  .msg-node { opacity: 1; }
+  .msg-node .bubble { padding: 8px 12px; background: #f8fafc; border-left: 2px solid var(--border); }
+  .message-details { min-width: 0; border: 1px solid var(--border); border-radius: 10px; }
+  .message-details summary { cursor: pointer; padding: 9px 12px; color: var(--muted); overflow-wrap: anywhere; }
+  .message-details[open] summary { border-bottom: 1px solid var(--border); }
+  .message-details .bubble { border: 0; border-radius: 0 0 10px 10px; }
+  .conversation-jump { flex: none; align-self: center; margin: 0 0 8px; border-radius: 20px; font-size: 12px; }
+  .conversation-jump[hidden] { display: none; }
+  @media (max-width: 640px) {
+    #log { padding: 12px; }
+    .msg { gap: 7px; }
+    .msg-user { margin-left: 3%; }
+    .message-content { padding: 8px 10px; }
+  }
+
   #inputbar { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--border); }
   #reply { flex: 1; resize: none; max-height: 180px; }
 

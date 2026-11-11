@@ -220,8 +220,8 @@ HTTP_BACKOFF_BASE = float(os.getenv("HTTP_BACKOFF_BASE", "2"))
 HTTP_429_BACKOFF_BASE = float(os.getenv("HTTP_429_BACKOFF_BASE", "4"))
 
 # LLM 调用超时: 推理模型 (kimi-k2.6 等) 审稿/写作耗时长, 需要更宽容的超时
-LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "900"))
-LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "180"))
+LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
 
 # ===== 理论研究模式的资源预算 =====
 # 除动作/工具调用次数外, 还要限制模型 token、费用与墙钟时间; 任一超限即**停止并导出

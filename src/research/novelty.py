@@ -153,5 +153,8 @@ def render_novelty(record: NoveltyRecord) -> str:
             lines.append(f"| {r.result} | {r.locator or '—'} | {r.difference} |")
     lines.append("")
     lines.append(f"结论: {record.conclusion}")
-    lines.append(f"（{record.bounded_statement}）")
+    if record.status == NoveltyStatus.unchecked:
+        lines.append("（尚未完成等价性比较，不能据此判断新颖性）")
+    else:
+        lines.append(f"（{record.bounded_statement}）")
     return "\n".join(lines)
