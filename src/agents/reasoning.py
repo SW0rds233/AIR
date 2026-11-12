@@ -114,6 +114,9 @@ class ReasoningAgent(AgentBase):
   修正旧命题时提供其 id 和修正条件，避免重新生成整套文献摘要命题。
   可编码的结论必须给 lhs/rhs/relation/variables/variable_domains；不能编码时给逐步论证和缺口。
   不得把综述、检索进度或写作建议注册成需要证明的科学命题。
+  多环节机制先拆成每条只含一个因果箭头的小命题，逐环登记支持与迁移条件；
+  整条作用链通过 dependencies 引用小命题，不能用某一环的证据证明全链。
+  自定义量的等式仅表示定义；真实量的乘法分解需声明假设和量纲，不得冒充恒等式。
 
 最终输出 JSON:
 {"strategy": "derivation|synthesis|counterexample|quantitative",
@@ -406,12 +409,14 @@ class ReasoningAgent(AgentBase):
             str(row.get("relation") or row.get("support") or "")
             in {"supports", "partially_supports"}
             and str(row.get("claim_id") or "") in {"", claim.id}
+            and row.get("support_scope", "claim") == "claim"
             for row in context.objects.get("evidence") or [] if isinstance(row, dict)
         )
         if (task.source_policy in {"both", "user_kb", "autonomous"}
                 and not is_formal_question(question)
                 and claim.study.design.value == "theory"
                 and claim.origin.value == "proposed"
+                and not (claim.claim_type.value == "definitional" and claim.relation.value == "==")
                 and (claim.lhs and claim.rhs or claim.strategy in {"derivation", "proof", "identity_simplification"})
                 and not related_support):
             return self.blocked(
@@ -787,6 +792,8 @@ def _evidence_links_for(task: AgentTask, claim: Any,
         if not source_id:
             continue
         relation = str(row.get("relation") or "insufficient")
+        if row.get("support_scope") == "mechanism_link":
+            relation = "background"
         if relation not in valid:
             relation = "insufficient"
         link = EvidenceLink(

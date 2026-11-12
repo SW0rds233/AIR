@@ -130,6 +130,7 @@ def build_llm(config_key: str = "main"):
     config_key: "main" / "reviewer" / "cheap" / "coordinator" / "theorist" / "verifier"
     """
     from langchain_openai import ChatOpenAI
+    import httpx
 
     cfg = _LLM_CONFIGS[config_key]
     extra = _model_extra_body(cfg["model"])
@@ -143,8 +144,9 @@ def build_llm(config_key: str = "main"):
         api_key=cfg["api_key"],
         base_url=cfg["base_url"],
         temperature=cfg["temperature"],
-        timeout=LLM_TIMEOUT,
-        max_retries=LLM_MAX_RETRIES,
+        timeout=httpx.Timeout(LLM_TIMEOUT, connect=min(10., LLM_TIMEOUT)),
+        # Team runtime owns retries and the wall-clock deadline; no SDK retry stack.
+        max_retries=0,
         default_headers=headers,
         **({"extra_body": extra} if extra else {}),
     )
@@ -223,7 +225,7 @@ HTTP_429_BACKOFF_BASE = float(os.getenv("HTTP_429_BACKOFF_BASE", "4"))
 # 300s 的依据: 上一轮实测审阅单次约 158s (kimi 关 thinking 后 1-3 分钟), 留出
 # 近一倍余量; 900s 会让失控调用叠加重试拖到 45 分钟 (实测一次 2178s)。
 LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "300"))
-LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
+LLM_MAX_RETRIES = 0  # Compatibility name; retries belong to the shared task budget.
 
 # ===== 理论研究模式的资源预算 =====
 # 除动作/工具调用次数外, 还要限制模型 token、费用与墙钟时间; 任一超限即**停止并导出

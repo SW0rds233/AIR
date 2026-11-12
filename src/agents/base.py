@@ -247,10 +247,19 @@ class AgentBase:
         role = role_of(self.role) or self.role
         usage = UsageRecord()
         tools = self.tools(task, context, runtime)
-        if task.source_set_ids:
+        source_ids = list(task.source_set_ids)
+        if not source_ids and context.grant is not None:
+            source_ids = list(context.grant.source_set_ids)
+        if not source_ids and context.grant is None:
+            source_ids = [str(row.get("source_set_id") or "") for row in context.sources
+                          if row.get("source_set_id")]
+        if not source_ids and context.grant is None and task.session_id:
+            from src.utils.conversation_layout import conversation_topic
+            source_ids = [conversation_topic(task.session_id)]
+        if source_ids:
             from dataclasses import replace
             tools = [replace(spec, default_arguments={**spec.default_arguments,
-                           "topic": task.source_set_ids[0]})
+                           "topic": source_ids[0]})
                      if spec.name in {"search_local_kb", "read_source"} else spec
                      for spec in tools]
         try:

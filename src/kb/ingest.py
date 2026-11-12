@@ -241,6 +241,8 @@ def ingest_machine(topic: str, papers: list[dict], embed: bool = False,
     from src.publication.references import BIBLIO_FIELDS
     from src.kb.identity import normalize_doi
     for paper in papers:
+        from src.utils.network_budget import phase_event
+        phase_event("ingest_parse", title=str(paper.get("title") or "")[:160])
         title = (paper.get("title") or "").strip()
         if not title:
             continue

@@ -141,7 +141,7 @@ def _hits(text: str, hints: tuple[str, ...]) -> bool:
 
 
 def _supporting(evidence: list[SourceEvidence]) -> list[SourceEvidence]:
-    return [e for e in evidence if e.support in SUPPORTING_RELATIONS]
+    return [e for e in evidence if e.content_supports]
 
 
 def _is_applied(claim: Claim) -> bool:

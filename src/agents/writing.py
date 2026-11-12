@@ -120,7 +120,9 @@ class WritingAgent(AgentBase):
         manuscript: Manuscript | None = None
         parse_note = ""
 
-        if packet.is_revision():
+        targeted_revision = _is_revision_task(task) or bool(task.hints.get("review_cycle")) \
+            or task.hints.get("need_kind") == "manuscript_revision"
+        if packet.is_revision() and targeted_revision:
             manuscript, parse_note = self._patch_with_llm(task, runtime, usage, packet)
             if manuscript is None and runtime.llm_available("writing"):
                 return self.blocked(task, "局部修订未完成，保留已有稿件: " + parse_note,
@@ -208,8 +210,12 @@ class WritingAgent(AgentBase):
 
         prior = Manuscript.model_validate(packet.prior_manuscript)
         targets = revision_targets(prior, packet.review_issues, task.hints)
+        fallback_note = ""
         if not targets:
-            return None, "审阅意见未定位到正文块，请提供 block_id 或章节定位"
+            targets = revision_section_targets(prior, packet.review_issues, task.objective)
+            fallback_note = "审阅块定位不足，已回退到最相关章节的局部修订"
+        if not targets:
+            return None, "稿件无可修订正文章节"
         if not runtime.llm_available("writing") or task.budget.exceeded_by(usage):
             return None, "写作模型不可用或预算已耗尽"
         try:
@@ -219,12 +225,16 @@ class WritingAgent(AgentBase):
                     + json.dumps({"objective": task.objective, "issues": packet.review_issues,
                                   "blocks": [b.to_dict() for b in targets]}, ensure_ascii=False)
                     + '\n返回 JSON: {"blocks":[{"block_id":"原 id","text":"完整修订文字","math":"公式体，无 $ 分隔符"}]}。'
-                      '只返回有修改的块，最多 4 块；不能解决的问题保留原文。'),
+                      f'只返回有修改的块，最多 {len(targets)} 块；不能解决的问题保留原文。'),
             ])
             payload, note = extract_json(getattr(response, "content", ""))
             if not isinstance(payload, dict):
                 return None, note
-            return apply_block_patch(prior, payload.get("blocks"), {b.block_id for b in targets}), ""
+            patched = apply_block_patch(prior, payload.get("blocks"), {b.block_id for b in targets})
+            if fallback_note:
+                patched.gaps.append({"kind": "revision_locator_fallback", "detail": fallback_note,
+                                     "blocking": False})
+            return patched, fallback_note
         except Exception as error:  # failed patch must not fall back to rewriting the paper
             return None, f"局部修订失败: {error}"
 
@@ -818,6 +828,8 @@ def _section_material(packet: WritingPacket, role: str,
             "ref_id": source_id, "title": row.get("title"),
             "authors": row.get("authors"), "year": row.get("year"),
             "content_level": row.get("content_level"), "relation": row.get("relation"),
+            "support_scope": row.get("support_scope", "claim"),
+            "supported_link": row.get("supported_link"), "condition_notes": row.get("condition_notes"),
             "publication_status": row.get("publication_status"),
             "publication_verified_by": row.get("publication_verified_by"),
             "locator": row.get("locator"), "relevance": row.get("relevance_reason"),
@@ -1190,9 +1202,25 @@ def revision_targets(manuscript: Manuscript, issues: list[dict[str, Any]],
     return targets[:4]
 
 
+def revision_section_targets(manuscript: Manuscript, issues: list[dict[str, Any]], objective: str) -> list[Block]:
+    sections = [s for s in manuscript.sections if s.blocks and s.role != "references"
+                and "参考文献" not in s.heading]
+    if not sections:
+        return []
+    text = objective + " " + " ".join(str(i.get("locator") or "") + " " +
+                                       str(i.get("summary") or "") for i in issues)
+    number = re.search(r"第\s*(\d+)\s*[章节]|(?:section|sec\.)\s*(\d+)", text, re.I)
+    if number and 1 <= int(number.group(1) or number.group(2)) <= len(sections):
+        return sections[int(number.group(1) or number.group(2)) - 1].blocks[:12]
+    def relevance(section):
+        terms = re.findall(r"[A-Za-z]{3,}|[\u4e00-\u9fff]{2}", section.heading)
+        return sum(term.casefold() in text.casefold() for term in terms)
+    return max(sections, key=relevance).blocks[:12]
+
+
 def apply_block_patch(manuscript: Manuscript, patches: Any, allowed: set[str]) -> Manuscript:
-    if not isinstance(patches, list) or not patches or len(patches) > 4:
-        raise ValueError("修订必须包含 1–4 个已定位正文块")
+    if not isinstance(patches, list) or not patches or len(patches) > min(12, len(allowed)):
+        raise ValueError("修订超出已定位正文块范围（最多 12 块）")
     result = manuscript.model_copy(deep=True)
     blocks = {block.block_id: block for block in result.all_blocks()}
     seen: set[str] = set()

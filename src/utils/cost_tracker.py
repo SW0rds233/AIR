@@ -247,7 +247,9 @@ class MeteredLLM:
         self._stage = stage
 
     def invoke(self, *args, **kwargs):
-        result = self._inner.invoke(*args, **kwargs)
+        from src.utils.network_budget import network_call
+        from src.config import LLM_TIMEOUT
+        result = network_call(lambda: self._inner.invoke(*args, **kwargs), timeout=LLM_TIMEOUT, phase=self._stage)
         try:
             usage = usage_metadata_of(result)
             model = getattr(self._inner, "model_name", "") or getattr(self._inner, "model", "")

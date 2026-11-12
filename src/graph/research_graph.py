@@ -57,6 +57,46 @@ def _final_review_task(results, task_order):
                          hints={"final_review_for": task_order[latest_writer]})
     return None
 
+
+def _review_before_delivery(state, task_order, max_revisions, max_rounds, remaining_budget=None):
+    """A failed current review gets a bounded repair or an explicit partial reason."""
+    reviews = [(tid, state.results[tid]) for tid in task_order if tid in state.results
+               and state.results[tid].agent == "review"]
+    if not reviews:
+        return None, ""
+    review_id, result = reviews[-1]
+    verdict = result.payload
+    if verdict.get("accepted") or not verdict.get("semantic_reviewed"):
+        return None, ""
+    if state.review_revisions >= max_revisions:
+        return None, "审阅未通过；已达到修订次数上限，保留未解决问题"
+    if state.rounds + 1 >= max_rounds:
+        return None, "审阅未通过；剩余轮次不足以完成修订与复审"
+    if remaining_budget is not None:
+        total, used = remaining_budget.total, remaining_budget.allocated
+        if ((total.max_llm_calls and total.max_llm_calls - used.max_llm_calls < 2)
+                or (total.max_tokens and total.max_tokens <= used.max_tokens)
+                or (total.max_cost_usd is not None and total.max_cost_usd <= remaining_budget.allocated_cost_usd)):
+            return None, "审阅未通过；剩余模型或费用预算不足以完成修订与复审"
+    if any((row.get("hints") or {}).get("review_task_id") == review_id for row in state.plan.tasks):
+        return None, "审阅未通过；本轮修订已尝试但仍有未解决问题"
+    issues = [issue for issue in result.issues if issue.category in {"readability", "completeness"}]
+    if not issues:
+        return None, "审阅未通过；剩余问题需补充科学依据或修正模型，不能靠文字修订解决"
+    attempts: dict[str, int] = {}
+    for row in state.plan.tasks:
+        if row.get("task_id") in state.results:
+            for issue_id in (row.get("hints") or {}).get("review_issue_ids") or []:
+                attempts[issue_id] = attempts.get(issue_id, 0) + 1
+    issues = [issue for issue in issues if attempts.get(issue.issue_id, 0) < 2]
+    if not issues:
+        return None, "审阅未通过；同一问题已尝试两次修复，需要新的依据或人工确认"
+    return AgentTask(agent="writing", objective="按最后一轮审阅修订相关章节并重新提交审阅",
+        hints={"review_cycle": True, "need_kind": "manuscript_revision", "review_task_id": review_id,
+               "review_issue_ids": [i.issue_id for i in issues],
+               "focus_blocks": [ref.id for issue in issues for ref in issue.affected_refs]},
+        acceptance_criteria=[i.summary for i in issues]), ""
+
 __all__ = [
     "TeamLoopState",
     "TeamRun",
@@ -438,6 +478,15 @@ class TeamRun:
                 decision = SupervisorDecision(
                     decision=DecisionKind.dispatch, tasks=[final_review],
                     reason="最后一版稿件晚于审阅，先复审再评估交付")
+            elif final_review is None:
+                revision, reason = _review_before_delivery(
+                    state, self.outcome.task_order, self.max_review_revisions, self.max_rounds,
+                    self.runtime.run_budget)
+                if revision:
+                    decision = SupervisorDecision(decision=DecisionKind.dispatch, tasks=[revision],
+                                                  reason="审阅未通过且仍有预算，先修订再复审")
+                elif reason:
+                    decision = SupervisorDecision(decision=DecisionKind.stop_with_report, reason=reason)
         self.outcome.decisions.append(decision)
         self.runtime.emit("supervisor_decision", {
             "round": state.rounds, "decision": decision.decision.value,
@@ -676,6 +725,10 @@ class TeamRun:
             task.project_id = self.project_id
         if not task.problem_id:
             task.problem_id = self.problem_id
+        if not task.source_set_ids:
+            task.source_set_ids = list(self.source_set_ids)
+        if not task.source_policy:
+            task.source_policy = self.source_policy
         if task.agent == "review":
             task.hints["review_threshold"] = self.review_threshold
         context = self._build_context(task, results)

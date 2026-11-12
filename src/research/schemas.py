@@ -12,7 +12,7 @@ import hashlib
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -622,6 +622,9 @@ class SourceEvidence(PublicationMetadata):
     # 2. 内容支持关系: 默认 insufficient, 必须显式判定
     support: SupportKindOfEvidence = SupportKindOfEvidence.insufficient
     support_reason: str = ""
+    support_scope: Literal["claim", "mechanism_link"] = "claim"
+    supported_link: str = ""
+    condition_notes: list[str] = Field(default_factory=list)
     support_evidence: str = ""  # 审查理由所依据的原文片段
     reviewer: str = ""          # 判定者 (rule / llm / human)
     # 3. 当前适用性
@@ -647,7 +650,7 @@ class SourceEvidence(PublicationMetadata):
     @property
     def content_supports(self) -> bool:
         """兼容视图: 是否建立了支持关系 (不再是一个可直接赋 True 的字段)。"""
-        return self.support in SUPPORTING_RELATIONS
+        return self.support in SUPPORTING_RELATIONS and self.support_scope == "claim"
 
     @property
     def support_strength(self) -> int:

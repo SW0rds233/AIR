@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, model_validator
 from src.agents.protocol import (
     AgentResult,
     AgentTask,
+    NeedKind,
     ResearchNeed,
     ReviewIssueRef,
     RunBudget,
@@ -737,6 +738,8 @@ class SupervisorAgent:
 
         # 2. 需求 -> 任务 (只派"计划里还没有的")
         needs = list(open_needs)
+        needs.sort(key=lambda need: 0 if need.kind == NeedKind.review else
+                   1 if need.kind == NeedKind.manuscript_revision and need.hints.get("review_cycle") else 2)
         if needs:
             issue_attempts: dict[str, int] = {}
             for row in plan.tasks:
