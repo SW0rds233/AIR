@@ -225,6 +225,9 @@ def _default_search_fn() -> Callable[[str, int], list[dict]] | None:
 
 
 def _embedding_enabled() -> bool:
+    from src.utils.network_budget import network_allowed
+    if not network_allowed():
+        return False
     try:
         from src.rag.vector_store import embedding_available
 
@@ -276,6 +279,11 @@ def _harvest_external(queries: list[str], policy: SourcePolicy, coverage: Retrie
     cached_store = KBStore(topic, create_if_missing=False) if default_db_path(topic).exists() else None
     successful_queries: dict[str, int] = {}
     for query in queries:
+        from src.utils.network_budget import network_allowed, phase_event
+        if not network_allowed():
+            coverage.failures.append("网络预算已耗尽，外检延后；继续使用本地资料与已有摘要")
+            break
+        phase_event("harvest_search", query=query[:160])
         if session_id_from_topic(topic) is None and cached_store is not None and cached_store.query_recently_searched(query) \
                 and cached_store.search_keyword(query, limit=1):
             coverage.executed = True
@@ -296,9 +304,11 @@ def _harvest_external(queries: list[str], policy: SourcePolicy, coverage: Retrie
         usable = [paper for paper in papers if isinstance(paper, dict)
                   and paper.get("title") and not paper.get("_semantic_rejected")
                   and not paper.get("retracted")]
-        successful_queries[query] = len(usable)
-        coverage.failures.extend(str(paper.get("error")) for paper in papers
-                                 if isinstance(paper, dict) and paper.get("error"))
+        query_errors = [str(paper.get("error")) for paper in papers
+                        if isinstance(paper, dict) and paper.get("error")]
+        if not query_errors and network_allowed():
+            successful_queries[query] = len(usable)
+        coverage.failures.extend(query_errors)
         coverage.hits += len(usable)
         ranked = sorted(usable, key=lambda paper: candidate_priority(paper, query), reverse=True)
         papers = [paper for paper in ranked if relevance_score(paper, query) >= .1][:per_query]
@@ -382,6 +392,11 @@ def _download_fulltext_for(papers, *, topic: str, per_query: int,
     重活, 不能因为一次检索命中很多就无限下载。
     """
     candidates = list(papers)
+    from src.utils.network_budget import network_allowed, phase_event
+    if not network_allowed():
+        coverage.uncovered.append("网络暂不可用，全文下载延后；已保留摘要候选")
+        return candidates
+    phase_event("harvest_download", candidates=len(candidates))
     if not candidates:
         return candidates
     try:

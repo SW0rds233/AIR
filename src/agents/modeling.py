@@ -192,12 +192,14 @@ class ModelingAgent(AgentBase):
             for row in (context.objects.get(kind) or [])
             if row.get("id") or row.get("source_id")
         }
+        candidates = self.repair_schema_once(candidates, task, runtime, usage, known_source_ids)
         for index, model in enumerate(candidates):
             model = normalise_model_candidate(model)
             if not model.get("claim_id") and len(claim_rows) == 1:
                 model["claim_id"] = str(claim_rows[0]["id"])
             try:
-                ResearchModel.model_validate(model)
+                # Persist the validated aliases too (not merely the unnormalised input).
+                model = ResearchModel.model_validate(model).model_dump(mode="json")
             except ValidationError as error:
                 rejected_models += 1
                 details = [{"candidate": index + 1,
@@ -252,6 +254,36 @@ class ModelingAgent(AgentBase):
                                 unresolved=unknowns[:6], usage=usage, payload=payload_out)
         return self.completed(task, summary, changes=changes, unresolved=checks[:6],
                               usage=usage, payload=payload_out)
+
+    def repair_schema_once(self, candidates, task, runtime, usage, known_sources):
+        invalid = []
+        for index, candidate in enumerate(candidates):
+            try:
+                ResearchModel.model_validate(normalise_model_candidate(candidate))
+            except ValidationError as error:
+                invalid.append({"index": index, "model": candidate,
+                    "errors": [{"field": ".".join(map(str, row["loc"])), "message": row["msg"]}
+                               for row in error.errors(include_input=False)[:8]]})
+        if not invalid or not runtime.llm_available("modeling") or task.budget.exceeded_by(usage):
+            return candidates
+        from langchain_core.messages import HumanMessage, SystemMessage
+        try:
+            response = runtime.llm(task, usage, stage="modeling").invoke([
+                SystemMessage(content=self.SYSTEM + "\n只修复字段格式，不改变科学含义、不增造来源。"),
+                HumanMessage(content=json.dumps({"invalid": invalid, "known_source_ids": sorted(known_sources)},
+                                               ensure_ascii=False)
+                    + '\n只返回 {"repairs":[{"index":0,"model":{}}]}，保留原序号。来源不足须保留为未决。')])
+            payload, _ = extract_json(getattr(response, "content", ""))
+            repaired = list(candidates)
+            allowed = {row["index"] for row in invalid}
+            for row in (payload.get("repairs") or []) if isinstance(payload, dict) else []:
+                if isinstance(row, dict) and row.get("index") in allowed and isinstance(row.get("model"), dict):
+                    repaired[row["index"]] = row["model"]
+            runtime.emit("model_schema_repair", {"task_id": task.task_id, "candidates": len(invalid), "attempt": 1})
+            return repaired
+        except Exception as error:
+            runtime.emit("model_schema_repair_failed", {"task_id": task.task_id, "error_type": type(error).__name__})
+            return candidates
 
     # ---- 建模内核 (M2): 从证据构造竞争候选并显式选中一人 ----
     def propose_via_kernel(self, task: AgentTask, context: ContextPack,

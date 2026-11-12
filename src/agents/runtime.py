@@ -203,7 +203,7 @@ class BudgetedLLM:
     def __init__(self, inner, usage: UsageRecord, budget: TaskBudget,
                  cancel: CancelToken | None = None, task_id: str = "",
                  stage: str = "team", *, on_usage: Callable[[dict], None] | None = None,
-                 on_event: Callable[[str, dict], None] | None = None):
+                 on_event: Callable[[str, dict], None] | None = None, network_budget=None):
         self._inner = inner
         self.usage = usage
         self.budget = budget
@@ -212,13 +212,17 @@ class BudgetedLLM:
         self._stage = stage
         self._on_usage = on_usage
         self._on_event = on_event
+        from src.utils.network_budget import NetworkBudget
+        self._network_budget = network_budget or NetworkBudget(
+            seconds=min(budget.max_wall_seconds, budget.max_seconds or budget.max_wall_seconds),
+            task_id=task_id, emit=on_event)
 
     def bind_tools(self, tools, **kwargs):
         """Keep progress and accounting hooks when LangChain binds tools."""
         bound = self._inner.bind_tools(tools, **kwargs)
         return BudgetedLLM(bound, self.usage, self.budget, self._cancel,
                            self._task_id, self._stage, on_usage=self._on_usage,
-                           on_event=self._on_event)
+                           on_event=self._on_event, network_budget=self._network_budget)
 
     def invoke(self, *args, **kwargs):
         if self._cancel is not None:
@@ -229,7 +233,11 @@ class BudgetedLLM:
         if self._on_event:
             self._on_event("llm_started", {"task_id": self._task_id, "agent": self._stage})
         try:
-            result = self._inner.invoke(*args, **kwargs)
+            from src.config import LLM_TIMEOUT
+            from src.utils.network_budget import current_budget, network_call, task_network_budget
+            with task_network_budget(current_budget() or self._network_budget):
+                result = network_call(lambda: self._inner.invoke(*args, **kwargs),
+                                      timeout=LLM_TIMEOUT, phase="llm")
         except Exception as exc:
             if self._on_event:
                 if isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower():
@@ -342,6 +350,11 @@ class ToolLoop:
                 break
             for call in calls:
                 name = str(call.get("name") or "")
+                spec = self.tools.get(name)
+                if spec and isinstance(call.get("args", {}), dict):
+                    args = dict(call.get("args") or {})
+                    args.update({key: value for key, value in spec.default_arguments.items() if not args.get(key)})
+                    call = {**call, "args": args}
                 self.sink.event("tool_started", {
                     "task_id": task_id, "agent": self.agent, "tool": name,
                     "arguments": _safe_tool_arguments(call.get("args"))})
@@ -494,6 +507,9 @@ class AgentRuntime:
         self._resolved_llm: dict[str, Any] = {}
         # Only executed, authorized tool observations populate this run-local cache.
         self.search_cache: dict[str, list[dict]] = {}
+        from src.utils.network_budget import NetworkState
+        self.network_state = NetworkState()
+        self._task_network_budgets: dict[str, Any] = {}
         #: 事件计数 (供测试与运行指标断言)。
         self.events: list[dict[str, Any]] = []
         #: 本运行的研究存储 (由装配层注入; 团队里就是 `TeamRun.task_store.store`)。
@@ -522,6 +538,11 @@ class AgentRuntime:
             "obligation_id": getattr(obligation, "id", ""),
             "tool": outcome.tool, "evaluated": outcome.evaluated,
             "closed": outcome.closed,
+            "record_id": outcome.record.id if outcome.record is not None else "",
+            "record_created": outcome.record is not None,
+            "reason": "" if outcome.record is not None else
+                      str(outcome.obligation_updates.get("detail") or "; ".join(outcome.notes)
+                          or "无可执行核验；义务保持未决"),
             "status": (outcome.record.status if outcome.record is not None else "")})
         return outcome
 
@@ -594,11 +615,16 @@ class AgentRuntime:
         inner = self._resolve_llm(stage or task.agent)
         if inner is None:
             raise RuntimeError("运行时未注入可用的 LLM (离线模式请用确定性实现)")
+        from src.utils.network_budget import current_budget, NetworkBudget
+        network = current_budget() or self._task_network_budgets.setdefault(task.task_id, NetworkBudget(
+            seconds=min(task.budget.max_wall_seconds, task.budget.max_seconds or task.budget.max_wall_seconds),
+            task_id=task.task_id, emit=self.emit, state=self.network_state,
+            cancel=lambda: self.cancel.raise_if_cancelled(task.task_id)))
         return BudgetedLLM(inner, usage, task.budget, self.cancel, task.task_id,
                            stage=stage or task.agent,
                            on_usage=lambda rec: self.emit("llm_call", {
                                "task_id": task.task_id, "agent": task.agent, **rec}),
-                           on_event=self.emit)
+                           on_event=self.emit, network_budget=network)
 
     def llm_available(self, stage: str = "") -> bool:
         """是否真的有可用模型。
@@ -786,8 +812,17 @@ class InProcessExecutor:
             "started_at": started, "budget": task.budget.to_dict(),
             "attempt": task.attempt, "trimmed": note,
         })
+        network = None
         try:
-            result = backend.agent.run(task, pack, self.runtime)
+            from src.utils.network_budget import NetworkBudget, task_network_budget
+            network = NetworkBudget(
+                seconds=min(task.budget.max_wall_seconds,
+                            task.budget.max_seconds or task.budget.max_wall_seconds),
+                task_id=task.task_id, emit=self.runtime.emit,
+                state=self.runtime.network_state,
+                cancel=lambda: self.runtime.cancel.raise_if_cancelled(task.task_id))
+            with task_network_budget(network):
+                result = backend.agent.run(task, pack, self.runtime)
         except TaskCancelled as e:
             result = AgentResult(task_id=task.task_id, agent=role,
                                  outcome=TaskOutcome.cancelled,
@@ -803,6 +838,10 @@ class InProcessExecutor:
                                  failure_reason=f"{type(e).__name__}: {e}")
         if not result.agent:
             result.agent = role
+        if network is not None and network.deferred and result.outcome != TaskOutcome.cancelled:
+            result.outcome = TaskOutcome.partial
+            result.payload["deferred"] = True
+            result.unresolved.append("网络或墙钟预算耗尽，已保留完成部分；恢复后补做未完成步骤")
         result = self.runtime.finalize(task, result, grant)
         return result
 

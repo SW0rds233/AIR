@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import time
 import re
 from pathlib import Path
 
@@ -47,16 +48,30 @@ def kb_collection_name(topic: str) -> str:
 # Embedding 是否可用的全局标记（避免重复探测日志刷屏）
 _EMBEDDING_CHECKED = False
 _EMBEDDING_OK = True
+_EMBEDDING_RETRY_AT = 0.
+
+
+class BoundedEmbeddings(OpenAIEmbeddings):
+    def embed_documents(self, texts, **kwargs):
+        from src.utils.network_budget import network_call, phase_event
+        phase_event("embed_batch", count=len(texts))
+        return network_call(lambda: super(BoundedEmbeddings, self).embed_documents(texts, **kwargs),
+                            timeout=120, phase="embedding")
 
 
 def get_embeddings() -> OpenAIEmbeddings:
-    global _EMBEDDING_CHECKED, _EMBEDDING_OK
+    global _EMBEDDING_CHECKED, _EMBEDDING_OK, _EMBEDDING_RETRY_AT
+    from src.utils.network_budget import network_allowed, NetworkUnavailable
+    if not network_allowed():
+        raise NetworkUnavailable("网络暂不可用，向量调用延后")
+    if not _EMBEDDING_OK and time.monotonic() >= _EMBEDDING_RETRY_AT:
+        _EMBEDDING_CHECKED = False
 
     model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
     base_url = os.getenv("EMBEDDING_BASE_URL", LLM_CONFIG["base_url"])
     api_key = os.getenv("EMBEDDING_API_KEY", LLM_CONFIG["api_key"])
 
-    embeddings = OpenAIEmbeddings(
+    embeddings = BoundedEmbeddings(
         model=model,
         api_key=api_key,
         base_url=base_url,
@@ -67,6 +82,7 @@ def get_embeddings() -> OpenAIEmbeddings:
         check_embedding_ctx_length=False,
         # 单次 embedding 请求超时: 避免云 API 无响应时长时间卡死 (默认 600s)
         request_timeout=120,
+        max_retries=0,
     )
 
     # 首次使用时探测 embedding 可用性（DeepSeek 等服务商无 embedding API）
@@ -77,6 +93,7 @@ def get_embeddings() -> OpenAIEmbeddings:
             _EMBEDDING_OK = True
         except Exception as e:
             _EMBEDDING_OK = False
+            _EMBEDDING_RETRY_AT = time.monotonic() + 60
             print(
                 f"  [警告] Embedding API 不可用 ({e.__class__.__name__})。"
                 f"RAG 向量检索/研究wiki将降级为不可用，但主流程仍可运行。\n"
@@ -91,6 +108,11 @@ def get_embeddings() -> OpenAIEmbeddings:
 def embedding_available(*, force: bool = False) -> bool:
     """Embedding 是否可用（用于调用方决定是否降级）"""
     global _EMBEDDING_CHECKED, _EMBEDDING_OK
+    from src.utils.network_budget import network_allowed
+    if not network_allowed():
+        return False
+    if not _EMBEDDING_OK and time.monotonic() >= _EMBEDDING_RETRY_AT:
+        _EMBEDDING_CHECKED = False
     # SKIP_EMBEDDING=1: 跳过向量化 (可选 RAG 增强), 直接返回 False
     try:
         from src.config import SKIP_EMBEDDING
@@ -102,11 +124,8 @@ def embedding_available(*, force: bool = False) -> bool:
     if force:
         _EMBEDDING_CHECKED = False
     if not _EMBEDDING_CHECKED:
-        _EMBEDDING_CHECKED = True
         try:
-            embeddings = get_embeddings()
-            embeddings.embed_query("connectivity test")
-            _EMBEDDING_OK = True
+            get_embeddings()
         except Exception as e:
             _EMBEDDING_OK = False
             print(

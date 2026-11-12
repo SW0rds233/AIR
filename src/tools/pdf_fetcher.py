@@ -318,6 +318,10 @@ def download_pdfs_for_papers(papers: list[dict], limit: int = 10,
     consecutive_arxiv_waits = 0  # 连续等待断路器冷却的次数 (用于放弃 arXiv)
     skip_reasons: dict[str, int] = {}
     for p in papers:
+        from src.utils.network_budget import network_allowed, phase_event, retry_wait
+        if not network_allowed():
+            break
+        phase_event("harvest_download", title=str(p.get("title") or "")[:160])
         processed += 1
         url = p.get("url", "")
         # 学术论文命名 (年_作者_标题.pdf), 供下载后重命名, 避免 arxiv/oa 编号文件名
@@ -345,7 +349,7 @@ def download_pdfs_for_papers(papers: list[dict], limit: int = 10,
                     if not arxiv_blocked_reported:
                         print(f"  [pdf_download] export.arxiv.org 断路器开启, 等待 {remaining:.0f}s 冷却后重试...")
                         arxiv_blocked_reported = True
-                    time.sleep(remaining + 1.0)
+                    retry_wait(remaining + 1.0)
                     attempted = True
                     path = download_arxiv_pdf(f"https://arxiv.org/abs/{arxiv_id}",
                                               save_dir=save_dir, nice_name=nice_name)
@@ -388,6 +392,8 @@ def download_pdfs_for_papers(papers: list[dict], limit: int = 10,
             skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
 
         if attempted:
+            if not network_allowed():
+                break
             time.sleep(3.0)  # 限流保护: arXiv 建议 ≥3s/请求
 
         # 高重复任务降噪: 每 5 篇打印一次进度

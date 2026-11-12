@@ -534,7 +534,7 @@ def _rule_verdict(claim: Any, obligation: ProofObligation,
 
     if kind == "evidence_support":
         supporters = [e for e in evidence
-                      if getattr(e, "support", None) in (
+                      if getattr(e, "support_scope", "claim") == "claim" and getattr(e, "support", None) in (
                           SupportKindOfEvidence.supports,
                           SupportKindOfEvidence.partially_supports)]
         design = study.design

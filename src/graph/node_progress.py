@@ -84,6 +84,16 @@ def describe_node(node_name: str, node_state: dict) -> str:
             return f"[团队] {agent} 结果: {state.get('outcome', '')}"[:180]
         if event == "llm_started":
             return f"[{agent or '模型'} · 模型] 正在生成本步骤的回应…"
+        if event == "task_heartbeat":
+            return (f"[网络等待] {state.get('phase', '')}：已用 {state.get('elapsed_seconds', 0)} 秒，"
+                    f"任务预算剩余 {state.get('remaining_seconds', 0)} 秒")
+        if event == "network_unavailable":
+            return "[网络暂不可用] 已暂停远程调用，继续使用本地资料与已有摘要；网络恢复后补做缺失步骤"
+        if event == "network_recovered":
+            return "[网络已恢复] 远程服务重新可用，已完成的资料与核验保留"
+        if event in {"harvest_download", "ingest_parse", "embed_batch"}:
+            label = {"harvest_download": "下载全文", "ingest_parse": "解析入库", "embed_batch": "建立向量索引"}[event]
+            return f"[资料处理] {label}：{state.get('title') or state.get('count') or state.get('candidates') or ''}"[:180]
         if event == "llm_result":
             preview = str(state.get("output_preview") or "").strip()
             tools = ", ".join(state.get("tool_names") or [])

@@ -529,7 +529,7 @@ def _review_materials(context):
                    for c in context.objects.get("claim") or []],
         "verifications": context.objects.get("verification") or [],
         "obligations": context.objects.get("obligation") or [],
-        "sources": [{k: s.get(k) for k in ("id", "source_id", "title", "authors", "year", "venue", "doi", "excerpt", "locator", "content_level", "publication_status", "publication_type", "publication_verified_by", "publication_note")}
+        "sources": [{k: s.get(k) for k in ("id", "source_id", "title", "authors", "year", "venue", "doi", "excerpt", "locator", "content_level", "publication_status", "publication_type", "publication_verified_by", "publication_note", "support_scope", "supported_link", "condition_notes")}
                     for s in context.objects.get("evidence") or []],
     }, ensure_ascii=False)[:30000]
 

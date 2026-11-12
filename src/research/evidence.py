@@ -196,7 +196,7 @@ def independent_supporters(evidence: list[SourceEvidence]) -> list[SourceEvidenc
     seen: set[str] = set()
     out: list[SourceEvidence] = []
     for item in evidence:
-        if item.support not in SUPPORTING_RELATIONS:
+        if item.support not in SUPPORTING_RELATIONS or item.support_scope != "claim":
             continue
         key = item.independence_key
         if not key or key in seen:
@@ -209,6 +209,7 @@ def independent_supporters(evidence: list[SourceEvidence]) -> list[SourceEvidenc
 
 def grade_evidence(evidence: list[SourceEvidence]) -> EvidenceGrade:
     """证据分级。只有建立了支持关系且来源独立的证据才能升级。"""
+    evidence = [item for item in evidence if item.support_scope == "claim"]
     if not evidence:
         return EvidenceGrade.unsupported
     supporters = independent_supporters(evidence)
@@ -266,6 +267,8 @@ def build_support_judge(llm) -> Callable[[Claim, SourceEvidence], SourceEvidence
         return None
 
     def _judge(claim: Claim, item: SourceEvidence) -> SourceEvidence:
+        from src.research.mechanisms import mechanism_links
+        links = mechanism_links(claim.statement)
         excerpt = (item.excerpt or "")[:2000]
         if not excerpt.strip():
             return assess_support(claim, item)
@@ -283,10 +286,14 @@ def build_support_judge(llm) -> Callable[[Claim, SourceEvidence], SourceEvidence
             "background (仅背景, 不构成支持/反对)\n"
             "insufficient (原文不足以判断)\n\n"
             f"命题: {claim.statement}\n"
+            + f"待核查的候选机制链环: {json.dumps(links, ensure_ascii=False)}\n"
+            + "原文可只支持其中一环，无须提及最终系统名称；这种支持仅限该环，不能证明整链。"
+              "机制类比须标 support_scope=mechanism_link、原样选择 supported_link，列出外推条件与不适用范围。\n"
             + (f"处理变量: {claim.study.treatment}; 结果变量: {claim.study.outcome}\n"
                if claim.study.treatment else "")
             + f"\n{guarded}\n\n"
-            '只输出 JSON: {"relation":str,"reason":str,"quote":str}'
+            '只输出 JSON: {"relation":str,"reason":str,"quote":str,'
+            '"support_scope":"claim|mechanism_link","supported_link":str,"condition_notes":[str]}'
         )
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
@@ -326,6 +333,20 @@ def build_support_judge(llm) -> Callable[[Claim, SourceEvidence], SourceEvidence
                 pending = assess_support(claim, item)
                 return mark_pending(pending, reason, original=relation)
         item.support = mapping[relation]
+        scope = str(data.get("support_scope") or "claim")
+        if scope == "mechanism_link":
+            link = str(data.get("supported_link") or "")
+            conditions = data.get("condition_notes")
+            if link not in links or not isinstance(conditions, list) or not any(
+                    isinstance(note, str) and note.strip() for note in conditions):
+                return mark_pending(item, "链环支持缺少有效定位或外推条件", original=relation)
+            item.support_scope = "mechanism_link"
+            item.supported_link = link
+            item.condition_notes = [note.strip() for note in conditions if isinstance(note, str) and note.strip()][:8]
+            if relation == "supports":
+                item.support = SupportKindOfEvidence.partially_supports
+        elif scope != "claim":
+            return mark_pending(item, "支持范围无效", original=relation)
         item.support_reason = str(data.get("reason", "") or "模型语义判定")
         item.support_evidence = quote
         item.reviewer = "llm"

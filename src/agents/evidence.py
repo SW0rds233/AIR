@@ -88,6 +88,8 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                                 "concepts": [], "queries": []}
         related = [str(row.get("statement") or row.get("mechanism") or row.get("name") or "")
                    for kind in ("claim", "model") for row in context.objects.get(kind) or []]
+        from src.research.mechanisms import mechanism_links
+        links = list(dict.fromkeys(link for text in related for link in mechanism_links(text)))[:8]
         if runtime.llm_available("evidence") and not task.budget.exceeded_by(usage):
             from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -95,7 +97,9 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                 response = runtime.llm(task, usage, stage="evidence").invoke([
                     SystemMessage(content=self.QUERY_SYSTEM),
                     HumanMessage(content=f"研究问题:\n{question[:4500]}\n检索需求:\n{task_intent(task)}\n"
-                                 + "已提出的模型/结论:\n" + "\n".join(related)[:3000])])
+                                 + "已提出的模型/结论:\n" + "\n".join(related)[:3000]
+                                 + "\n候选链环（分别检索，每环中英各一条；不强制带最终系统专名）:\n"
+                                 + "\n".join(links))])
                 candidate, _ = extract_json(getattr(response, "content", ""))
                 if isinstance(candidate, dict):
                     key = str(candidate.get("field_key") or "").strip().lower()
@@ -121,7 +125,7 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
             except Exception as e:
                 runtime.emit("retrieval_plan_failed", {"task_id": task.task_id, "reason": str(e)})
         if not plan["queries"]:
-            for text in [*related, question]:
+            for text in [*links, *related, question]:
                 for query in plan_queries(goal=text, limit=2):
                     if query.text not in {row["text"] for row in plan["queries"]}:
                         plan["queries"].append({"text": query.text, "purpose": query.why})
@@ -263,7 +267,8 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
         changes.extend(novelty_changes)
         needs = self._needs_from(evidence_items, locatable, coverage)
         for claim_id in dict.fromkeys(str(row.get("claim_id") or "") for row in evidence_items
-                                     if row.get("relation") in {"supports", "partially_supports"}):
+                                     if row.get("relation") in {"supports", "partially_supports"}
+                                     and row.get("support_scope", "claim") == "claim"):
             if claim_id:
                 needs.append(ResearchNeed(
                     kind=NeedKind.derivation, statement="核验已完成证据判定的命题义务",
@@ -500,6 +505,8 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                     "优先研究对象、变量和研究问题直接匹配的原始研究、权威理论或方法来源。"
                     "核对同名异域、材料体系或研究对象、实验条件、参数域与适用范围，剔除无关论文。"
                     "相关文献仅是候选材料，不能因标题或摘要相似就视为结论支持。只返回JSON: "
+                    "跨领域机制研究若直接涉及当前查询中的因果链环，可以保留；"
+                    "不得仅因未提及最终系统专名而剔除，reason 中说明所支持环节及迁移限制。"
                     '{"selected":[{"index":0,"reason":"具体用于哪一步研究"}]}'),
                 HumanMessage(content=f"研究问题: {_query_of(task, context)[:2000]}\n查询: {query}\n"
                     + json.dumps([{"index": i, "title": row.get("title"),
@@ -666,6 +673,8 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                 if target_id and item.get("claim_version", claim_version) != claim_version:
                     continue
                 relation = str(item.get("relation", "insufficient") or "insufficient")
+                if item.get("support_scope") == "mechanism_link":
+                    relation = "background"  # Partial support for one link never supports the whole claim.
                 if relation not in valid:
                     relation = "insufficient"
                 # 一份材料若未明确绑定命题，不能把它对检索问题的关系复制给多个结论。
@@ -732,6 +741,9 @@ def _evidence_row(item: Any) -> dict[str, Any]:
         "support": relation,
         "support_evidence": getattr(item, "support_evidence", ""),
         "support_reason": getattr(item, "support_reason", ""),
+        "support_scope": getattr(item, "support_scope", "claim"),
+        "supported_link": getattr(item, "supported_link", ""),
+        "condition_notes": list(getattr(item, "condition_notes", []) or []),
         "reviewer": getattr(item, "reviewer", ""),
         "evidence_grade": getattr(getattr(item, "evidence_grade", None), "value", "unsupported"),
         "peer_reviewed": getattr(item, "peer_reviewed", False),

@@ -223,6 +223,7 @@ class TaskBudget(BaseModel):
     max_tokens: int = 0               # 0 = 不限
     max_cost_usd: float | None = None  # None = 不限
     max_seconds: float = 0.0          # 0 = 不限
+    max_wall_seconds: float = Field(default=600., gt=0)
     reserved: bool = False
     reserved_at: str = ""
 
@@ -278,6 +279,7 @@ class TaskBudget(BaseModel):
             "max_tokens": self.max_tokens,
             "max_cost_usd": self.max_cost_usd,
             "max_seconds": self.max_seconds,
+            "max_wall_seconds": self.max_wall_seconds,
             "reserved": self.reserved,
             "reserved_at": self.reserved_at,
             "unbounded": self.unbounded(),
