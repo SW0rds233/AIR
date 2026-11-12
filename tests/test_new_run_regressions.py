@@ -96,8 +96,10 @@ class NewRunRegressions(unittest.TestCase):
         response = SimpleNamespace(content=json.dumps({"models": [
             {"name": "坏模型", "variables": [{}]}]}, ensure_ascii=False))
         runtime = SimpleNamespace(
-            llm_available=lambda: True,
+            # 建模代理按自己的 stage 判断模型可用性, 测试替身需要接受 stage 参数
+            llm_available=lambda *_: True,
             llm=lambda *args, **kwargs: SimpleNamespace(invoke=lambda messages: response),
+            emit=lambda *args, **kwargs: None,
         )
         task = AgentTask(agent="modeling", objective="建模")
         context = ContextPack(request="研究问题", objects={"brief": [
