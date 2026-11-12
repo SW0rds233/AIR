@@ -5,6 +5,7 @@ from __future__ import annotations
 Review may challenge or downgrade conclusions, never establish their truth.
 """
 
+import re
 from typing import Any
 
 from src.agents.base import (
@@ -57,6 +58,10 @@ def judge_review(issues: list[ReviewIssueRef], *, threshold: int = 80,
     """Hard scientific violations cannot be averaged away by presentation scores."""
     if not 0 <= threshold <= 100:
         raise ValueError("review threshold must be between 0 and 100")
+    if not semantic_reviewed:
+        return {"score": 0, "threshold": threshold, "decision": "unreviewed",
+                "accepted": False, "category_scores": {}, "fatal_issue_ids": [],
+                "semantic_reviewed": False}
     fatal = [i for i in issues if i.severity == IssueSeverity.blocking or
              (i.severity == IssueSeverity.major and i.category not in
               {"readability", "figure", "completeness"})]
@@ -205,13 +210,18 @@ class ReviewAgent(AgentBase):
                                  semantic_reviewed=semantic_reviewed,
                                  category_scores=llm_scores)
         judgement["category_notes"] = category_notes
+        quota_exhausted = bool(re.search(
+            r"insufficient[_ ]quota|exceeded.{0,30}quota|quota.{0,30}exhaust|余额不足|配额耗尽",
+            parse_note, flags=re.IGNORECASE))
+        if quota_exhausted:
+            judgement["recovery_required"] = "审阅服务配额耗尽，请补充配额或切换审阅模型后继续"
 
         if not issues:
             if not semantic_reviewed:
                 manuscript = (context.objects.get("manuscript") or [{}])[-1]
                 return self.partial(task, "规则检查未发现问题，但独立语义审阅尚未完成",
                     unresolved=unresolved or ["审阅模型不可用或审阅输出无效，不能视为学术审阅通过"],
-                    needs=[ResearchNeed(kind=NeedKind.review, statement="补齐独立语义审阅",
+                    needs=[] if quota_exhausted else [ResearchNeed(kind=NeedKind.review, statement="补齐独立语义审阅",
                                         why="不能仅凭规则检查批准科研稿件", blocking=True,
                                         hints={"trigger_id": "review-unavailable:" +
                                                str(manuscript.get("manuscript_id") or manuscript.get("id") or "") +
@@ -232,8 +242,10 @@ class ReviewAgent(AgentBase):
                    f"(阻断 {len(blocking)}); 分项: "
                    + ", ".join(f"{k} {v}" for k, v in _tally(issues).items()))
         needs = _needs_from(issues)
-        if not judgement["accepted"]:
-            needs.insert(0, _revision_need(context, issues, judgement))
+        writing_issues = [issue for issue in issues if issue.category in {"readability", "completeness"}]
+        needs = [need for need in needs if need.kind != NeedKind.manuscript_revision]
+        if not judgement["accepted"] and semantic_reviewed and writing_issues:
+            needs.append(_revision_need(context, writing_issues, judgement))
         changes = [ChangeProposal(
             kind="review_issue",
             payload=issue.to_dict(),
@@ -533,7 +545,7 @@ def _needs_from(issues: list[ReviewIssueRef]) -> list[ResearchNeed]:
         kind = mapping.get(issue.category)
         if kind is None or not (issue.blocking or issue.severity == IssueSeverity.major):
             continue
-        if issue.suggested_owner == "writing":
+        if issue.suggested_owner == "writing" and issue.category not in {"citation", "science", "fidelity"}:
             kind = NeedKind.manuscript_revision
         needs.append(ResearchNeed(
             kind=kind,
@@ -542,8 +554,10 @@ def _needs_from(issues: list[ReviewIssueRef]) -> list[ResearchNeed]:
             acceptance=list(issue.acceptance),
             blocked_refs=list(issue.affected_refs),
             hints={"trigger_id": issue.issue_id, "suggested_owner": issue.suggested_owner,
-                   "locator": issue.locator},
-            owner="figures" if issue.category == "figure"
+                   "locator": issue.locator, "root_cause_kind": issue.category,
+                   "review_issue_ids": [issue.issue_id],
+                   "focus_blocks": [ref.id for ref in issue.affected_refs]},
+            owner="evidence" if issue.category == "citation" else "figures" if issue.category == "figure"
             and issue.suggested_owner == "figures" else "",
             blocking=True,
         ))
@@ -572,6 +586,7 @@ def _revision_need(context: ContextPack, issues: list[ReviewIssueRef],
         hints={"trigger_id": f"review-revision:{manuscript_id}:{version}",
                "review_cycle": True, "revision_of": manuscript_id,
                "review_issue_ids": [i.issue_id for i in issues],
+               "focus_blocks": list(dict.fromkeys(ref.id for i in issues for ref in i.affected_refs)),
                "review_category_scores": judgement.get("category_scores") or {},
                "review_category_notes": judgement.get("category_notes") or {}},
         blocking=True)

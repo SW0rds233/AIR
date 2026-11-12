@@ -22,11 +22,15 @@ __all__ = ["DeliveryAssessment", "MANUSCRIPT_MIN_CHARS", "assess_delivery",
 def apply_review_gate(delivery: dict[str, Any], review: dict[str, Any]) -> dict[str, Any]:
     """Keep the independent review verdict when publication reassesses a delivery."""
     result = dict(delivery)
+    review = dict(review)
+    if review.get("semantic_reviewed") is False or review.get("decision") == "unreviewed":
+        review.update(score=0, accepted=False, current=False)
     result["review"] = dict(review)
     accepted = review.get("accepted", review.get("decision") == "accepted")
     if not accepted or not review.get("current"):
         result["accepted"] = False
-        reason = "独立审阅尚未达到通过门槛，或审阅早于最新稿件"
+        reason = ("最后一版未审阅：独立语义审阅未完成或审阅早于最新稿件"
+                  if not review.get("current") else "独立审阅尚未达到通过门槛")
         result["blocking"] = list(result.get("blocking") or [])
         if reason not in result["blocking"]:
             result["blocking"].append(reason)

@@ -1010,6 +1010,7 @@ const PAGE_ACTIONS: Record<string, (id?: string, target?: HTMLElement) => void> 
   loadArtifact: (id) => loadArtifact(id || ''),
   deleteAttachment: (id) => { void d.deleteAttachment(id || ''); },
   deleteLibrary: (id) => { void library().remove(id || ''); },
+  reindexLibrary: (id) => { void library().reindex(id || ''); },
   resumeSession: (id) => sessions.resumeSession(id || ''),
   resumeConversation: (id) => sessions.resumeConversation(id || ''),
   viewConversation: (id) => sessions.viewConversation(id || ''),

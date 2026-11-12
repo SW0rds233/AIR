@@ -449,7 +449,11 @@ class TeamRun:
             if not decision.tasks:
                 self._finish(state, "主控决定派工但没有给出任务")
                 return False
-            needs_cleared = False
+            selected_needs = {str(t.hints.get("need_assignment") or "")
+                              for t in decision.tasks}
+            state.open_needs = [need for need in state.open_needs
+                               if need.assignment_key(state.brief.project_id,
+                                                      state.brief.problem_id) not in selected_needs]
             for task in decision.tasks:
                 if _is_review_revision(task) and state.review_revisions >= self.max_review_revisions:
                     self._finish(
@@ -458,9 +462,6 @@ class TeamRun:
                         status=TaskStatus.partial.value,
                     )
                     return False
-                if not needs_cleared:
-                    state.open_needs = []
-                    needs_cleared = True
                 key = assignment_key(state.brief, task.agent, task.objective)
                 state.pending_retries.discard(key)   # 本次已放行, 不重复放行
                 state.dispatched.add(key)
@@ -480,6 +481,12 @@ class TeamRun:
                 state.plan = self.supervisor.replan(
                     state.plan, {task.task_id: result}, version=state.plan.version)
                 self.outcome.plan = state.plan
+                if task.agent == "review" and result.payload.get("recovery_required"):
+                    self._finish(state, str(result.payload["recovery_required"]),
+                                 status=TaskStatus.partial.value)
+                    return False
+                if task.agent == "evidence":
+                    self._recheck_evidence(task, result, state)
             # 只有依据对象的版本变化，才允许重试失败任务。
             # 判据是**该任务实际依据的对象的版本**(它自己的输入引用与 read-set),
             # 而不是全局版本计数 —— 后者每轮都因为新登记对象而变化, 等于给所有
@@ -512,6 +519,34 @@ class TeamRun:
         # stop_with_report
         self._finish(state, decision.reason, status=TaskStatus.partial.value)
         return False
+
+    def _recheck_evidence(self, parent: AgentTask, result: AgentResult,
+                          state: TeamLoopState) -> None:
+        """Recheck only evidence obligations, against the committed store, with no LLM."""
+        targets = {str(p.payload.get("claim_id") or "") for p in result.proposed_changes
+                   if p.kind == "evidence"}
+        for claim_id in sorted(targets - {""}):
+            if self.cancel.cancelled:
+                break
+            task = AgentTask(agent="reasoning", objective=f"证据入库后复核 {claim_id}",
+                             project_id=self.project_id, problem_id=self.problem_id,
+                             run_id=self.run_id, session_id=self.session_id,
+                             source_set_ids=list(parent.source_set_ids),
+                             source_policy=parent.source_policy,
+                             hints={"claim_id": claim_id, "evidence_support_only": True})
+            context = self._build_context(task, state.results)
+            if not any(row.get("claim_id") == claim_id and row.get("kind") == "evidence_support"
+                       and row.get("status") != "closed"
+                       for row in context.objects.get("obligation") or []):
+                continue
+            self.supervisor.adopt(state.plan, task)
+            checked = self._execute_one(task, state.results)
+            state.results[task.task_id] = checked
+            state.objectives[task.task_id] = task.objective
+            self.outcome.task_order.append(task.task_id)
+            state.plan = self.supervisor.replan(state.plan, {task.task_id: checked},
+                                                version=state.plan.version)
+            self.outcome.plan = state.plan
 
     def _finish(self, state: TeamLoopState, stop_reason: str,
                 status: str = "") -> None:
@@ -597,10 +632,12 @@ class TeamRun:
                 "score": judgement.get("score"), "threshold": self.review_threshold,
                 "decision": judgement.get("decision", "unreviewed"),
                 "accepted": bool(judgement.get("accepted")),
-                "current": review_index > writing_index}
+                "recovery_required": str(judgement.get("recovery_required") or ""),
+                "semantic_reviewed": bool(judgement.get("semantic_reviewed")),
+                "current": review_index > writing_index and bool(judgement.get("semantic_reviewed"))}
             self.outcome.delivery = apply_review_gate(self.outcome.delivery, review)
             if not review["current"]:
-                self.outcome.stop_reason = "研究已封存，最后一版稿件未复审"
+                self.outcome.stop_reason = review["recovery_required"] or "研究已封存，最后一版稿件未复审"
         self.outcome.unresolved_report["delivery"] = dict(self.outcome.delivery)
         if not self.outcome.delivery["accepted"]:
             self.outcome.status = TaskStatus.partial.value

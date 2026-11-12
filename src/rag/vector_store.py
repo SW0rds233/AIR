@@ -61,7 +61,7 @@ def get_embeddings() -> OpenAIEmbeddings:
     return embeddings
 
 
-def embedding_available() -> bool:
+def embedding_available(*, force: bool = False) -> bool:
     """Embedding 是否可用（用于调用方决定是否降级）"""
     global _EMBEDDING_CHECKED, _EMBEDDING_OK
     # SKIP_EMBEDDING=1: 跳过向量化 (可选 RAG 增强), 直接返回 False
@@ -72,6 +72,8 @@ def embedding_available() -> bool:
             return False
     except Exception:
         pass
+    if force:
+        _EMBEDDING_CHECKED = False
     if not _EMBEDDING_CHECKED:
         _EMBEDDING_CHECKED = True
         try:
@@ -183,7 +185,10 @@ def _add_documents_resilient(store, docs: list[Document], depth: int = 0) -> tup
     if not docs:
         return 0, 0
     try:
-        store.add_documents(docs)
+        if all(doc.metadata.get("vector_id") for doc in docs):
+            store.add_documents(docs, ids=[doc.metadata["vector_id"] for doc in docs])
+        else:
+            store.add_documents(docs)
         return len(docs), 0
     except Exception as e:
         # 顶层记录失败原因 (429 限流 / 超时 / 块超长), 便于区分"慢"与"挂"
@@ -198,7 +203,10 @@ def _add_documents_resilient(store, docs: list[Document], depth: int = 0) -> tup
             if len(text) > 300:
                 truncated = Document(page_content=text[:300], metadata=dict(d.metadata))
                 try:
-                    store.add_documents([truncated])
+                    if truncated.metadata.get("vector_id"):
+                        store.add_documents([truncated], ids=[truncated.metadata["vector_id"]])
+                    else:
+                        store.add_documents([truncated])
                     logger.debug(
                         f"块超长截断后入库: {d.metadata.get('title', '')[:40]} "
                         f"({len(text)}→300 字符)"
@@ -253,6 +261,10 @@ def add_fulltext_chunks(
             "url": meta.get("url", ""),
             "bibtex": meta.get("bibtex", ""),
         }
+        if meta.get("doc_id"):
+            from src.kb.reindex import chunk_vector_id
+            metadata["doc_id"] = meta["doc_id"]
+            metadata["vector_id"] = chunk_vector_id(meta["doc_id"], c["chunk_index"], c["text"].strip())
         docs.append(Document(page_content=content, metadata=metadata))
 
     ok_count, fail_count = _add_documents_resilient(store, docs)

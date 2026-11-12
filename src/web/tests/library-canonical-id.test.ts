@@ -1,5 +1,20 @@
 import { expect, test } from 'vitest';
-import { createLibrarySection, LIBRARY_API } from '../src/library-controller';
+import { createLibraryController, createLibrarySection, LIBRARY_API } from '../src/library-controller';
+
+test('explicit index choice reaches the import API', async () => {
+  const bodies: any[] = [];
+  const controller = createLibraryController({
+    fetchJson: async (url, init) => {
+      bodies.push(JSON.parse(String(init?.body || '{}')));
+      return url === LIBRARY_API.scan ? { counts: { ok: 1 }, denied: [] }
+        : { ok: true, topic: 'library' };
+    },
+  });
+  await controller.scan('C:/papers/a.txt', 'library');
+  await controller.commit('session', true);
+  expect(bodies.at(-1).embed).toBe(true);
+  expect(bodies.at(-1).session_id).toBe('session');
+});
 
 test('library import selects its canonical id and reports selection only after success', async () => {
   const messages: string[] = [];

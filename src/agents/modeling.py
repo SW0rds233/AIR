@@ -165,6 +165,7 @@ class ModelingAgent(AgentBase):
         checks: list[str] = []
         accepted_candidates: list[dict[str, Any]] = []
         rejected_models = 0
+        schema_errors: list[dict[str, Any]] = []
         claim_rows = [row for row in (context.objects.get("claim") or [])
                       if row.get("id")]
         known_source_ids = {
@@ -199,8 +200,14 @@ class ModelingAgent(AgentBase):
                 ResearchModel.model_validate(model)
             except ValidationError as error:
                 rejected_models += 1
+                details = [{"candidate": index + 1,
+                            "field": ".".join(str(part) for part in item["loc"]),
+                            "type": item["type"], "message": item["msg"]}
+                           for item in error.errors(include_input=False)[:8]]
+                schema_errors.extend(details)
                 unknowns.append(
-                    f"候选模型 {index + 1} 未提交：字段不符合入库契约 ({error.errors()[0]['msg']})")
+                    f"候选模型 {index + 1} 未提交：" + "; ".join(
+                        f"{item['field']}: {item['message']}" for item in details))
                 continue
             problems = validate_model_payload(model, known_source_ids=known_source_ids,
                                               supporting_source_ids=supporting_source_ids,
@@ -222,19 +229,21 @@ class ModelingAgent(AgentBase):
                 input_versions=input_versions,
             ))
         payload_out = {"schema": "ModelProposal/v1", "models": accepted_candidates,
-                       "unknowns": unknowns, "fidelity_checks": checks}
+                       "unknowns": unknowns, "fidelity_checks": checks,
+                       "schema_errors": schema_errors}
         summary = f"提出 {len(changes)} 个候选模型"
         if checks:
             summary += f"; 忠实度检查发现 {len(checks)} 处需核查"
         if rejected_models:
-            summary += f"; {rejected_models} 个候选因入库字段错误未提交"
+            summary += f"; {rejected_models} 个候选未通过字段或来源校验"
         if not changes:
             return self.blocked(
                 task, summary,
                 needs=[ResearchNeed(
                     kind=NeedKind.model_condition,
                     statement="重新给出符合模型字段契约的候选编码",
-                    why="所有建模候选均未通过入库字段校验",
+                    why="; ".join(unknowns[:3]) or "候选模型未通过入库校验",
+                    hints={"schema_errors": schema_errors},
                     acceptance=["给出名称、变量符号与可保存的形式化编码"],
                     blocking=False)],
                 usage=usage, payload=payload_out)

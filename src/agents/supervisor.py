@@ -738,11 +738,18 @@ class SupervisorAgent:
         # 2. 需求 -> 任务 (只派"计划里还没有的")
         needs = list(open_needs)
         if needs:
+            issue_attempts: dict[str, int] = {}
+            for row in plan.tasks:
+                if row.get("task_id") in results:
+                    for issue_id in (row.get("hints") or {}).get("review_issue_ids") or []:
+                        issue_attempts[issue_id] = issue_attempts.get(issue_id, 0) + 1
             tasks = [t for t in needs_to_tasks(
                 needs, brief=brief, plan_version=plan.version,
-                limit=self.max_tasks_per_round * 2)
+                limit=len(needs))
                 if t.idempotency_key not in known_keys
-                and str((t.hints or {}).get("need_assignment", "")) not in known_keys]
+                and str((t.hints or {}).get("need_assignment", "")) not in known_keys
+                and all(issue_attempts.get(issue_id, 0) < 2
+                        for issue_id in (t.hints or {}).get("review_issue_ids") or [])]
             if tasks:
                 tasks = tasks[: self.max_tasks_per_round]
                 return SupervisorDecision(
@@ -953,7 +960,7 @@ class SupervisorAgent:
         """
         tasks: list[AgentTask] = []
         for issue in list(issues)[:limit]:
-            owner = issue.suggested_owner or _owner_for_issue(issue)
+            owner = "evidence" if issue.category == "citation" else issue.suggested_owner or _owner_for_issue(issue)
             if not owner:
                 continue
             tasks.append(AgentTask(

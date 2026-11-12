@@ -33,7 +33,7 @@ export interface LibraryControllerDeps {
 
 export interface LibraryController {
   scan(rawPaths: string, label: string, folderGrants?: string[]): Promise<LibraryScanReport | null>;
-  commit(sessionId?: string): Promise<LibraryImportReport | null>;
+  commit(sessionId?: string, embed?: boolean): Promise<LibraryImportReport | null>;
   invalidate(): void;
   remove(sourceSetId: string): Promise<LibraryDeleteResult | null>;
   detail(sourceSetId: string): Promise<LibraryDetail | null>;
@@ -107,7 +107,7 @@ export function createLibraryController(deps: LibraryControllerDeps = {}): Libra
       }
     },
 
-    async commit(sessionId = '') {
+    async commit(sessionId = '', embed = false) {
       if (busy) return null;
       if (!scanned) {
         notify('还没有扫描结果：请先「扫描预览」确认将要入库的文件。', 'msg-error');
@@ -125,8 +125,8 @@ export function createLibraryController(deps: LibraryControllerDeps = {}): Libra
           body: JSON.stringify({
             ...request,
             topic: label,
-            embed: false,
-            idempotency_key: importKey(label, request.paths),
+            embed,
+            idempotency_key: importKey(label, request.paths) + (embed ? ':embed' : ''),
             session_id: sessionId,
           }),
         });
@@ -223,6 +223,7 @@ export interface LibrarySection {
   chooseFolder(): Promise<void>;
   refreshWorkspace(): Promise<void>;
   remove(sourceSetId: string): Promise<void>;
+  reindex(sourceSetId: string): Promise<void>;
   bind(): void;
 }
 
@@ -234,6 +235,7 @@ export interface LibrarySection {
  */
 export function createLibrarySection(deps: LibrarySectionDeps): LibrarySection {
   let controller: LibraryController | null = null;
+  const indexing = new Set<string>();
   const folderGrants = new Map<string, string>();
 
   function getController(): LibraryController {
@@ -260,7 +262,8 @@ export function createLibrarySection(deps: LibrarySectionDeps): LibrarySection {
 
   async function commit(): Promise<void> {
     const sessionId = deps.currentSessionId();
-    const result = await getController().commit(sessionId);
+    const embed = Boolean((document.getElementById('lib-embed') as HTMLInputElement | null)?.checked);
+    const result = await getController().commit(sessionId, embed);
     if (result && !result.binding_error && deps.currentSessionId() === sessionId) {
       await deps.selectSourceSet(result.source_set_id || result.topic, true);
     }
@@ -307,6 +310,25 @@ export function createLibrarySection(deps: LibrarySectionDeps): LibrarySection {
     await refreshWorkspace();
   }
 
+  async function reindex(sourceSetId: string): Promise<void> {
+    if (!sourceSetId || indexing.has(sourceSetId)) return;
+    indexing.add(sourceSetId);
+    deps.notify('正在补建向量索引，已完成的批次会保留，可在失败后重试。');
+    try {
+      const result = await (deps.fetchJson || defaultFetchJson)('/api/library/' + encodeURIComponent(sourceSetId) + '/reindex',
+        { method: 'POST' }) as { ok: boolean; indexed: number; skipped: number; errors: string[] };
+      deps.notify(`索引${result.ok ? '完成' : '未完成'}：新增 ${result.indexed}，已存在 ${result.skipped}。`
+        + (result.errors || []).join('；'), result.ok ? 'msg-system' : 'msg-error');
+      deps.deleteDetail(sourceSetId);
+      deps.refreshSourceSets();
+      await refreshWorkspace();
+    } catch (error) {
+      deps.notify('补建索引失败：' + String(error), 'msg-error');
+    } finally {
+      indexing.delete(sourceSetId);
+    }
+  }
+
   function bind(): void {
     const on = (id: string, event: string, handler: () => void) => {
       const el = typeof document === 'undefined' ? null : document.getElementById(id);
@@ -324,5 +346,5 @@ export function createLibrarySection(deps: LibrarySectionDeps): LibrarySection {
   }
 
   return { controller: getController, scan, commit, chooseFolder,
-           refreshWorkspace, remove, bind };
+           refreshWorkspace, remove, reindex, bind };
 }

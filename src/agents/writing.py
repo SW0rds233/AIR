@@ -120,7 +120,12 @@ class WritingAgent(AgentBase):
         manuscript: Manuscript | None = None
         parse_note = ""
 
-        if runtime.llm_available("writing") and not task.budget.exceeded_by(usage):
+        if packet.is_revision():
+            manuscript, parse_note = self._patch_with_llm(task, runtime, usage, packet)
+            if manuscript is None:
+                return self.blocked(task, "局部修订未完成，保留已有稿件: " + parse_note,
+                                    usage=usage, payload={"revision_of": packet.revision_of})
+        elif runtime.llm_available("writing") and not task.budget.exceeded_by(usage):
             manuscript, parse_note = self._draft_with_llm(task, runtime, usage, packet)
         if manuscript is None:
             manuscript, fallback_note = self.deterministic_manuscript(task, packet)
@@ -150,7 +155,7 @@ class WritingAgent(AgentBase):
             packet.prior_manuscript = manuscript.to_dict()
             packet.review_issues.append({"summary": "; ".join(p for p in problems if "章节" in p),
                 "acceptance": ["保留已有论证与来源身份，建立实际子节或删除无法定位的交叉引用"]})
-            revised, repair_note = self._draft_with_llm(task, runtime, usage, packet)
+            revised, repair_note = self._patch_with_llm(task, runtime, usage, packet)
             if revised is not None:
                 manuscript = revised
                 finalise_manuscript(manuscript, packet)
@@ -192,6 +197,34 @@ class WritingAgent(AgentBase):
                                   "manuscript": manuscript.to_dict(),
                                   "trace": manuscript.trace()})
         return result
+
+    def _patch_with_llm(self, task: AgentTask, runtime: AgentRuntime,
+                        usage: UsageRecord, packet: WritingPacket) -> tuple[Manuscript | None, str]:
+        """One bounded text/math patch; reference identities and other blocks stay intact."""
+        import json
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        prior = Manuscript.model_validate(packet.prior_manuscript)
+        targets = revision_targets(prior, packet.review_issues, task.hints)
+        if not targets:
+            return None, "审阅意见未定位到正文块，请提供 block_id 或章节定位"
+        if not runtime.llm_available("writing") or task.budget.exceeded_by(usage):
+            return None, "写作模型不可用或预算已耗尽"
+        try:
+            response = runtime.llm(task, usage, stage="writing").invoke([
+                SystemMessage(content=self.SYSTEM),
+                HumanMessage(content="只局部修订给定正文块，保留论断、引用和边界。不得改写全稿。\n"
+                    + json.dumps({"objective": task.objective, "issues": packet.review_issues,
+                                  "blocks": [b.to_dict() for b in targets]}, ensure_ascii=False)
+                    + '\n返回 JSON: {"blocks":[{"block_id":"原 id","text":"完整修订文字","math":"公式体，无 $ 分隔符"}]}。'
+                      '只返回有修改的块，最多 4 块；不能解决的问题保留原文。'),
+            ])
+            payload, note = extract_json(getattr(response, "content", ""))
+            if not isinstance(payload, dict):
+                return None, note
+            return apply_block_patch(prior, payload.get("blocks"), {b.block_id for b in targets}), ""
+        except Exception as error:  # failed patch must not fall back to rewriting the paper
+            return None, f"局部修订失败: {error}"
 
     # ---- LLM 起草 ----
     def _draft_with_llm(self, task: AgentTask, runtime: AgentRuntime,
@@ -884,6 +917,8 @@ def finalise_manuscript(manuscript: Manuscript, packet: WritingPacket,
     另外**如实标出**正文里指向文献表之外的引用编号: 模型写出的 `[1][2]` 如果文献表里
     没有对应条目, 那不是格式问题而是"编造引用", 必须留在未决项里让审阅与人工看到。
     """
+    from src.publication.math_content import normalize_manuscript_math
+    normalize_manuscript_math(manuscript)
     notes: list[str] = []
     if not (manuscript.abstract or "").strip():
         manuscript.abstract = _abstract_of(packet)
@@ -1134,6 +1169,52 @@ def _manuscript_from_payload(payload: dict[str, Any],
     return manuscript
 
 
+def revision_targets(manuscript: Manuscript, issues: list[dict[str, Any]],
+                     hints: dict[str, Any]) -> list[Block]:
+    refs = set(hints.get("focus_blocks") or [])
+    locators = [str(hints.get("locator") or "")]
+    for issue in issues:
+        refs.update(str(ref.get("id", "")) if isinstance(ref, dict) else str(ref)
+                    for ref in issue.get("affected_refs") or [])
+        locators.append(str(issue.get("locator") or ""))
+    targets = []
+    for section in manuscript.sections:
+        for block in section.blocks:
+            ids = {block.block_id, section.section_id, *(ref.id for ref in block.refs)}
+            located = any(locator and (block.block_id in locator or
+                (section.heading and section.heading in locator)) for locator in locators)
+            if ids & refs or located:
+                targets.append(block)
+    return targets[:4]
+
+
+def apply_block_patch(manuscript: Manuscript, patches: Any, allowed: set[str]) -> Manuscript:
+    if not isinstance(patches, list) or not patches or len(patches) > 4:
+        raise ValueError("修订必须包含 1–4 个已定位正文块")
+    result = manuscript.model_copy(deep=True)
+    blocks = {block.block_id: block for block in result.all_blocks()}
+    seen: set[str] = set()
+    changed = False
+    for patch in patches:
+        if not isinstance(patch, dict):
+            raise ValueError("修订块格式错误")
+        block_id = patch.get("block_id")
+        if block_id not in allowed or block_id not in blocks or block_id in seen:
+            raise ValueError("修订包含未授权或重复的正文块")
+        if set(patch) - {"block_id", "text", "math"}:
+            raise ValueError("局部修订不得更换引用或结构")
+        seen.add(block_id)
+        for field in ("text", "math"):
+            if field in patch:
+                if not isinstance(patch[field], str):
+                    raise ValueError("正文与公式必须为字符串")
+                changed |= getattr(blocks[block_id], field) != patch[field]
+                setattr(blocks[block_id], field, patch[field])
+    if not changed:
+        raise ValueError("修订没有产生正文变化")
+    return result
+
+
 def build_packet_from_context(task: AgentTask, context: ContextPack) -> WritingPacket:
     """从上下文组装 `WritingPacket`。
 
@@ -1163,6 +1244,8 @@ def build_packet_from_context(task: AgentTask, context: ContextPack) -> WritingP
     if (task.hints or {}).get("review_cycle"):
         review_issues = [issue for issue in review_issues
                          if str(issue.get("issue_id") or issue.get("id") or "") in selected]
+    prior = (context.objects.get("manuscript") or [{}])[-1]
+    prior = prior.get("manuscript", prior)
     return WritingPacket(
         project_id=task.project_id, problem_id=task.problem_id, run_id=task.run_id,
         original_request=context.request,
@@ -1176,7 +1259,8 @@ def build_packet_from_context(task: AgentTask, context: ContextPack) -> WritingP
         sources=evidence,
         figures=context.objects.get("figure") or [],
         review_issues=review_issues,
-        prior_manuscript=(context.objects.get("manuscript") or [{}])[-1],
+        prior_manuscript=prior,
+        revision_of=str(prior.get("manuscript_id") or prior.get("id") or ""),
         unresolved=[u for u in unresolved if u],
         snapshot_id=str(brief.get("snapshot_id") or ""),
         input_versions={str(row.get("id", "")): int(row.get("version", 1) or 1)
@@ -1205,7 +1289,9 @@ def render_markdown(manuscript: Manuscript, *,
                      if kind == RefKind.source.value and ref.id in numbers["citations"]]
             text = citation_suffix(text, "".join(marks))
             if block.math:
-                lines += ["", f"$$ {block.math} $$", ""]
+                from src.publication.math_content import math_parts
+                for is_math, content in math_parts(block.math):
+                    lines += ["", f"$$ {content} $$" if is_math else content, ""]
             if text:
                 lines.append(text)
                 lines.append("")
