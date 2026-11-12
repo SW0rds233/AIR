@@ -82,12 +82,24 @@ class AcademicReviewTest(unittest.TestCase):
         self.assertEqual(result.outcome.value, "partial")
         self.assertEqual(result.followup_needs[0].kind.value, "review")
 
-    def test_major_writing_issue_retains_block_identity_and_requests_revision(self):
-        issue = _issue_from({"severity": "major", "category": "science", "summary": "Dimension mismatch",
-            "affected_ids": ["block-1"], "suggested_owner": "writing", "acceptance": ["Use n+1"]})
-        self.assertIsNotNone(issue)
-        self.assertEqual(issue.affected_refs[0].id, "block-1")
-        self.assertEqual(_needs_from([issue])[0].kind.value, "manuscript_revision")
+    def test_major_issue_routes_by_root_cause_and_keeps_block_identity(self):
+        science = _issue_from({"severity": "major", "category": "science",
+            "summary": "Dimension mismatch", "affected_ids": ["block-1"],
+            "suggested_owner": "writing", "acceptance": ["Use n+1"]})
+        self.assertIsNotNone(science)
+        self.assertEqual(science.affected_refs[0].id, "block-1")
+        # 科学逻辑问题回到推理(derivation), 不再把整篇改稿派给写作; 块身份仍保留.
+        need = _needs_from([science])[0]
+        self.assertEqual(need.kind.value, "derivation")
+        self.assertEqual([ref.id for ref in need.blocked_refs], ["block-1"])
+        self.assertEqual(need.hints["root_cause_kind"], "science")
+        # owner 未显式给出时按 NEED_OWNER 推导: derivation 落到 reasoning, 而不是写作
+        self.assertEqual(need.owner, "reasoning")
+
+        readability = _issue_from({"severity": "major", "category": "readability",
+            "summary": " Sentences too long", "affected_ids": ["block-2"],
+            "suggested_owner": "writing", "acceptance": ["Split sentences"]})
+        self.assertEqual(_needs_from([readability])[0].kind.value, "manuscript_revision")
 
     def test_review_receives_formulas_and_citation_identity(self):
         context = ContextPack(objects={"manuscript": [{"sections": [{"blocks": [

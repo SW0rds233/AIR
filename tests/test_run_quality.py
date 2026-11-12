@@ -64,11 +64,14 @@ class RunQualityTest(unittest.TestCase):
         good = _manuscript_from_payload({"sections": [{"heading": "方法", "blocks": [
             {"text": "下面给出变量映射。"}]}]}, packet)
         agent = WritingAgent()
-        with patch.object(agent, "_draft_with_llm", side_effect=[(bad, ""), (good, "")]) as draft:
+        # 首稿仍是整篇起草; 章节引用修复改走**局部补丁**, 不再二次整篇重写.
+        with patch.object(agent, "_draft_with_llm", return_value=(bad, "")) as draft, \
+                patch.object(agent, "_patch_with_llm", return_value=(good, "")) as patched:
             result = agent._run(AgentTask(agent="writing", objective="Write"), ContextPack(),
                                SimpleNamespace(llm_available=lambda stage: True), UsageRecord(), [])
-        self.assertEqual(draft.call_count, 2)
-        self.assertTrue(draft.call_args.args[-1].prior_manuscript)
+        self.assertEqual(draft.call_count, 1)
+        self.assertEqual(patched.call_count, 1)
+        self.assertTrue(patched.call_args.args[-1].prior_manuscript)
         self.assertNotIn("第 3.1 节", json.dumps(result.proposed_changes[0].payload, ensure_ascii=False))
 
     def test_gate_contract_keeps_compilation_and_scientific_failures_separate(self):

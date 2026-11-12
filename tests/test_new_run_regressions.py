@@ -105,7 +105,9 @@ class NewRunRegressions(unittest.TestCase):
         result = ModelingAgent()._run(task, context, runtime, UsageRecord(), [])
         self.assertFalse(result.proposed_changes)
         self.assertIn("0 个候选模型", result.summary)
-        self.assertIn("未提交", result.summary)
+        # 契约措辞: 候选被拒要说清"未通过字段或来源校验", 并且带上具体字段路径
+        self.assertIn("未通过字段或来源校验", result.summary)
+        self.assertTrue(result.payload.get("schema_errors"))
 
     def test_long_equations_break_at_top_level_qquad(self):
         equations = [

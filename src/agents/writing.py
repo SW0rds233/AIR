@@ -122,9 +122,11 @@ class WritingAgent(AgentBase):
 
         if packet.is_revision():
             manuscript, parse_note = self._patch_with_llm(task, runtime, usage, packet)
-            if manuscript is None:
+            if manuscript is None and runtime.llm_available("writing"):
                 return self.blocked(task, "局部修订未完成，保留已有稿件: " + parse_note,
                                     usage=usage, payload={"revision_of": packet.revision_of})
+            # 无模型/预算不足时继续走确定性起草: 修订任务也要交出一版可追溯的稿件,
+            # 而不是整单失败 (离线模式仍能产出骨架与来源映射)。
         elif runtime.llm_available("writing") and not task.budget.exceeded_by(usage):
             manuscript, parse_note = self._draft_with_llm(task, runtime, usage, packet)
         if manuscript is None:

@@ -12,8 +12,10 @@ test('explicit index choice reaches the import API', async () => {
   });
   await controller.scan('C:/papers/a.txt', 'library');
   await controller.commit('session', true);
-  expect(bodies.at(-1).embed).toBe(true);
-  expect(bodies.at(-1).session_id).toBe('session');
+  // tsconfig 的 lib 是 ES2020: 用下标而不是 Array.prototype.at
+  const last = bodies[bodies.length - 1];
+  expect(last.embed).toBe(true);
+  expect(last.session_id).toBe('session');
 });
 
 test('library import selects its canonical id and reports selection only after success', async () => {
