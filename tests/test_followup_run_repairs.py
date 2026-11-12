@@ -239,6 +239,8 @@ def test_chinese_topic_maps_to_ascii_collection_name():
     name = kb_collection_name('星网 星链')
     assert pattern.fullmatch(name), name
     assert name == kb_collection_name('星网 星链')          # 稳定: 同一主题同一集合
+    # 导入标签 (空格) 与注册 id (下划线) 是同一个库, 不能落到两个集合
+    assert name == kb_collection_name('星网_星链')
     assert name != kb_collection_name('星网 星链（二）')
     # 历史 ASCII 主题名必须原样保留, 否则既有向量全部失联
     assert kb_collection_name('research-proj-muwia7ognn2l-problem') == \

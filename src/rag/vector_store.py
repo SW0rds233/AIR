@@ -39,7 +39,9 @@ def kb_collection_name(topic: str) -> str:
     if _CHROMA_NAME.fullmatch(name):
         return name
     ascii_part = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip("._-")[:80] or "topic"
-    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+    # 哈希用**归一化后的库名**: 同一资料库的 "星网 星链" / "星网_星链" 两个写法
+    # (导入标签 vs 注册 id) 必须落到同一个集合, 否则向量会写在两个地方。
+    digest = hashlib.sha1(base.encode("utf-8")).hexdigest()[:16]
     return f"kb_{ascii_part}_{digest}"[:512].rstrip("._-")
 
 # Embedding 是否可用的全局标记（避免重复探测日志刷屏）
