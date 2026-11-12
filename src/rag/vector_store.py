@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import re
 from pathlib import Path
 
 from langchain_core.documents import Document
@@ -16,6 +18,29 @@ except ImportError:
 from src.config import CHROMA_CONFIG, DATA_DIR, LLM_CONFIG
 
 logger = logging.getLogger(__name__)
+
+#: Chroma 集合名的硬约束: 3–512 个 ASCII 字符 `[A-Za-z0-9._-]`, 首尾必须是字母/数字。
+_CHROMA_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,510}[A-Za-z0-9]$")
+
+
+def kb_collection_name(topic: str) -> str:
+    """主题 → Chroma 集合名 (稳定、ASCII)。
+
+    Chroma 会拒绝非 ASCII 名字 (实测中文主题 `星网 星链` 抛
+    `InvalidArgumentError: name: Expected a name containing 3-512 characters
+    from [a-zA-Z0-9._-]`)。历史集合名都是 ASCII (`kb_research-…`), 必须原样保留;
+    只有名字不合法时才用 ASCII 片段 + 主题哈希后缀, 保证同一主题永远映射到同一集合。
+    """
+    from src.utils.file_utils import sanitize_filename
+
+    raw = str(topic or "").strip()
+    base = sanitize_filename(raw) if raw else ""
+    name = f"kb_{base}" if base else "kb_default"
+    if _CHROMA_NAME.fullmatch(name):
+        return name
+    ascii_part = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip("._-")[:80] or "topic"
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+    return f"kb_{ascii_part}_{digest}"[:512].rstrip("._-")
 
 # Embedding 是否可用的全局标记（避免重复探测日志刷屏）
 _EMBEDDING_CHECKED = False

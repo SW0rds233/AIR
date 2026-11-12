@@ -87,23 +87,17 @@ def _vector_indexed(topic: str) -> bool:
     不把"没有向量后端"说成"已建索引"。
     """
     try:
-        from src.rag.vector_store import embedding_available, get_vector_store
+        from src.rag.vector_store import embedding_available, get_vector_store, kb_collection_name
 
         if not embedding_available():
             return False
-        store = get_vector_store(f"kb_{_sanitize(topic)}")
+        store = get_vector_store(kb_collection_name(topic))
         collection = getattr(store, "_collection", None)
         if collection is not None and hasattr(collection, "count"):
             return int(collection.count()) > 0
         return False
     except Exception:  # noqa: BLE001 - 向量能力缺失不影响资料源可读性
         return False
-
-
-def _sanitize(name: str) -> str:
-    from src.utils.file_utils import sanitize_filename
-
-    return sanitize_filename(name)
 
 
 def _language_year(store: KBStore) -> tuple[list[str], str]:

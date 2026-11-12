@@ -5,7 +5,6 @@ import hashlib
 from typing import Any
 
 from src.kb.store import KBStore, default_db_path
-from src.utils.file_utils import sanitize_filename
 
 
 def chunk_vector_id(doc_id: str, index: int, text: str) -> str:
@@ -19,14 +18,15 @@ def reindex_library(topic: str, *, batch_size: int = 32) -> dict[str, Any]:
         report["errors"].append("资料库不存在")
         return report
     from langchain_core.documents import Document
-    from src.rag.vector_store import embedding_available, get_vector_store
+
+    from src.rag.vector_store import embedding_available, get_vector_store, kb_collection_name
 
     if not embedding_available(force=True):
         report["errors"].append("Embedding 不可用，请检查配置与配额后重试")
         return report
     store = KBStore(topic)
     try:
-        vector = get_vector_store(f"kb_{sanitize_filename(topic)}")
+        vector = get_vector_store(kb_collection_name(topic))
         known = set(vector.get(include=[]).get("ids") or [])
         pending = []
         for record in store.list_documents():

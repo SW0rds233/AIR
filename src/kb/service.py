@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from src.kb.store import KBStore
-from src.utils.file_utils import sanitize_filename
 
 
 @dataclass
@@ -347,12 +346,17 @@ class KnowledgeService:
 
     def _vector_hits(self, query: str, limit: int) -> list[SourceRef]:
         try:
-            from src.rag.vector_store import embedding_available, search_fulltext
+            from src.rag.vector_store import (
+                embedding_available,
+                kb_collection_name,
+                search_fulltext,
+            )
             from src.utils.file_utils import get_timestamp
 
             if not embedding_available():
                 return []
-            hits = search_fulltext(query, k=limit, collection_name=f"kb_{sanitize_filename(self.topic)}")
+            hits = search_fulltext(query, k=limit,
+                                   collection_name=kb_collection_name(self.topic))
         except Exception:  # noqa: BLE001
             return []
         refs: list[SourceRef] = []

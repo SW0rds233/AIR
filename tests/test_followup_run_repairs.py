@@ -228,3 +228,49 @@ def test_model_rejection_names_invalid_field_and_passes_detail_to_rework(monkeyp
     assert result.payload['schema_errors'][0]['field'] == 'variables.0.symbol'
     assert 'variables.0.symbol' in result.followup_needs[0].why
     assert not result.proposed_changes
+
+
+def test_chinese_topic_maps_to_ascii_collection_name():
+    import re
+
+    from src.rag.vector_store import kb_collection_name
+
+    pattern = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{1,510}[A-Za-z0-9]$')
+    name = kb_collection_name('星网 星链')
+    assert pattern.fullmatch(name), name
+    assert name == kb_collection_name('星网 星链')          # 稳定: 同一主题同一集合
+    assert name != kb_collection_name('星网 星链（二）')
+    # 历史 ASCII 主题名必须原样保留, 否则既有向量全部失联
+    assert kb_collection_name('research-proj-muwia7ognn2l-problem') == \
+        'kb_research-proj-muwia7ognn2l-problem'
+    assert kb_collection_name('shared-maritime-satellite-communications') == \
+        'kb_shared-maritime-satellite-communications'
+
+
+def test_reindex_uses_ascii_collection_name_for_chinese_topic(tmp_path, monkeypatch):
+    from src.kb import reindex
+    from src.rag import vector_store
+
+    db = tmp_path / 'kb.sqlite'
+    db.touch()
+    monkeypatch.setattr(reindex, 'default_db_path', lambda _: db)
+    seen = {}
+
+    class Store:
+        def __init__(self, *_): pass
+        def list_documents(self): return [{'doc_id': 'doc', 'title': 'Title'}]
+        def get_chunks(self, _): return [{'idx': 0, 'text': 'chunk'}]
+        def close(self): pass
+
+    class Vector:
+        def get(self, **_): return {'ids': []}
+        def add_documents(self, docs, ids): seen['ids'] = list(ids)
+
+    monkeypatch.setattr(reindex, 'KBStore', Store)
+    monkeypatch.setattr(vector_store, 'embedding_available', lambda **_: True)
+    monkeypatch.setattr(vector_store, 'get_vector_store',
+                        lambda name: (seen.setdefault('name', name), Vector())[1])
+
+    report = reindex.reindex_library('星网 星链')
+    assert report['ok'] and report['indexed'] == 1
+    assert seen['name'] == vector_store.kb_collection_name('星网 星链')

@@ -145,9 +145,9 @@ def _embed_chunks(topic: str, doc_id: str, chunks: list[Chunk], record: LitRecor
     chunk_dicts = [{"title": record.title, "chunk_index": c.index, "text": c.text} for c in chunks]
     meta = {"doc_id": doc_id, "authors": record.authors, "year": record.year,
             "source": record.venue or record.doc_type.value, "url": record.url, "bibtex": ""}
-    from src.utils.file_utils import sanitize_filename
+    from src.rag.vector_store import kb_collection_name
 
-    return add_fulltext_chunks(chunk_dicts, collection_name=f"kb_{sanitize_filename(topic)}",
+    return add_fulltext_chunks(chunk_dicts, collection_name=kb_collection_name(topic),
                                paper_meta=meta)
 
 
