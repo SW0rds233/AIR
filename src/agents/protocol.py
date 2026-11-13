@@ -979,6 +979,8 @@ class ReviewIssueRef(BaseModel):
     category: str = ""                        # science / citation / readability / figure
     summary: str = ""
     affected_refs: list[ObjectRef] = Field(default_factory=list)
+    detail: str = ""
+    repair_action: str = ""
     #: 建议由哪个角色返工 (主控决定是否采纳)。
     suggested_owner: str = ""
     acceptance: list[str] = Field(default_factory=list)
@@ -1008,6 +1010,8 @@ class ReviewIssueRef(BaseModel):
             "severity": self.severity.value,
             "category": self.category,
             "summary": self.summary,
+            "detail": self.detail,
+            "repair_action": self.repair_action,
             "affected_refs": [r.model_dump() for r in self.affected_refs],
             "suggested_owner": self.suggested_owner,
             "acceptance": list(self.acceptance),

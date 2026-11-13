@@ -123,6 +123,7 @@ class Manuscript(BaseModel):
     input_versions: dict[str, int] = Field(default_factory=dict)
     #: 未解决项与写作缺口 (回流给主控, 不自行补研究)。
     gaps: list[dict[str, Any]] = Field(default_factory=list)
+    revision_log: list[dict[str, Any]] = Field(default_factory=list)
     created_at: str = Field(default_factory=utcnow)
     source_object_ref: ObjectRef | None = None
 
@@ -165,6 +166,7 @@ class Manuscript(BaseModel):
             "status": self.status.value, "snapshot_id": self.snapshot_id,
             "input_versions": dict(self.input_versions),
             "gaps": list(self.gaps), "created_at": self.created_at,
+            "revision_log": list(self.revision_log),
             "word_count": self.word_count(),
             "source_object_ref": (self.source_object_ref.model_dump()
                                   if self.source_object_ref else None),

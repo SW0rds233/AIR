@@ -234,16 +234,18 @@ class BudgetedLLM:
             self._on_event("llm_started", {"task_id": self._task_id, "agent": self._stage})
         try:
             from src.config import LLM_TIMEOUT
-            from src.utils.network_budget import current_budget, network_call, task_network_budget
+            from src.utils.network_budget import current_budget, model_call, task_network_budget
             with task_network_budget(current_budget() or self._network_budget):
-                result = network_call(lambda: self._inner.invoke(*args, **kwargs),
+                result = model_call(lambda: self._inner.invoke(*args, **kwargs),
                                       timeout=LLM_TIMEOUT, phase="llm")
         except Exception as exc:
             if self._on_event:
-                if isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower():
+                from src.utils.network_budget import NetworkUnavailable, TaskDeadlineExceeded, ModelBudgetExceeded
+                deferred = isinstance(exc, (NetworkUnavailable, TaskDeadlineExceeded, ModelBudgetExceeded))
+                if not deferred and (isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower()):
                     self._on_event("llm_timeout", {"task_id": self._task_id,
                         "agent": self._stage, "error": "模型调用超时，已耗尽客户端重试"})
-                self._on_event("llm_error", {"task_id": self._task_id,
+                self._on_event("llm_deferred" if deferred else "llm_error", {"task_id": self._task_id,
                                               "agent": self._stage,
                                               "error": f"{type(exc).__name__}: {exc}"[:300]})
             raise
@@ -619,6 +621,7 @@ class AgentRuntime:
         network = current_budget() or self._task_network_budgets.setdefault(task.task_id, NetworkBudget(
             seconds=min(task.budget.max_wall_seconds, task.budget.max_seconds or task.budget.max_wall_seconds),
             task_id=task.task_id, emit=self.emit, state=self.network_state,
+            role=task.agent,
             cancel=lambda: self.cancel.raise_if_cancelled(task.task_id)))
         return BudgetedLLM(inner, usage, task.budget, self.cancel, task.task_id,
                            stage=stage or task.agent,
@@ -820,6 +823,7 @@ class InProcessExecutor:
                             task.budget.max_seconds or task.budget.max_wall_seconds),
                 task_id=task.task_id, emit=self.runtime.emit,
                 state=self.runtime.network_state,
+                role=role,
                 cancel=lambda: self.runtime.cancel.raise_if_cancelled(task.task_id))
             with task_network_budget(network):
                 result = backend.agent.run(task, pack, self.runtime)
@@ -838,10 +842,12 @@ class InProcessExecutor:
                                  failure_reason=f"{type(e).__name__}: {e}")
         if not result.agent:
             result.agent = role
+        if network is not None:
+            result.payload["model_attempts"] = network.model_attempts
         if network is not None and network.deferred and result.outcome != TaskOutcome.cancelled:
             result.outcome = TaskOutcome.partial
             result.payload["deferred"] = True
-            result.unresolved.append("网络或墙钟预算耗尽，已保留完成部分；恢复后补做未完成步骤")
+            result.unresolved.append(network.stop_reason or "网络或墙钟预算耗尽，已保留完成部分；恢复后补做未完成步骤")
         result = self.runtime.finalize(task, result, grant)
         return result
 

@@ -91,6 +91,11 @@ class WritingAgent(AgentBase):
 不得: 编造数值/引用/定理; 把非形式化论证写成"已证明"; 把案例类比写成普适结论。
 密集代数式使用完整的 LaTeX 数学表达式，不要混成文本模式的 ASCII 运算串。
 长公式分成有语义的推导行（aligned/split）；正文解释每行的条件与结论。
+公式内不要用 text 罗列超过三个中文路径名；索引取短符号，中文释义放正文或表格。
+同一模型只在方法节完整定义一次；结果节推演其含义，讨论节比较替代解释，结论直接回答问题。
+不要在每节重抄同一公式、来源摘要和资料缺口。缺口在局限集中说明，其他章节只写相关影响。
+变量名称、含义、单位与效应尺度须全文一致；绝对变化与对数变化不能共用同一符号。
+区分纯定义、建模假设、假设下推论和经验发现，不把自选函数形式包装成事实上的必要条件。
 摘要和结论同样受核验约束；“已完成证明”“归约已完整证明”也属于证明性断言。
 
 先定论证大纲，再逐节写作，最后根据实际正文写摘要；每次只返回当前消息要求的 JSON。
@@ -204,7 +209,7 @@ class WritingAgent(AgentBase):
 
     def _patch_with_llm(self, task: AgentTask, runtime: AgentRuntime,
                         usage: UsageRecord, packet: WritingPacket) -> tuple[Manuscript | None, str]:
-        """One bounded text/math patch; reference identities and other blocks stay intact."""
+        """Patch located blocks using registered sources; preserve scientific object identities."""
         import json
         from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -218,19 +223,36 @@ class WritingAgent(AgentBase):
             return None, "稿件无可修订正文章节"
         if not runtime.llm_available("writing") or task.budget.exceeded_by(usage):
             return None, "写作模型不可用或预算已耗尽"
+        sources = rank_sources(packet.sources, priority_ids={ref.id for block in targets
+            for kind, ref in zip(block.ref_kinds, block.refs) if kind == "source"})[:12]
+        source_ids = {str(s.get("source_id") or s.get("id")) for s in sources
+                      if research_citation_eligible(s)}
+        material = _section_material(packet, "revision", sources)
+        neighbors = [{"heading": section.heading, "blocks": [
+            {"block_id": b.block_id, "text": b.text[:600]} for b in section.blocks]}
+            for section in prior.sections if any(b in targets for b in section.blocks)]
         try:
             response = runtime.llm(task, usage, stage="writing").invoke([
                 SystemMessage(content=self.SYSTEM),
-                HumanMessage(content="只局部修订给定正文块，保留论断、引用和边界。不得改写全稿。\n"
+                HumanMessage(content="只局部修订给定正文块，保持科学对象身份和证据边界。不得改写全稿。\n"
                     + json.dumps({"objective": task.objective, "issues": packet.review_issues,
-                                  "blocks": [b.to_dict() for b in targets]}, ensure_ascii=False)
-                    + '\n返回 JSON: {"blocks":[{"block_id":"原 id","text":"完整修订文字","math":"公式体，无 $ 分隔符"}]}。'
+                                  "blocks": [b.to_dict() for b in targets], "section_context": neighbors}, ensure_ascii=False)
+                    + "\n当前核查材料与来源用途（无材料不得编造）:\n" + material
+                    + "\n可替换或删除引用，只能使用这些 source_ids: " + json.dumps(sorted(source_ids))
+                    + '\n返回 JSON: {"blocks":[{"block_id":"原 id","text":"完整修订文字","math":"公式体，无 $ 分隔符",'
+                      '"source_ids":["该块保留或新增的来源 id"]}]}。source_ids 省略则保留原引用，空列表表示撤引。'
                       f'只返回有修改的块，最多 {len(targets)} 块；不能解决的问题保留原文。'),
             ])
             payload, note = extract_json(getattr(response, "content", ""))
             if not isinstance(payload, dict):
                 return None, note
-            patched = apply_block_patch(prior, payload.get("blocks"), {b.block_id for b in targets})
+            patched = apply_block_patch(prior, payload.get("blocks"), {b.block_id for b in targets},
+                                        source_ids=source_ids)
+            patched.revision_log.append({"version": prior.version + 1,
+                "detail": "修订待独立复审，不能凭文本变化认定问题已解决",
+                "issue_ids": [i.get("issue_id") for i in packet.review_issues if i.get("issue_id")],
+                "changed_blocks": [b.block_id for b, old in zip(patched.all_blocks(), prior.all_blocks())
+                                   if b != old]})
             if fallback_note:
                 patched.gaps.append({"kind": "revision_locator_fallback", "detail": fallback_note,
                                      "blocking": False})
@@ -284,8 +306,10 @@ class WritingAgent(AgentBase):
                 return None, "写作预算在分节起草时用尽"
             prior, issues = revision_section(packet, plan)
             material = _section_material(packet, str(plan["role"]), sources)
-            previous = (f"前节衔接: {clip(str(sections[-1]['blocks'][-1].get('text') or ''), 260)}"
-                        if sections else "")
+            previous = "已写内容（避免重复定义与论证）: " + json.dumps([
+                {"heading": s["heading"], "paragraphs": [clip(str(b.get("text") or ""), 180)
+                    for b in s["blocks"]], "equations": [b.get("math") for b in s["blocks"] if b.get("math")]}
+                for s in sections], ensure_ascii=False)
             prompt = (
                 f"研究问题: {packet.main_question or packet.original_request}\n"
                 f"论文大纲: {json.dumps(outline, ensure_ascii=False)}\n"
@@ -819,7 +843,7 @@ def _section_material(packet: WritingPacket, role: str,
     """Give each section only the registered evidence it can actually use."""
     import json
 
-    take = 20 if role == "literature" else 12 if role in {"method", "result"} else 6
+    take = 20 if role == "literature" else 12 if role in {"method", "result", "revision"} else 6
     source_rows = []
     for row in sources[:take]:
         source_id = str(row.get("source_id") or row.get("id") or "")
@@ -830,22 +854,23 @@ def _section_material(packet: WritingPacket, role: str,
             "content_level": row.get("content_level"), "relation": row.get("relation"),
             "support_scope": row.get("support_scope", "claim"),
             "supported_link": row.get("supported_link"), "condition_notes": row.get("condition_notes"),
+            "supported_target": row.get("supported_target"),
             "publication_status": row.get("publication_status"),
             "publication_verified_by": row.get("publication_verified_by"),
             "locator": row.get("locator"), "relevance": row.get("relevance_reason"),
             "excerpt": excerpt,
         })
     pieces = ["来源: " + json.dumps(source_rows, ensure_ascii=False)]
-    if role in {"method", "result", "discussion", "conclusion"}:
+    if role in {"method", "result", "discussion", "conclusion", "revision"}:
         pieces.append("命题及其状态: " + json.dumps([
             {key: row.get(key) for key in ("id", "status", "statement", "premises", "reasoning", "support_refs")}
             for row in packet.claims[:20]], ensure_ascii=False)[:15000])
-    if role in {"method", "result", "discussion"}:
+    if role in {"method", "result", "discussion", "revision"}:
         pieces.append("模型及适用条件: " + json.dumps([
             {key: row.get(key) for key in ("id", "name", "mechanism", "variables", "assumptions", "applicability", "open_conditions")}
             for row in packet.models[:10]], ensure_ascii=False)[:14000])
         pieces.append("验证与数据计划: " + json.dumps(packet.validations[:5], ensure_ascii=False)[:4500])
-    if role == "result":
+    if role in {"result", "revision"}:
         pieces.append("有效核验记录: " + json.dumps([
             row for row in packet.verifications
             if row.get("validation_status") == "verified" and not row.get("stale")
@@ -854,7 +879,7 @@ def _section_material(packet: WritingPacket, role: str,
         pieces.append("已登记图: " + json.dumps([
             {"id": row.get("id"), "title": row.get("title"), "caption": row.get("caption")}
             for row in packet.figures[:12]], ensure_ascii=False))
-    if role in {"discussion", "conclusion"}:
+    if role in {"discussion", "conclusion", "revision"}:
         pieces.append("未决项: " + json.dumps(packet.unresolved[:18], ensure_ascii=False)[:4500])
         pieces.append("未关闭义务: " + json.dumps([
             {"status": row.get("status"), "statement": row.get("statement")}
@@ -1199,7 +1224,7 @@ def revision_targets(manuscript: Manuscript, issues: list[dict[str, Any]],
                 (section.heading and section.heading in locator)) for locator in locators)
             if ids & refs or located:
                 targets.append(block)
-    return targets[:4]
+    return targets[:12]
 
 
 def revision_section_targets(manuscript: Manuscript, issues: list[dict[str, Any]], objective: str) -> list[Block]:
@@ -1218,7 +1243,8 @@ def revision_section_targets(manuscript: Manuscript, issues: list[dict[str, Any]
     return max(sections, key=relevance).blocks[:12]
 
 
-def apply_block_patch(manuscript: Manuscript, patches: Any, allowed: set[str]) -> Manuscript:
+def apply_block_patch(manuscript: Manuscript, patches: Any, allowed: set[str], *,
+                      source_ids: set[str] | None = None) -> Manuscript:
     if not isinstance(patches, list) or not patches or len(patches) > min(12, len(allowed)):
         raise ValueError("修订超出已定位正文块范围（最多 12 块）")
     result = manuscript.model_copy(deep=True)
@@ -1231,9 +1257,22 @@ def apply_block_patch(manuscript: Manuscript, patches: Any, allowed: set[str]) -
         block_id = patch.get("block_id")
         if block_id not in allowed or block_id not in blocks or block_id in seen:
             raise ValueError("修订包含未授权或重复的正文块")
-        if set(patch) - {"block_id", "text", "math"}:
+        if set(patch) - {"block_id", "text", "math", "source_ids"}:
             raise ValueError("局部修订不得更换引用或结构")
         seen.add(block_id)
+        if "source_ids" in patch:
+            requested = patch["source_ids"]
+            if (source_ids is None or not isinstance(requested, list)
+                    or any(not isinstance(s, str) or s not in source_ids for s in requested)):
+                raise ValueError("修订只能引用已登记且允许引用的来源")
+            block = blocks[block_id]
+            old_sources = [ref.id for kind, ref in zip(block.ref_kinds, block.refs) if kind == "source"]
+            changed |= old_sources != list(dict.fromkeys(requested))
+            kept = [(kind, ref) for kind, ref in zip(block.ref_kinds, block.refs) if kind != "source"]
+            block.ref_kinds = [kind for kind, _ in kept]
+            block.refs = [ref for _, ref in kept]
+            for source_id in dict.fromkeys(requested):
+                block.add_ref("source", ObjectRef(id=source_id))
         for field in ("text", "math"):
             if field in patch:
                 if not isinstance(patch[field], str):
@@ -1271,7 +1310,7 @@ def build_packet_from_context(task: AgentTask, context: ContextPack) -> WritingP
     review_issues = [*context.objects.get("review_issue", []),
                      *[i for r in context.upstream for i in (r.get("issues") or [])]]
     selected = set((task.hints or {}).get("review_issue_ids") or [])
-    if (task.hints or {}).get("review_cycle"):
+    if selected or (task.hints or {}).get("review_cycle"):
         review_issues = [issue for issue in review_issues
                          if str(issue.get("issue_id") or issue.get("id") or "") in selected]
     prior = (context.objects.get("manuscript") or [{}])[-1]

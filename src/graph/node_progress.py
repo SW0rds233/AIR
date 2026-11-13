@@ -103,6 +103,8 @@ def describe_node(node_name: str, node_state: dict) -> str:
                      f"阶段说明: {preview[:160] or '(无文本输出)'}"))[:220]
         if event == "llm_error":
             return f"[{agent or '模型'} · 模型] 调用失败: {state.get('error', '')}"[:350]
+        if event == "llm_deferred":
+            return f"[{agent or '模型'} · 暂缓] {state.get('error', '')}"[:350]
         if event == "tool_started":
             return f"[{agent or '智能体'} · 工具] 正在调用 {state.get('tool', '')}"[:180]
         if event == "tool_run":

@@ -267,8 +267,9 @@ def build_support_judge(llm) -> Callable[[Claim, SourceEvidence], SourceEvidence
         return None
 
     def _judge(claim: Claim, item: SourceEvidence) -> SourceEvidence:
-        from src.research.mechanisms import mechanism_links
-        links = mechanism_links(claim.statement)
+        from src.research.mechanisms import evidence_targets
+        targets = evidence_targets(claim)
+        links = targets["mechanism_link"]
         excerpt = (item.excerpt or "")[:2000]
         if not excerpt.strip():
             return assess_support(claim, item)
@@ -287,13 +288,18 @@ def build_support_judge(llm) -> Callable[[Claim, SourceEvidence], SourceEvidence
             "insufficient (原文不足以判断)\n\n"
             f"命题: {claim.statement}\n"
             + f"待核查的候选机制链环: {json.dumps(links, ensure_ascii=False)}\n"
+            + f"参数/假设依据需求: {json.dumps(targets['parameter_assumption'], ensure_ascii=False)}\n"
+            + "模型公式的参数取值或经验前提应单独核查；文献不必复述自定义公式。"
+              "若仅支持上述参数/假设，选 parameter_assumption 并原样填写 supported_target，"
+              "写出样本与外推限制；它不证明公式或真实总效应，纯代数仍交数学核验。\n"
             + "原文可只支持其中一环，无须提及最终系统名称；这种支持仅限该环，不能证明整链。"
               "机制类比须标 support_scope=mechanism_link、原样选择 supported_link，列出外推条件与不适用范围。\n"
             + (f"处理变量: {claim.study.treatment}; 结果变量: {claim.study.outcome}\n"
                if claim.study.treatment else "")
             + f"\n{guarded}\n\n"
             '只输出 JSON: {"relation":str,"reason":str,"quote":str,'
-            '"support_scope":"claim|mechanism_link","supported_link":str,"condition_notes":[str]}'
+            '"support_scope":"claim|mechanism_link|parameter_assumption","supported_link":str,'
+            '"supported_target":str,"condition_notes":[str]}'
         )
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
@@ -334,14 +340,17 @@ def build_support_judge(llm) -> Callable[[Claim, SourceEvidence], SourceEvidence
                 return mark_pending(pending, reason, original=relation)
         item.support = mapping[relation]
         scope = str(data.get("support_scope") or "claim")
-        if scope == "mechanism_link":
-            link = str(data.get("supported_link") or "")
+        if scope in {"mechanism_link", "parameter_assumption"}:
+            link = str(data.get("supported_link" if scope == "mechanism_link" else "supported_target") or "")
             conditions = data.get("condition_notes")
-            if link not in links or not isinstance(conditions, list) or not any(
+            if link not in targets[scope] or not isinstance(conditions, list) or not any(
                     isinstance(note, str) and note.strip() for note in conditions):
                 return mark_pending(item, "链环支持缺少有效定位或外推条件", original=relation)
-            item.support_scope = "mechanism_link"
-            item.supported_link = link
+            item.support_scope = scope
+            if scope == "mechanism_link":
+                item.supported_link = link
+            else:
+                item.supported_target = link
             item.condition_notes = [note.strip() for note in conditions if isinstance(note, str) and note.strip()][:8]
             if relation == "supports":
                 item.support = SupportKindOfEvidence.partially_supports
