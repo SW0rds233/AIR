@@ -104,9 +104,11 @@ def test_live_team_events_are_not_replayed_after_step(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path)
     emitted = []
     loop = SimpleNamespace(brief=object(), finished=False)
+    # stream() 现在会尝试继续暂缓任务并读取 team.outcome.delivery, 替身补齐这两个入口
     team = SimpleNamespace(project_id="p", problem_id="q", run_id="r", loop=loop,
                            runtime=SimpleNamespace(sink=SimpleNamespace(event=lambda *args: None)),
-                           prepare=lambda: None)
+                           outcome=SimpleNamespace(delivery={}),
+                           prepare=lambda: None, reopen_deferred=lambda: False)
     session = TeamSession(team, emit=emitted.append)
 
     def step():
