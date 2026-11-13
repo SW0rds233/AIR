@@ -99,6 +99,10 @@ def _complex_domain(assumptions) -> str | None:
 def _parse(text: str, symbols: dict):
     import sympy
 
+    # Mathematical input uses ^ for powers; never evaluate it as Python XOR.
+    # Normalize before the unchanged AST/function whitelist checks.
+    if isinstance(text, str):
+        text = text.replace("^", "**")
     _validate(text)
     local = dict(symbols)
     for fn in _FUNCS:
