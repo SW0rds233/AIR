@@ -83,13 +83,19 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                                                 research_question_text)
 
         question = _query_of(task, context)
+        if task.hints.get("root_cause_kind") == "citation" and task.hints.get("query"):
+            # Recheck the identified publication, not six unrelated topic searches.
+            return {"research_question": question, "field_key": "", "field_confidence": 0.0,
+                    "keywords": [], "concepts": [], "queries": [{"text": task.hints["query"],
+                        "purpose": "核查审阅指出的具体出版来源", "angle": "exact"}]}
         plan: dict[str, Any] = {"research_question": question, "field_key": "",
                                 "field_confidence": 0.0, "keywords": [],
                                 "concepts": [], "queries": []}
         related = [str(row.get("statement") or row.get("mechanism") or row.get("name") or "")
                    for kind in ("claim", "model") for row in context.objects.get(kind) or []]
-        from src.research.mechanisms import mechanism_links
-        links = list(dict.fromkeys(link for text in related for link in mechanism_links(text)))[:8]
+        from src.research.mechanisms import evidence_targets
+        links = list(dict.fromkeys(target for row in context.objects.get("claim") or []
+            for targets in evidence_targets(row).values() for target in targets))[:12]
         if runtime.llm_available("evidence") and not task.budget.exceeded_by(usage):
             from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -98,7 +104,7 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                     SystemMessage(content=self.QUERY_SYSTEM),
                     HumanMessage(content=f"研究问题:\n{question[:4500]}\n检索需求:\n{task_intent(task)}\n"
                                  + "已提出的模型/结论:\n" + "\n".join(related)[:3000]
-                                 + "\n候选链环（分别检索，每环中英各一条；不强制带最终系统专名）:\n"
+                                 + "\n候选链环或参数/假设依据（分别检索，不检索整条自拟公式；不强制带最终系统专名）:\n"
                                  + "\n".join(links))])
                 candidate, _ = extract_json(getattr(response, "content", ""))
                 if isinstance(candidate, dict):
@@ -217,6 +223,8 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
             + _theorem_search_queries(context)
             + [row["text"] for row in retrieval_plan["queries"]],
             self.max_queries)
+        if targeted and task.hints.get("root_cause_kind") == "citation":
+            selected_queries = [targeted]
         collected = self.retrieve(task, context, runtime, topic=topic, query=query,
                                   policy=policy, selected_queries=selected_queries,
                                   search_cache=search_cache, usage=usage)
@@ -291,6 +299,9 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                     statement="将已审查的来源接入论文论证与参考文献",
                     why="已形成可引用来源，按支持范围引用，不将背景当成证明",
                     acceptance=["在对应论证段落引用已登记来源，更新参考文献与检索范围"],
+                    blocked_refs=list(task.input_refs),
+                    hints={key: task.hints[key] for key in
+                           ("review_issue_ids", "focus_blocks", "repair_key", "locator") if key in task.hints},
                 ))
             else:
                 unresolved.append("0 条可引用来源：需完成来源判定或出版核实，未派发引用修订")
@@ -673,7 +684,7 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                 if target_id and item.get("claim_version", claim_version) != claim_version:
                     continue
                 relation = str(item.get("relation", "insufficient") or "insufficient")
-                if item.get("support_scope") == "mechanism_link":
+                if item.get("support_scope", "claim") != "claim":
                     relation = "background"  # Partial support for one link never supports the whole claim.
                 if relation not in valid:
                     relation = "insufficient"
@@ -742,6 +753,7 @@ def _evidence_row(item: Any) -> dict[str, Any]:
         "support_evidence": getattr(item, "support_evidence", ""),
         "support_reason": getattr(item, "support_reason", ""),
         "support_scope": getattr(item, "support_scope", "claim"),
+        "supported_target": getattr(item, "supported_target", ""),
         "supported_link": getattr(item, "supported_link", ""),
         "condition_notes": list(getattr(item, "condition_notes", []) or []),
         "reviewer": getattr(item, "reviewer", ""),

@@ -22,11 +22,16 @@ class TaskDeadlineExceeded(TimeoutError):
     pass
 
 
+class ModelBudgetExceeded(RuntimeError):
+    pass
+
+
 @dataclass
 class NetworkState:
     failures: int = 0
     unavailable_until: float = 0
     workers: BoundedSemaphore = field(default_factory=lambda: BoundedSemaphore(3))
+    evidence_model_attempts: int = 0
 
 
 @dataclass
@@ -43,6 +48,20 @@ class NetworkBudget:
     backoff_used: float = 0
     retry_attempts: int = 0
     deferred: bool = False
+    unavailable_notified: bool = False
+    role: str = ""
+    model_attempts: int = 0
+    stop_reason: str = ""
+
+    def defer(self, phase: str, *, cooldown: bool = False) -> None:
+        self.deferred = True
+        if cooldown:
+            self.state.unavailable_until = max(self.state.unavailable_until, time.monotonic() + 60)
+        if not self.unavailable_notified:
+            self.unavailable_notified = True
+            self.event("network_unavailable", phase=phase,
+                       retry_after_seconds=max(0, round(self.state.unavailable_until - time.monotonic())),
+                       action="local_sources_only")
 
     def remaining(self) -> float:
         return max(0., self.seconds - (time.monotonic() - self.started))
@@ -54,16 +73,19 @@ class NetworkBudget:
     def check(self) -> None:
         if self.cancel:
             self.cancel()
+        if self.stop_reason:
+            raise ModelBudgetExceeded(self.stop_reason)
         if self.remaining() <= 0:
-            self.deferred = True
+            self.defer("task_deadline")
             raise TaskDeadlineExceeded("任务墙钟预算耗尽，保留已有成果，待恢复后补做")
         if self.failures >= self.max_failures or self.state.unavailable_until > time.monotonic():
-            self.deferred = True
+            self.defer("budget_check", cooldown=self.failures >= self.max_failures)
             raise NetworkUnavailable("网络暂不可用，已暂停本任务远程步骤，保留本地资料")
 
 
 _current: ContextVar[NetworkBudget | None] = ContextVar("network_budget", default=None)
 _in_call: ContextVar[bool] = ContextVar("inside_remote_read", default=False)
+_in_model_call: ContextVar[bool] = ContextVar("inside_model_call", default=False)
 
 
 def current_budget() -> NetworkBudget | None:
@@ -86,13 +108,33 @@ def network_allowed() -> bool:
     try:
         budget.check()
         return True
-    except (NetworkUnavailable, TaskDeadlineExceeded):
+    except (NetworkUnavailable, TaskDeadlineExceeded, ModelBudgetExceeded):
         return False
 
 
 def phase_event(phase: str, **data: Any) -> None:
     if budget := current_budget():
         budget.event(phase, **data)
+
+
+def model_call(fn: Callable[[], Any], *, timeout: float, phase: str) -> Any:
+    """Count SDK attempts once across BudgetedLLM/MeteredLLM, including KB helpers."""
+    budget = current_budget()
+    if budget is None or _in_model_call.get():
+        return network_call(fn, timeout=timeout, phase=phase)
+    budget.check()
+    if budget.role == "evidence":
+        if budget.state.evidence_model_attempts >= 150:
+            budget.deferred = True
+            budget.stop_reason = "证据层累计模型调用达到 150 次上限；保留资料，转入写作与缺口报告"
+            raise ModelBudgetExceeded(budget.stop_reason)
+        budget.state.evidence_model_attempts += 1
+    budget.model_attempts += 1
+    token = _in_model_call.set(True)
+    try:
+        return network_call(fn, timeout=timeout, phase=phase)
+    finally:
+        _in_model_call.reset(token)
 
 
 def network_error(error: BaseException) -> bool:
@@ -106,6 +148,7 @@ def network_call(fn: Callable[[], Any], *, timeout: float = 120, phase: str = "n
         return fn()
     budget.check()
     if not budget.state.workers.acquire(blocking=False):
+        budget.defer(phase)
         raise NetworkUnavailable("先前网络请求尚未退出，暂不增加后台调用")
     result: Queue = Queue(maxsize=1)
     context = copy_context()
@@ -152,10 +195,7 @@ def network_call(fn: Callable[[], Any], *, timeout: float = 120, phase: str = "n
             budget.event("network_error", phase=phase, error_type=type(error).__name__,
                          failures=budget.failures)
             if budget.state.failures >= budget.max_failures or isinstance(error, TaskDeadlineExceeded):
-                budget.deferred = True
-                budget.state.unavailable_until = time.monotonic() + 60
-                budget.event("network_unavailable", phase=phase, retry_after_seconds=60,
-                             action="local_sources_only")
+                budget.defer(phase, cooldown=True)
         raise
 
 
@@ -166,9 +206,11 @@ def retry_wait(seconds: float) -> None:
         return
     budget.check()
     if budget.retry_attempts >= 3:
+        budget.defer("retry_budget", cooldown=True)
         raise NetworkUnavailable("本任务共享重试次数已耗尽")
     wait = min(max(0., seconds), 30 - budget.backoff_used, budget.remaining())
     if wait <= 0:
+        budget.defer("backoff_budget", cooldown=True)
         raise NetworkUnavailable("本任务重试等待预算已耗尽")
     budget.backoff_used += wait
     budget.retry_attempts += 1

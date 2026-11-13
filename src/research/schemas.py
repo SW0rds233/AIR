@@ -622,7 +622,8 @@ class SourceEvidence(PublicationMetadata):
     # 2. 内容支持关系: 默认 insufficient, 必须显式判定
     support: SupportKindOfEvidence = SupportKindOfEvidence.insufficient
     support_reason: str = ""
-    support_scope: Literal["claim", "mechanism_link"] = "claim"
+    support_scope: Literal["claim", "mechanism_link", "parameter_assumption"] = "claim"
+    supported_target: str = ""
     supported_link: str = ""
     condition_notes: list[str] = Field(default_factory=list)
     support_evidence: str = ""  # 审查理由所依据的原文片段
@@ -917,6 +918,9 @@ class Claim(BaseModel):
     claim_type: ClaimType = ClaimType.definitional
     strategy: str = ""  # 推理方法与命题语义类型是两个维度。
     claim_type_input: str = ""  # 兼容旧记录时保留原始误填值以便审计。
+    premises: list[str] = Field(default_factory=list)
+    mechanism_links: list[str] = Field(default_factory=list)
+    evidence_requirements: list[str] = Field(default_factory=list)
     # 应用/因果: 作用对象与范围
     scope_population: str = ""
     scope_region: str = ""

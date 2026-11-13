@@ -472,6 +472,15 @@ def escape_math(text: str) -> str:
 def _display_math(value: str) -> str:
     """Split long top-level formula groups; never split an existing TeX environment."""
     body = escape_math(value)
+    # Pure text-label sets need real row breaks: allowbreak is ineffective in
+    # an aligned math cell. Keep each text command and the set semantics intact.
+    def wrap_labels(match):
+        labels = re.findall(r"\\text\{[^{}]*\}", match.group(1))
+        if len(labels) <= 3 or not re.search(r"[\u4e00-\u9fff]", match.group(1)):
+            return match.group(0)
+        rows = [r",\ ".join(labels[i:i + 2]) for i in range(0, len(labels), 2)]
+        return r"\left\{\begin{gathered}" + r",\\ ".join(rows) + r"\end{gathered}\right\}"
+    body = re.sub(r"\\\{((?:\\text\{[^{}]*\}(?:\s|,|\\[ ,;!])*)+)\\\}", wrap_labels, body)
     if re.search(r"\\(?:begin|end)\{|\\\\", body):
         # 模型自己写了环境（如 `\begin{aligned}…\tag{3.1}\end{aligned}`）: 不拆行,
         # 但编号若落在内部环境里必须提出来（amsmath: `\tag not allowed here`）

@@ -681,6 +681,11 @@ class SupervisorAgent:
                dispatched: Iterable[str] = ()) -> SupervisorDecision:
         """给出本轮的一种结构化判断。"""
         results = results or {}
+        evidence_count = sum(r.agent == "evidence" for r in results.values())
+        evidence_calls = sum(int(r.payload.get("model_attempts", r.usage.llm_calls))
+                             for r in results.values() if r.agent == "evidence")
+        evidence_exhausted = evidence_count >= 8 or evidence_calls >= 150
+        evidence_slots = max(0, 8 - evidence_count)
         pending_set = {p for p in pending if p}
         running_set = {r for r in running if r}
         done_ids = {task_id for task_id, result in results.items()
@@ -739,7 +744,15 @@ class SupervisorAgent:
         # 2. 需求 -> 任务 (只派"计划里还没有的")
         needs = list(open_needs)
         needs.sort(key=lambda need: 0 if need.kind == NeedKind.review else
-                   1 if need.kind == NeedKind.manuscript_revision and need.hints.get("review_cycle") else 2)
+                   1 if need.owner == "evidence" and need.hints.get("root_cause_kind") == "citation" else
+                   2 if need.kind == NeedKind.manuscript_revision and need.hints.get("review_cycle") else 3)
+        repair_attempts: dict[str, int] = {}
+        for row in plan.tasks:
+            key = (row.get("hints") or {}).get("repair_key")
+            if key and row.get("task_id") in results:
+                repair_attempts[key] = repair_attempts.get(key, 0) + 1
+        needs = [need for need in needs if not (need.owner == "evidence" and evidence_exhausted)
+                 and repair_attempts.get(need.hints.get("repair_key", ""), 0) < 2]
         if needs:
             issue_attempts: dict[str, int] = {}
             for row in plan.tasks:
@@ -754,7 +767,15 @@ class SupervisorAgent:
                 and all(issue_attempts.get(issue_id, 0) < 2
                         for issue_id in (t.hints or {}).get("review_issue_ids") or [])]
             if tasks:
-                tasks = tasks[: self.max_tasks_per_round]
+                limited = []
+                for task in tasks:
+                    if task.agent == "evidence":
+                        if evidence_slots <= 0:
+                            continue
+                        evidence_slots -= 1
+                    limited.append(task)
+                tasks = limited[: self.max_tasks_per_round]
+            if tasks:
                 return SupervisorDecision(
                     decision=DecisionKind.dispatch,
                     reason=f"收到 {len(needs)} 条跨职责需求, 派 {len(tasks)} 个新任务",
@@ -777,8 +798,13 @@ class SupervisorAgent:
                                if key and key in attempted_keys}
         # 目标文本可能变化；有成果记录即表示前置任务已经尝试过。
         settled |= {tid for tid in results if tid in plan_keys}
+        if evidence_exhausted:
+            # Exhausted research may remain unresolved, but must not starve the manuscript.
+            settled |= {row["task_id"] for row in plan.tasks if row.get("agent") == "evidence"}
         ready = [t for t in plan.ready(settled, running_set)
                  if t not in completed
+                 and not (evidence_exhausted and any(row.get("task_id") == t and
+                           row.get("agent") == "evidence" for row in plan.tasks))
                  and (plan_keys.get(str(t), "") not in attempted_keys
                       or plan_keys.get(str(t), "") in retry_keys)
                  and (plan_keys.get(str(t), "") not in dispatched_keys
@@ -791,6 +817,14 @@ class SupervisorAgent:
                   f"dispatched={sorted(dispatched_keys)}", file=_sys.stderr)
         if ready and plan.version:
             tasks, skipped = self._tasks_for(plan, ready, remaining_budget)
+            limited = []
+            for task in tasks:
+                if task.agent == "evidence":
+                    if evidence_slots <= 0:
+                        continue
+                    evidence_slots -= 1
+                limited.append(task)
+            tasks = limited
             if tasks:
                 return SupervisorDecision(
                     decision=DecisionKind.dispatch,
@@ -814,6 +848,8 @@ class SupervisorAgent:
         if not missing:
             partial = self._partial_roles(brief, results, completed_ids=completed)
             note = (f"以下角色只交回部分成果: {', '.join(partial)}" if partial else "")
+            if evidence_exhausted:
+                note += "; 证据预算达到上限（8 个任务/150 次模型调用），剩余缺口保留，停止重复检索"
             return SupervisorDecision(decision=DecisionKind.deliver,
                                       reason="交付形态所需的角色成果齐备",
                                       note=note)
@@ -963,7 +999,8 @@ class SupervisorAgent:
         """
         tasks: list[AgentTask] = []
         for issue in list(issues)[:limit]:
-            owner = "evidence" if issue.category == "citation" else issue.suggested_owner or _owner_for_issue(issue)
+            from src.agents.review import repair_owner
+            owner = repair_owner(issue) or _owner_for_issue(issue)
             if not owner:
                 continue
             tasks.append(AgentTask(

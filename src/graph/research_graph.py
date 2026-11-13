@@ -58,6 +58,14 @@ def _final_review_task(results, task_order):
     return None
 
 
+def _current_review_needs(needs, review):
+    """Retire previous-round review work; only the current independent review can renew it."""
+    current = {issue.issue_id for issue in review.issues}
+    return [need for need in needs if not need.hints.get("review_cycle")
+            and (not need.hints.get("review_issue_ids")
+                 or bool(set(need.hints["review_issue_ids"]) & current))]
+
+
 def _review_before_delivery(state, task_order, max_revisions, max_rounds, remaining_budget=None):
     """A failed current review gets a bounded repair or an explicit partial reason."""
     reviews = [(tid, state.results[tid]) for tid in task_order if tid in state.results
@@ -80,7 +88,8 @@ def _review_before_delivery(state, task_order, max_revisions, max_rounds, remain
             return None, "审阅未通过；剩余模型或费用预算不足以完成修订与复审"
     if any((row.get("hints") or {}).get("review_task_id") == review_id for row in state.plan.tasks):
         return None, "审阅未通过；本轮修订已尝试但仍有未解决问题"
-    issues = [issue for issue in result.issues if issue.category in {"readability", "completeness"}]
+    from src.agents.review import repair_owner
+    issues = [issue for issue in result.issues if repair_owner(issue) == "writing"]
     if not issues:
         return None, "审阅未通过；剩余问题需补充科学依据或修正模型，不能靠文字修订解决"
     attempts: dict[str, int] = {}
@@ -526,6 +535,8 @@ class TeamRun:
                 state.results[task.task_id] = result
                 state.objectives[task.task_id] = task.objective
                 self.outcome.task_order.append(task.task_id)
+                if task.agent == "review" and result.payload.get("semantic_reviewed"):
+                    state.open_needs = _current_review_needs(state.open_needs, result)
                 state.open_needs.extend(result.followup_needs)
                 state.plan = self.supervisor.replan(
                     state.plan, {task.task_id: result}, version=state.plan.version)
@@ -732,6 +743,11 @@ class TeamRun:
         if task.agent == "review":
             task.hints["review_threshold"] = self.review_threshold
         context = self._build_context(task, results)
+        if task.agent == "evidence":
+            self.runtime.network_state.evidence_model_attempts = max(
+                self.runtime.network_state.evidence_model_attempts,
+                sum(int(r.payload.get("model_attempts", r.usage.llm_calls))
+                    for r in results.values() if r.agent == "evidence"))
         try:
             self.task_store.create(task, plan_id=self.outcome.plan.plan_id
                                    if self.outcome.plan else "")
@@ -859,12 +875,24 @@ class TeamRun:
         if self._cached_default_builder is not None:
             return self._cached_default_builder
         source_sets = self._source_set_rows
+        def source_rows(kind):
+            rows = (self.projection.rows(kind) if hasattr(self.projection, "rows")
+                    else object_rows(self.projection.store, kind))
+            limit = 40
+            if kind == "evidence":
+                manuscripts = (self.projection.rows("manuscript") if hasattr(self.projection, "rows")
+                               else object_rows(self.projection.store, "manuscript"))
+                cited = {ref.get("id") for manuscript in manuscripts[-1:]
+                         for section in manuscript.get("sections", []) for block in section.get("blocks", [])
+                         for ref, ref_kind in zip(block.get("refs", []), block.get("ref_kinds", []))
+                         if ref_kind == "source"}
+                rows = sorted(rows, key=lambda row: (row.get("source_id") or row.get("id")) not in cited)
+                limit = max(limit, sum((r.get("source_id") or r.get("id")) in cited for r in rows))
+            return slim_object_rows(rows, limit=limit,
+                text_limit=6000 if kind in {"manuscript", "model", "claim", "evidence"} else 600)
         self._cached_default_builder = make_context_builder(
             brief_getter=lambda: self.outcome.brief,
-            object_source=lambda kind: slim_object_rows(
-                self.projection.rows(kind) if hasattr(self.projection, "rows")
-                else object_rows(self.projection.store, kind),
-                text_limit=6000 if kind in {"manuscript", "model", "claim", "evidence"} else 600),
+            object_source=source_rows,
             source_sets=source_sets,
             request=self.request,
             attachments=self.attachments,

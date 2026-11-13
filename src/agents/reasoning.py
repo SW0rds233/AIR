@@ -117,6 +117,8 @@ class ReasoningAgent(AgentBase):
   多环节机制先拆成每条只含一个因果箭头的小命题，逐环登记支持与迁移条件；
   整条作用链通过 dependencies 引用小命题，不能用某一环的证据证明全链。
   自定义量的等式仅表示定义；真实量的乘法分解需声明假设和量纲，不得冒充恒等式。
+  机制命题用 mechanism_links 显式登记链环；公式命题用 evidence_requirements 登记
+  具体参数取值或经验假设的来源需求，不要求文献支持自拟公式。代数推导与经验前提分开核验。
 
 最终输出 JSON:
 {"strategy": "derivation|synthesis|counterexample|quantitative",
@@ -124,6 +126,7 @@ class ReasoningAgent(AgentBase):
              "study": {"design": "theory|observational|simulation|none"},
              "lhs": "", "rhs": "", "relation": "==|>=|<=|>|<|custom",
              "variables": [""], "variable_domains": {}, "id": "",
+             "mechanism_links": [], "evidence_requirements": [],
              "reasoning": [""], "premises": [""], "informal": true}],
  "counterexamples": [{"statement": "", "witness": ""}],
  "missing_conditions": [""], "limitations": [""],
@@ -792,7 +795,7 @@ def _evidence_links_for(task: AgentTask, claim: Any,
         if not source_id:
             continue
         relation = str(row.get("relation") or "insufficient")
-        if row.get("support_scope") == "mechanism_link":
+        if row.get("support_scope", "claim") != "claim":
             relation = "background"
         if relation not in valid:
             relation = "insufficient"

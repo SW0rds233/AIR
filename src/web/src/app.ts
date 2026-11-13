@@ -783,17 +783,18 @@ function handleEvent(ev: any) {
         const kind = String(ev.team_event?.event || '');
         if (['supervisor_decision', 'task_started', 'task_result',
              'llm_started', 'llm_result', 'tool_started', 'tool_run',
-             'review_issue', 'task_heartbeat', 'network_unavailable', 'network_recovered',
+             'review_issue', 'task_heartbeat', 'llm_deferred', 'network_unavailable', 'network_recovered',
              'harvest_download', 'ingest_parse', 'embed_batch'].includes(kind)) setText('live-summary', String(ev.text || ''));
         showLiveActivity(ev, kind);
-        const cls = kind.startsWith('llm_') ? 'msg-llm'
+        const cls = ['llm_error', 'llm_timeout'].includes(kind) ? 'msg-error'
+          : kind === 'llm_deferred' ? 'msg-node' : kind.startsWith('llm_') ? 'msg-llm'
           : kind.startsWith('tool_') ? 'msg-tool' : 'msg-node';
         const visibleInChat = new Set([
           'network_unavailable', 'network_recovered',
           'brief_ready', 'plan_ready', 'supervisor_decision', 'task_started',
           'task_result', 'task_finished', 'commit_failed', 'review_issue',
           'run_finished', 'llm_error', 'progress_export_failed',
-          'evidence_retrieval', 'evidence_assessed', 'llm_timeout',
+          'evidence_retrieval', 'evidence_assessed', 'llm_timeout', 'llm_deferred',
         ]);
         if (!kind || visibleInChat.has(kind)) addMsg(ev.text, cls);
       }
