@@ -40,21 +40,48 @@ from src.research.task_store import (
 logger = logging.getLogger(__name__)
 
 
-def _final_review_task(results, task_order):
-    """每个最后稿件至少审阅一次；失败的写作调用没有新稿件可复审。"""
-    latest_writer = -1
-    latest_review = -1
+def _review_positions(results, task_order):
+    writer, reviewer = -1, -1
+    manuscript = None
     for index, task_id in enumerate(task_order):
         result = results.get(task_id)
         if result is None:
             continue
         if result.agent == "writing" and result.outcome in (TaskOutcome.completed, TaskOutcome.partial):
-            latest_writer = index
+            if result.pending_resume:
+                continue
+            writer = index
+            manuscript = result.payload.get("manuscript") or manuscript
         elif result.agent == "review":
-            latest_review = index
-    if latest_writer > latest_review:
+            reviewer = index
+    return writer, reviewer, manuscript
+
+
+def _review_matches_manuscript(results, task_order, manuscript=None, *, semantic=True):
+    writer, reviewer, written = _review_positions(results, task_order)
+    if reviewer < 0:
+        return False
+    verdict = results[task_order[reviewer]].payload
+    if semantic and not verdict.get("semantic_reviewed"):
+        return False
+    reviewed = verdict.get("reviewed_manuscript") or {}
+    current = manuscript or written
+    if reviewed.get("content_hash") and current:
+        from src.publication.manuscript_state import manuscript_identity
+        identity = manuscript_identity(current)
+        return (reviewed.get("manuscript_id") == identity["manuscript_id"]
+                and reviewed["content_hash"] == identity["content_hash"])
+    # Legacy runs have no fingerprint; failed/blocked writing never invalidates them.
+    return reviewer > writer
+
+
+def _final_review_task(results, task_order, manuscript=None):
+    """每个最后稿件至少审阅一次；失败的写作调用没有新稿件可复审。"""
+    latest_writer, _, written = _review_positions(results, task_order)
+    if (latest_writer >= 0 or manuscript) and not _review_matches_manuscript(
+            results, task_order, manuscript or written, semantic=False):
         return AgentTask(agent="review", objective="独立审阅最后一版稿件及引用，更新交付结论",
-                         hints={"final_review_for": task_order[latest_writer]})
+                         hints={"final_review_for": task_order[latest_writer] if latest_writer >= 0 else "stored"})
     return None
 
 
@@ -482,7 +509,7 @@ class TeamRun:
             clarifications_asked=state.clarifications, objectives=state.objectives,
             pending_retries=state.pending_retries, dispatched=state.dispatched)
         if decision.decision == DecisionKind.deliver:
-            final_review = _final_review_task(state.results, self.outcome.task_order)
+            final_review = _final_review_task(state.results, self.outcome.task_order, self._latest_manuscript())
             if final_review is not None and state.rounds < self.max_rounds:
                 decision = SupervisorDecision(
                     decision=DecisionKind.dispatch, tasks=[final_review],
@@ -690,9 +717,6 @@ class TeamRun:
             review_index = next((index for index in range(len(self.outcome.task_order) - 1, -1, -1)
                                  if (self.loop.results.get(self.outcome.task_order[index])
                                      and self.loop.results[self.outcome.task_order[index]].agent == "review")), -1)
-            writing_index = next((index for index in range(len(self.outcome.task_order) - 1, -1, -1)
-                                  if (self.loop.results.get(self.outcome.task_order[index])
-                                      and self.loop.results[self.outcome.task_order[index]].agent == "writing")), -1)
             reviewed = (self.loop.results[self.outcome.task_order[review_index]]
                         if review_index >= 0 else None)
             judgement = dict(reviewed.payload or {}) if reviewed else {}
@@ -702,7 +726,9 @@ class TeamRun:
                 "accepted": bool(judgement.get("accepted")),
                 "recovery_required": str(judgement.get("recovery_required") or ""),
                 "semantic_reviewed": bool(judgement.get("semantic_reviewed")),
-                "current": review_index > writing_index and bool(judgement.get("semantic_reviewed"))}
+                "reviewed_manuscript": judgement.get("reviewed_manuscript"),
+                "current": _review_matches_manuscript(self.loop.results, self.outcome.task_order,
+                                                       self._latest_manuscript())}
             self.outcome.delivery = apply_review_gate(self.outcome.delivery, review)
             if not review["current"] and not any(r.pending_resume for r in self.loop.results.values()):
                 self.outcome.stop_reason = review["recovery_required"] or "研究已封存，最后一版稿件未复审"
@@ -893,6 +919,9 @@ class TeamRun:
             rows = (self.projection.rows(kind) if hasattr(self.projection, "rows")
                     else object_rows(self.projection.store, kind))
             limit = 40
+            if kind == "manuscript":
+                # Review/patch the actual current text and tables, never a truncated copy.
+                return rows[-1:]
             if kind == "evidence":
                 manuscripts = (self.projection.rows("manuscript") if hasattr(self.projection, "rows")
                                else object_rows(self.projection.store, "manuscript"))
@@ -912,6 +941,14 @@ class TeamRun:
             attachments=self.attachments,
         )
         return self._cached_default_builder
+
+    def _latest_manuscript(self):
+        projection = getattr(self, "projection", None)
+        if projection is None:
+            return None
+        rows = (projection.rows("manuscript") if hasattr(projection, "rows")
+                else object_rows(projection.store, "manuscript"))
+        return rows[-1] if rows else None
 
     # ---- 恢复 ----
     def recovery_view(self) -> dict[str, Any]:

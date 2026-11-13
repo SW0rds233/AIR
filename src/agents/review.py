@@ -132,6 +132,12 @@ class ReviewAgent(AgentBase):
   迁移条件和“不作为直接证据”，不得重复要求同一免责声明；须指出仍然越界的原句。
   明示的模型假设及其条件推论可作为研究框架，机器未验证不等于推论为假。
   不得把缺少实证数据、当前未核验或未研究题目以外维度本身判为原则性错误。
+- “不作为已证明定理”等否定句不是证明性断言；定义恒等式有当前版本核验证书时，
+  不要求额外经验文献，且证书不验证模型适用性。工具语法错误、反例、未执行必须区分。
+- support_reason 是针对其 claim_id/support_scope 的关系判断，不是文献内容的完整摘要。
+  先核对 cited_by_blocks 的实际原句，不能把针对另一命题的“不支持”当作当前引用错误。
+  命题库中的来源关联不等于正文引用；未在正文使用的产业主张无须进入正式文献表。
+  无图表时说明该项没有可核查产物，不能虚构图文一致性检查或只为提分要求无关图表。
 - citation 问题按具体动作给 repair_action：verify_source（核验元数据/原文）、
   replace_source（确需新来源）、revise_citation（撤引、改用途、补限定）。前两者交 evidence，
   后者交 writing。验收须可在当前正文逐项判断，不能要求每章重复同一公式与局限。
@@ -238,6 +244,9 @@ class ReviewAgent(AgentBase):
         judgement = judge_review(issues, threshold=threshold,
                                  semantic_reviewed=semantic_reviewed,
                                  category_scores=llm_scores)
+        from src.publication.manuscript_state import manuscript_identity
+        manuscript = (context.objects.get("manuscript") or [{}])[-1]
+        judgement["reviewed_manuscript"] = manuscript_identity(manuscript)
         judgement["category_notes"] = category_notes
         quota_exhausted = bool(re.search(
             r"insufficient[_ ]quota|exceeded.{0,30}quota|quota.{0,30}exhaust|余额不足|配额耗尽",
@@ -340,7 +349,13 @@ def deterministic_issues(context: ContextPack) -> list[ReviewIssueRef]:
     for claim in claims:
         support_refs = as_list_of_str(claim.get("support_refs"))
         status = str(claim.get("status", "") or "")
-        if status in ("supported", "verified") and not support_refs:
+        verified_identity = (claim.get("claim_type") == "definitional" and claim.get("relation") == "=="
+            and any(v.get("claim_id") == claim.get("id")
+                    and v.get("claim_version") == claim.get("version", 1)
+                    and v.get("status") == "passed" and not v.get("stale")
+                    and v.get("scope", "target") == "target"
+                    for v in context.objects.get("verification") or []))
+        if status in ("supported", "verified") and not support_refs and not verified_identity:
             issues.append(_issue(
                 category="science", severity="blocking",
                 summary=f"命题已标为 {status} 但没有任何来源依据",
@@ -423,12 +438,9 @@ def _has_certificate(block: dict[str, Any]) -> bool:
     return str(block.get("role", "")) == "certificate"
 
 
-_STRONG_MARKERS = ("已证明", "已经证明", "严格证明", "证明了", "必定成立", "必然成立",
-                   "QED", "qed", "we prove", "we have proved", "has been proven", "we establish")
-
-
 def _overclaims(text: str) -> bool:
-    return any(marker.casefold() in str(text or "").casefold() for marker in _STRONG_MARKERS)
+    from src.publication.claims import asserts_completed_proof
+    return asserts_completed_proof(text)
 
 
 def _unit_conflict(caption: str, figure: dict[str, Any]) -> bool:
@@ -558,10 +570,15 @@ def _review_materials(context):
     manuscript = (context.objects.get("manuscript") or [{}])[-1]
     manuscript = manuscript.get("manuscript", manuscript)
     cited = []
+    source_blocks = {}
     for section in manuscript.get("sections") or []:
         for block in section.get("blocks") or []:
-            cited.extend(ref.get("id") for kind, ref in zip(
-                block.get("ref_kinds") or [], block.get("refs") or []) if kind == "source")
+            if section.get("role") == "references" or "参考文献" in section.get("heading", ""):
+                continue
+            for kind, ref in zip(block.get("ref_kinds") or [], block.get("refs") or []):
+                if kind == "source":
+                    cited.append(ref.get("id"))
+                    source_blocks.setdefault(ref.get("id"), []).append(block.get("block_id"))
     cited = list(dict.fromkeys(cited))
     by_source = {}
     for source in context.objects.get("evidence") or []:
@@ -576,9 +593,10 @@ def _review_materials(context):
         source = by_source.get(key, (0, {"source_id": key, "missing": True}))[1]
         row = {k: source.get(k) for k in ("id", "source_id", "title", "authors", "year", "venue",
             "doi", "excerpt", "locator", "content_level", "publication_status", "publication_type",
-            "publication_verified_by", "publication_note", "support_scope", "supported_link",
+            "publication_verified_by", "publication_note", "claim_id", "support_scope", "supported_link",
             "condition_notes", "supported_target", "relevance_reason", "relation", "support_reason", "missing")}
         row["excerpt"] = str(row.get("excerpt") or "")[:1800]
+        row["cited_by_blocks"] = source_blocks.get(key, [])
         sources.append(row)
     try:
         citations = assign_render_numbers(Manuscript.model_validate(manuscript))["citations"]
@@ -588,11 +606,15 @@ def _review_materials(context):
         "review_date": _review_date(),
         "citation_numbers": citations,
         "models": context.objects.get("model") or [],
-        "claims": [{k: c.get(k) for k in ("id", "statement", "status", "assurance", "reasoning", "premises")}
+        "claims": [{k: c.get(k) for k in ("id", "version", "claim_type", "statement", "status", "assurance",
+                                        "verification_scope", "reasoning", "premises", "mechanism_links")}
                    for c in context.objects.get("claim") or []],
         "verifications": context.objects.get("verification") or [],
         "obligations": context.objects.get("obligation") or [],
         "sources": sources,
+        "figure_count": len(context.objects.get("figure") or []),
+        "tables": [b for s in manuscript.get("sections", []) for b in s.get("blocks", [])
+                   if b.get("role") == "table"],
         "omitted_uncited_sources": max(0, len(by_source) - len(source_keys)),
         "revision_log": manuscript.get("revision_log", [])[-3:],
         "previous_issues": [{k: issue.get(k) for k in ("issue_id", "summary", "acceptance", "locator")}
