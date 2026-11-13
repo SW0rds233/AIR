@@ -689,7 +689,7 @@ class SupervisorAgent:
         pending_set = {p for p in pending if p}
         running_set = {r for r in running if r}
         done_ids = {task_id for task_id, result in results.items()
-                    if result.outcome in (TaskOutcome.completed, TaskOutcome.partial)}
+                    if result.outcome in (TaskOutcome.completed, TaskOutcome.partial) and not result.pending_resume}
         satisfied_keys = {str(k) for k in satisfied if k}
         # 依赖判定按"角色+目标"的等价完成来算, 而不只看任务 id
         known_objectives = {str(k): str(v) for k, v in (objectives or {}).items()}
@@ -707,7 +707,7 @@ class SupervisorAgent:
                           for task_id, result in results.items()
                           if result.outcome in (TaskOutcome.completed,
                                                 TaskOutcome.partial)
-                          and result.agent and _objective_of(task_id)}
+                          and not result.pending_resume and result.agent and _objective_of(task_id)}
         satisfied_keys |= succeeded_keys
         # 等价完成: 任务的**"角色+目标"键**若已有成功记录, 它就算完成 —— 不能只看
         # task_id。补派/返工用的是新 task_id, 而 replan 克隆出的计划任务又是另一个
@@ -737,6 +737,19 @@ class SupervisorAgent:
         if stopped:
             return SupervisorDecision(decision=DecisionKind.stop_with_report,
                                       reason="运行被停止", note="已封存已有成果")
+        deferred_ids = {tid for tid, result in results.items() if result.pending_resume}
+        if deferred_ids:
+            retry_keys = set(pending_retries)
+            resume_ready = [tid for tid in plan.ready(set(results) - deferred_ids, running_set)
+                            if tid in deferred_ids and plan_keys.get(tid) in retry_keys]
+            if resume_ready:
+                tasks, skipped = self._tasks_for(plan, resume_ready, remaining_budget)
+                if tasks:
+                    return SupervisorDecision(decision=DecisionKind.dispatch, tasks=tasks,
+                        reason="恢复暂缓任务，保留已提交成果后补做未完成步骤")
+            return SupervisorDecision(decision=DecisionKind.stop_with_report,
+                reason="网络或等待预算受限，研究未完成（可恢复）",
+                note="待恢复任务: " + ", ".join(sorted(deferred_ids)))
         if delivered:
             return SupervisorDecision(decision=DecisionKind.deliver,
                                       reason="交付条件已满足")
@@ -904,7 +917,7 @@ class SupervisorAgent:
             if r.outcome in (TaskOutcome.completed, TaskOutcome.partial)}
         satisfied = {r.agent for task_id, r in results.items()
                      if task_id in done_ids and r.outcome in (TaskOutcome.completed,
-                                                              TaskOutcome.partial)}
+                                                              TaskOutcome.partial) and not r.pending_resume}
         return sorted(required - satisfied)
 
     @staticmethod

@@ -847,6 +847,8 @@ class InProcessExecutor:
         if network is not None and network.deferred and result.outcome != TaskOutcome.cancelled:
             result.outcome = TaskOutcome.partial
             result.payload["deferred"] = True
+            result.payload["pending_resume"] = not bool(network.stop_reason)
+            result.payload["deferred_reason"] = network.stop_reason or "网络或任务等待预算受限"
             result.unresolved.append(network.stop_reason or "网络或墙钟预算耗尽，已保留完成部分；恢复后补做未完成步骤")
         result = self.runtime.finalize(task, result, grant)
         return result

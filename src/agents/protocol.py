@@ -1263,6 +1263,11 @@ class AgentResult(BaseModel):
     def is_success(self) -> bool:
         return self.outcome == TaskOutcome.completed
 
+    @property
+    def pending_resume(self) -> bool:
+        # Older runs only recorded deferred; retain their recoverability.
+        return bool(self.payload.get("pending_resume", self.payload.get("deferred", False)))
+
     def blocking_issues(self) -> list[ReviewIssueRef]:
         return [i for i in self.issues if i.blocking]
 

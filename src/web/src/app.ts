@@ -790,6 +790,7 @@ function handleEvent(ev: any) {
           : kind === 'llm_deferred' ? 'msg-node' : kind.startsWith('llm_') ? 'msg-llm'
           : kind.startsWith('tool_') ? 'msg-tool' : 'msg-node';
         const visibleInChat = new Set([
+          'http_rate_limited', 'tasks_pending_resume',
           'network_unavailable', 'network_recovered',
           'brief_ready', 'plan_ready', 'supervisor_decision', 'task_started',
           'task_result', 'task_finished', 'commit_failed', 'review_issue',

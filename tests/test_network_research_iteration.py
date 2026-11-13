@@ -52,7 +52,7 @@ def test_review_revision_is_scheduled_before_repeated_research_needs():
     assert decision.tasks[0].agent == 'writing'
 
 
-def test_connection_failures_are_shared_and_recovery_keeps_local_work(monkeypatch):
+def test_http_failures_are_scoped_and_model_recovery_keeps_local_work(monkeypatch):
     from src.utils.network_budget import NetworkBudget, NetworkState, network_call, task_network_budget, NetworkUnavailable
     from src.utils import http_client
     calls, events = [], []
@@ -60,15 +60,20 @@ def test_connection_failures_are_shared_and_recovery_keeps_local_work(monkeypatc
         calls.append(args)
         raise ConnectionError('injected offline')
     monkeypatch.setattr(http_client, '_get_client', lambda: SimpleNamespace(request=offline))
-    monkeypatch.setattr(http_client, 'retry_wait', lambda *_: None)
+    monkeypatch.setattr(http_client, '_wait_http_retry', lambda *_a, **_k: None)
     state = NetworkState()
     budget = NetworkBudget(state=state, emit=lambda k, d: events.append((k, d)))
     with task_network_budget(budget):
         with pytest.raises(ConnectionError):
             http_client.get_with_retry('https://offline.invalid', max_retries=9)
+        assert network_call(lambda: 'available', phase='embedding') == 'available'
+        assert budget.failures == 0
+        for _ in range(3):
+            with pytest.raises(ConnectionError):
+                network_call(offline, phase='llm')
         with pytest.raises(NetworkUnavailable):
-            network_call(offline, phase='embedding')
-    assert len(calls) == 3
+            network_call(lambda: 'must not run', phase='llm')
+    assert len(calls) == 6
     assert any(kind == 'network_unavailable' for kind, _ in events)
     state.unavailable_until = time.monotonic() - 1
     with task_network_budget(NetworkBudget(state=state, emit=lambda k, d: events.append((k, d)))):

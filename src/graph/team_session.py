@@ -43,6 +43,8 @@ class TeamApp:
 
         if inputs is None and self.session.team.loop.brief is None:
             self.session.team.restore_state()
+        if inputs is None:
+            self.session.team.reopen_deferred()
         if self.session._clarification_pending():
             payload = self.session._clarify_payload()
             self.session.pending_interrupt = payload
@@ -83,8 +85,7 @@ class TeamApp:
             "node": "research_team_done",
             "summary": self.session.outcome_summary(),
             "package_dir": self.session.package_dir,
-            "delivery": (self.session.delivery.to_dict()
-                         if self.session.delivery is not None else {}),
+            "delivery": dict(self.session.team.outcome.delivery),
         }}
 
     def get_state(self, config: Any = None) -> Any:
@@ -460,14 +461,34 @@ class TeamSession:
         previous_review = self.team.outcome.delivery.get("review")
         if previous_review is not None:
             delivery_result = apply_review_gate(delivery_result, previous_review)
-        self.team.outcome.delivery = delivery_result
-        self.team.outcome.unresolved_report["delivery"] = dict(delivery_result)
         _record_delivery_verdict(package, delivery_result)
         write_unresolved_report(package, snapshot, [
             *package_notes, *(delivery_result.get("blocking") or []),
             *(delivery_result.get("unresolved") or [])
         ])
+        self._publish_final_delivery(delivery_result)
         return package
+
+    def _publish_final_delivery(self, delivery: dict[str, Any]) -> None:
+        """Replace the preliminary export gate with the actual compilation verdict."""
+        outcome = self.team.outcome
+        previous = outcome.delivery
+        old_notes = set([*previous.get("blocking", []), *previous.get("unresolved", [])])
+        notes = [note for note in outcome.unresolved_report.get("unresolved", [])
+                 if note not in old_notes]
+        outcome.delivery = dict(delivery)
+        outcome.unresolved_report["delivery"] = dict(delivery)
+        outcome.unresolved_report["unresolved"] = list(dict.fromkeys([
+            *notes, *delivery.get("blocking", []), *delivery.get("unresolved", [])]))
+        reason = outcome.stop_reason.split(" | 交付门槛未通过", 1)[0]
+        if not delivery.get("accepted"):
+            outcome.status = TaskStatus.partial.value
+            detail = "; ".join([*delivery.get("blocking", []), *delivery.get("unresolved", [])][:4])
+            reason += f" | 交付门槛未通过 (等级 {delivery.get('level', '')}): {detail}"
+        outcome.stop_reason = self.team.loop.stop_reason = reason.strip(" |")
+        outcome.unresolved_report["stop_reason"] = outcome.stop_reason
+        self.team.save_state(status=outcome.status)
+        self.team.runtime.emit("delivery_assessed", {**delivery, "phase": "after_export"})
 
     def _compile_package(self, package: Path, tex_text: str) -> tuple[str, str]:
         """把 `.tex` 写进交付包并编译为 PDF; 返回 `(编译状态, 日志)`。
