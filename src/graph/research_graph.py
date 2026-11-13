@@ -513,7 +513,8 @@ class TeamRun:
                                if need.assignment_key(state.brief.project_id,
                                                       state.brief.problem_id) not in selected_needs]
             for task in decision.tasks:
-                if _is_review_revision(task) and state.review_revisions >= self.max_review_revisions:
+                resuming = task.task_id in state.results and state.results[task.task_id].pending_resume
+                if _is_review_revision(task) and not resuming and state.review_revisions >= self.max_review_revisions:
                     self._finish(
                         state,
                         f"审稿后修订达到上限 {self.max_review_revisions} 次；当前审稿仍未通过",
@@ -530,17 +531,22 @@ class TeamRun:
                 if task.task_id not in state.plan.edges:
                     self.supervisor.adopt(state.plan, task)
                 result = self._execute_one(task, state.results)
-                if _is_review_revision(task):
+                if _is_review_revision(task) and not resuming:
                     state.review_revisions += 1
                 state.results[task.task_id] = result
                 state.objectives[task.task_id] = task.objective
                 self.outcome.task_order.append(task.task_id)
                 if task.agent == "review" and result.payload.get("semantic_reviewed"):
                     state.open_needs = _current_review_needs(state.open_needs, result)
-                state.open_needs.extend(result.followup_needs)
+                if not result.pending_resume:
+                    state.open_needs.extend(result.followup_needs)
                 state.plan = self.supervisor.replan(
                     state.plan, {task.task_id: result}, version=state.plan.version)
                 self.outcome.plan = state.plan
+                if result.pending_resume:
+                    self._finish(state, "网络或等待预算受限，研究未完成（可恢复）",
+                                 status=TaskStatus.partial.value)
+                    return False
                 if task.agent == "review" and result.payload.get("recovery_required"):
                     self._finish(state, str(result.payload["recovery_required"]),
                                  status=TaskStatus.partial.value)
@@ -641,10 +647,12 @@ class TeamRun:
                 "counts": {}, "notes": [f"运行在 {self.outcome.status} 结束, 未做交付评估"],
             }
         # 收尾状态也落盘: 续跑据此知道"这次运行已经结束", 不会重跑一遍。
+        state.stop_reason = self.outcome.stop_reason
+        self.outcome.unresolved_report["stop_reason"] = state.stop_reason
         self.save_state(status=self.outcome.status)
         self.runtime.emit("run_finished", {
             "run_id": self.run_id, "status": self.outcome.status,
-            "stop_reason": stop_reason, "rounds": self.outcome.rounds,
+            "stop_reason": state.stop_reason, "rounds": self.outcome.rounds,
             "usage": self.outcome.usage.to_dict(),
             "delivery": self.outcome.delivery,
         })
@@ -696,7 +704,7 @@ class TeamRun:
                 "semantic_reviewed": bool(judgement.get("semantic_reviewed")),
                 "current": review_index > writing_index and bool(judgement.get("semantic_reviewed"))}
             self.outcome.delivery = apply_review_gate(self.outcome.delivery, review)
-            if not review["current"]:
+            if not review["current"] and not any(r.pending_resume for r in self.loop.results.values()):
                 self.outcome.stop_reason = review["recovery_required"] or "研究已封存，最后一版稿件未复审"
         self.outcome.unresolved_report["delivery"] = dict(self.outcome.delivery)
         if not self.outcome.delivery["accepted"]:
@@ -707,7 +715,7 @@ class TeamRun:
             self.outcome.unresolved_report.setdefault("unresolved", [])
             self.outcome.unresolved_report["unresolved"].extend(
                 [*self.outcome.delivery["blocking"], *assessment.unresolved])
-        self.runtime.emit("delivery_assessed", dict(self.outcome.delivery))
+        self.runtime.emit("delivery_assessed", {**self.outcome.delivery, "phase": "before_export"})
 
     # ---- 主循环 (一次跑完) ----
     def run(self) -> TeamRunOutcome:
@@ -756,6 +764,12 @@ class TeamRun:
                               {"task_id": task.task_id, "reason": str(e)})
         run = new_agent_run(task, attempt=self.task_store.next_attempt(task.task_id))
         result = self.executor.execute(task, context)
+        previous = results.get(task.task_id)
+        if previous is not None and previous.pending_resume:
+            # Same task, new attempt: keep spent usage without re-committing old changes.
+            result.payload["model_attempts"] = (int(previous.payload.get("model_attempts", previous.usage.llm_calls))
+                                               + int(result.payload.get("model_attempts", result.usage.llm_calls)))
+            result.usage = previous.usage.merge(result.usage)
         result.agent_run_id = result.agent_run_id or run.agent_run_id
         # 角色读到的是上下文对象快照；用存储修订号形成 read-set，不能用
         # claim.version（科学陈述版本）替代。后者可能在状态更新时保持不变。
@@ -943,6 +957,8 @@ class TeamRun:
             "stop_reason": state.stop_reason,
             "clarifications": state.clarifications,
             "status": status or self.outcome.status,
+            "delivery": dict(self.outcome.delivery),
+            "unresolved_report": dict(self.outcome.unresolved_report),
             "brief": state.brief.to_dict() if state.brief else None,
             "plan": state.plan.to_dict() if state.plan else None,
             "objectives": dict(state.objectives),
@@ -1077,6 +1093,7 @@ class TeamRun:
             self.runtime.emit("run_state_missing", {"run_id": self.run_id})
             return self.run()
         restored = self.loop
+        self.reopen_deferred()
         payload = self._load_run_payload()
         self.runtime.emit("run_resumed", {
             "run_id": self.run_id, "rounds": restored.rounds,
@@ -1093,6 +1110,31 @@ class TeamRun:
             self._finish(self.loop, f"达到轮次上限 {self.max_rounds}",
                          status=TaskStatus.partial.value)
         return self.outcome
+
+    def reopen_deferred(self) -> bool:
+        """Explicit resume re-enables original task identities, never successful tasks."""
+        pending = {tid for tid, result in self.loop.results.items() if result.pending_resume}
+        if not pending or self.loop.rounds >= self.max_rounds:
+            return False
+        found = []
+        for row in self.loop.plan.tasks:
+            if row.get("task_id") not in pending:
+                continue
+            self.loop.pending_retries.add(assignment_key(self.loop.brief, row["agent"], row["objective"]))
+            row["attempt"] = int(row.get("attempt", 1)) + 1
+            found.append(row["task_id"])
+        if not found:
+            return False
+        transient_needs = {need.need_id for tid in pending
+                           for need in self.loop.results[tid].followup_needs}
+        self.loop.open_needs = [need for need in self.loop.open_needs if need.need_id not in transient_needs]
+        self.loop.finished = False
+        self.loop.stop_reason = ""
+        self.outcome.stop_reason = ""
+        self.outcome.status = TaskStatus.running.value
+        self.runtime.emit("tasks_pending_resume", {"task_ids": found, "action": "retry_original_tasks"})
+        self.save_state(status=TaskStatus.running.value)
+        return True
 
     def restore_state(self) -> bool:
         """只恢复已落盘团队状态，不在此方法里执行任何任务。
@@ -1119,6 +1161,8 @@ class TeamRun:
         self.outcome.rounds = restored.rounds
         self.outcome.status = str(payload.get("status", "") or "")
         self.outcome.stop_reason = restored.stop_reason
+        self.outcome.delivery = dict(payload.get("delivery") or {})
+        self.outcome.unresolved_report = dict(payload.get("unresolved_report") or {})
         return True
 
     def _current_versions(self) -> dict[str, int]:

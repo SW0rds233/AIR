@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Optional
 
 import httpx
-from src.utils.network_budget import network_call, retry_wait, current_budget
+from src.utils.network_budget import network_call, current_budget, phase_event
 
 from src.config import (
     HTTP_429_BACKOFF_BASE,
@@ -52,6 +53,9 @@ class CircuitBreaker:
         self._failures[host] = 0
         self._failure_reasons.pop(host, None)
         self._open_until.pop(host, None)
+
+    def rate_limited(self, host: str, wait: float):
+        self._open_until[host] = max(self._open_until.get(host, 0), time.monotonic() + wait)
 
     def failure(self, host: str, reason: str = ""):
         count = self._failures.get(host, 0) + 1
@@ -141,6 +145,36 @@ def _classify_network_error(e: Exception) -> str:
     return "网络错误"
 
 
+def _retry_after(response: httpx.Response) -> float:
+    """Honor both HTTP Retry-After formats without blocking unrelated services."""
+    from datetime import datetime, timezone
+    from email.utils import parsedate_to_datetime
+    value = response.headers.get("Retry-After", "")
+    try:
+        seconds = float(value)
+        if not math.isfinite(seconds):
+            raise ValueError("invalid retry delay")
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(value)
+            seconds = (when - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            seconds = max(HTTP_429_BACKOFF_BASE, HTTP_CIRCUIT_BREAKER_COOLDOWN)
+    return max(1., seconds)
+
+
+def _wait_http_retry(host: str, attempt: int, *, status: int | None = None) -> None:
+    wait = HTTP_BACKOFF_BASE * (2 ** attempt)
+    budget = current_budget()
+    if budget:
+        budget.check()
+        wait = min(wait, budget.remaining())
+    phase_event("http_retry", host=host, status=status, attempt=attempt + 1, wait_seconds=wait)
+    time.sleep(wait)
+    if budget:
+        budget.check()
+
+
 def get_with_retry(
     url: str,
     *,
@@ -174,6 +208,8 @@ def get_with_retry(
     retries = max(1, min(retries, 3)) if current_budget() else max(1, retries)
     for attempt in range(retries):
         if not _breaker.allow(host):
+            phase_event("http_host_deferred", host=host,
+                        retry_after_seconds=round(circuit_remaining_cooldown(url)), action="skip_host")
             raise CircuitBreakerOpenError(
                 f"断路器开启: {host}, {_breaker._open_until.get(host, 0) - time.monotonic():.0f}s 后恢复"
             )
@@ -182,25 +218,21 @@ def get_with_retry(
             client = _get_client()
             resp = network_call(lambda: client.request(
                 method, url, timeout=httpx.Timeout(connect, read=read, write=write, pool=connect),
-                **kwargs), timeout=min(connect + read + write, 120), phase="http")
+                **kwargs), timeout=min(connect + read + write, 120), phase="http", failure_scope=host)
             if resp.status_code == 429:
-                wait = HTTP_429_BACKOFF_BASE * (2 ** attempt)
-                logger.debug(f"{host} 429, 第{attempt+1}/{retries}次退避 {wait:.0f}s")
-                retry_wait(wait)
-                _breaker.failure(host, "429限流")
-                continue
+                wait = _retry_after(resp)
+                _breaker.rate_limited(host, wait)
+                phase_event("http_rate_limited", host=host, status=429,
+                            retry_after_seconds=wait, action="skip_host")
+                if raise_on_status:
+                    resp.raise_for_status()
+                return resp
             if raise_on_status:
                 resp.raise_for_status()
             _breaker.success(host)
             return resp
         except httpx.HTTPStatusError as e:
             status = e.response.status_code
-            # 429: 限流, 退避重试并计入断路器
-            if status == 429 and attempt < retries - 1:
-                wait = HTTP_429_BACKOFF_BASE * (2 ** attempt)
-                retry_wait(wait)
-                _breaker.failure(host, "429限流")
-                continue
             # 4xx 客户端错误 (404=DOI 不存在等): 是确定性响应, 并非主机故障,
             # 不重试也不计入断路器 — 否则几个未收录的 DOI 就会误触发断路器
             if 400 <= status < 500:
@@ -208,17 +240,14 @@ def get_with_retry(
             # 5xx 服务端错误: 计入断路器并重试
             _breaker.failure(host, f"5xx({status})")
             if attempt < retries - 1:
-                wait = HTTP_BACKOFF_BASE * (2 ** attempt)
-                retry_wait(wait)
+                _wait_http_retry(host, attempt, status=status)
                 continue
             raise
         except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException,
                 httpx.RemoteProtocolError, ConnectionError, OSError) as e:
             _breaker.failure(host, _classify_network_error(e))
             if attempt < retries - 1:
-                wait = HTTP_BACKOFF_BASE * (2 ** attempt)
-                logger.debug(f"{host} 网络错误第{attempt+1}/{retries}次: {e}, {wait:.0f}s后重试")
-                retry_wait(wait)
+                _wait_http_retry(host, attempt)
                 continue
             raise
         except CircuitBreakerOpenError:
@@ -226,8 +255,7 @@ def get_with_retry(
         except Exception:
             _breaker.failure(host, "其他错误")
             if attempt < retries - 1:
-                wait = HTTP_BACKOFF_BASE * (2 ** attempt)
-                retry_wait(wait)
+                _wait_http_retry(host, attempt)
                 continue
             raise
 
@@ -257,6 +285,7 @@ def reset_circuit_breaker():
     """重置断路器状态（用于测试）"""
     _breaker._failures.clear()
     _breaker._open_until.clear()
+    _breaker._failure_reasons.clear()
 
 
 def close_client():

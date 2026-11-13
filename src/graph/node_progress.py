@@ -91,6 +91,13 @@ def describe_node(node_name: str, node_state: dict) -> str:
             return "[网络暂不可用] 已暂停远程调用，继续使用本地资料与已有摘要；网络恢复后补做缺失步骤"
         if event == "network_recovered":
             return "[网络已恢复] 远程服务重新可用，已完成的资料与核验保留"
+        if event == "http_rate_limited":
+            return (f"[来源限流] {state.get('host', '')} 返回 429，"
+                    f"{state.get('retry_after_seconds', 0):g} 秒内跳过该来源；继续其他来源与模型步骤")
+        if event == "http_host_deferred":
+            return f"[来源冷却] 暂时跳过 {state.get('host', '')}，不影响其他服务"
+        if event == "tasks_pending_resume":
+            return f"[继续研究] 恢复 {len(state.get('task_ids') or [])} 个暂缓任务，保留已有成果"
         if event in {"harvest_download", "ingest_parse", "embed_batch"}:
             label = {"harvest_download": "下载全文", "ingest_parse": "解析入库", "embed_batch": "建立向量索引"}[event]
             return f"[资料处理] {label}：{state.get('title') or state.get('count') or state.get('candidates') or ''}"[:180]

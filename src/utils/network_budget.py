@@ -142,7 +142,8 @@ def network_error(error: BaseException) -> bool:
         name in type(error).__name__.lower() for name in ("connection", "connect", "timeout", "readerror"))
 
 
-def network_call(fn: Callable[[], Any], *, timeout: float = 120, phase: str = "network") -> Any:
+def network_call(fn: Callable[[], Any], *, timeout: float = 120, phase: str = "network",
+                 failure_scope: str = "") -> Any:
     budget = current_budget()
     if budget is None or _in_call.get():
         return fn()
@@ -177,10 +178,11 @@ def network_call(fn: Callable[[], Any], *, timeout: float = 120, phase: str = "n
                     raise value
                 if budget.remaining() <= 0 or time.monotonic() >= deadline:
                     raise TaskDeadlineExceeded("任务墙钟预算耗尽，迟到结果不再采用")
-                if budget.state.unavailable_until:
+                if not failure_scope and budget.state.unavailable_until:
                     budget.event("network_recovered", phase=phase)
-                budget.state.failures = 0
-                budget.state.unavailable_until = 0
+                if not failure_scope:
+                    budget.state.failures = 0
+                    budget.state.unavailable_until = 0
                 return value
             except Empty:
                 if time.monotonic() >= heartbeat:
@@ -190,6 +192,10 @@ def network_call(fn: Callable[[], Any], *, timeout: float = 120, phase: str = "n
                     heartbeat = time.monotonic() + budget.heartbeat_seconds
     except Exception as error:
         if network_error(error):
+            if failure_scope and budget.remaining() > 0:
+                budget.event("network_error", phase=phase, host=failure_scope,
+                             error_type=type(error).__name__, scope="host")
+                raise
             budget.failures += 1
             budget.state.failures += 1
             budget.event("network_error", phase=phase, error_type=type(error).__name__,
