@@ -207,3 +207,108 @@ def test_metadata_review_uses_exact_doi_and_keeps_scientific_work_out_of_text_re
         "score": 40, "threshold": 80, "category_scores": {"science": 0, "readability": 60},
         "category_notes": {"science": "需要真实数据", "readability": "统一术语"}})
     assert revision.hints["review_category_scores"] == {"readability": 60}
+
+
+def test_network_failures_are_deferred_not_errors():
+    from types import SimpleNamespace
+    from src.agents.protocol import TaskBudget, UsageRecord
+    from src.agents.runtime import BudgetedLLM
+    from src.utils.network_budget import NetworkUnavailable
+
+    class Inner:
+        def __init__(self, error): self.error = error
+        def invoke(self, *_args, **_kwargs): raise self.error
+
+    events = []
+    llm = BudgetedLLM(Inner(NetworkUnavailable("网络暂不可用")), UsageRecord(), TaskBudget(),
+                      None, "task-net", "evidence",
+                      on_event=lambda kind, data: events.append(kind))
+    with pytest.raises(NetworkUnavailable):
+        llm.invoke("hi")
+    assert events.count("llm_deferred") == 1
+    assert "llm_error" not in events
+
+    events.clear()
+    llm = BudgetedLLM(Inner(RuntimeError("boom")), UsageRecord(), TaskBudget(),
+                      None, "task-err", "evidence",
+                      on_event=lambda kind, data: events.append(kind))
+    with pytest.raises(RuntimeError):
+        llm.invoke("hi")
+    assert events.count("llm_error") == 1
+    assert "llm_deferred" not in events
+
+
+def test_evidence_call_cap_stops_new_research_but_keeps_writing():
+    from src.agents.protocol import AgentResult, AgentTask, ResearchNeed
+    from src.agents.supervisor import ResearchBrief, SupervisorAgent, TeamPlan
+
+    brief = ResearchBrief(main_question="研究通信", deliverables=["full_paper"])
+    done = [AgentTask(agent="evidence", objective=f"检索{i}") for i in range(8)]
+    plan = TeamPlan()
+    for task in done:
+        plan.add_task(task)
+    plan.add_task(AgentTask(agent="writing", objective="撰写论文"))
+    results = {t.task_id: AgentResult(task_id=t.task_id, agent="evidence",
+                                      outcome="completed",
+                                      payload={"model_attempts": 20}) for t in done}
+    assert sum(r.payload["model_attempts"] for r in results.values()) >= 150
+    decision = SupervisorAgent().decide(brief=brief, plan=plan, results=results,
+        open_needs=[ResearchNeed(kind="more_sources", statement="再找一批资料")])
+    assert [t.agent for t in decision.tasks] == ["writing"]
+
+
+def test_same_repair_target_stops_after_two_attempts():
+    from src.agents.protocol import AgentResult, AgentTask, ResearchNeed
+    from src.agents.supervisor import ResearchBrief, SupervisorAgent, TeamPlan
+
+    brief = ResearchBrief(main_question="研究通信")
+    first = AgentTask(agent="evidence", objective="核对来源", hints={"repair_key": "repair-1"})
+    second = AgentTask(agent="evidence", objective="核对来源(重试)", hints={"repair_key": "repair-1"})
+    plan = TeamPlan()
+    plan.add_task(first)
+    plan.add_task(second)
+    results = {t.task_id: AgentResult(task_id=t.task_id, agent="evidence", outcome="completed")
+               for t in (first, second)}
+    need = ResearchNeed(kind="more_sources", statement="第三次核对同一目标",
+                        hints={"repair_key": "repair-1", "root_cause_kind": "citation"})
+    decision = SupervisorAgent().decide(brief=brief, plan=plan, results=results, open_needs=[need])
+    assert decision.tasks == []
+
+
+def test_evidence_targets_split_links_from_parameter_sources():
+    from src.research.mechanisms import evidence_targets
+    from src.research.schemas import Claim
+
+    chain = Claim(statement="通信成本下降 → 信息成本下降 → 交易价格改善")
+    targets = evidence_targets(chain)
+    assert len(targets["mechanism_link"]) == 2
+    assert targets["parameter_assumption"] == []
+
+    formula = Claim(statement="Y = a * c", lhs="Y", rhs="a*c",
+                    premises=["终端采用率需实测"], evidence_requirements=["弹性 a 需文献支持"])
+    formula_targets = evidence_targets(formula)
+    assert "终端采用率需实测" in formula_targets["parameter_assumption"]
+    assert "弹性 a 需文献支持" in formula_targets["parameter_assumption"]
+    assert formula_targets["mechanism_link"] == []
+
+
+def test_patch_records_revision_log_with_issue_ids_and_changed_blocks():
+    from types import SimpleNamespace
+    from src.agents.protocol import AgentTask, UsageRecord
+    from src.agents.writing import WritingAgent, WritingPacket
+    from src.publication.schemas import Block, Manuscript, Section
+
+    prior = Manuscript(sections=[Section(heading="方法", blocks=[Block(block_id="b1", text="旧文")])])
+    packet = WritingPacket(prior_manuscript=prior.to_dict(),
+                           review_issues=[{"issue_id": "i1", "summary": "更换引用"}])
+    task = AgentTask(agent="writing", objective="修订", hints={"review_cycle": True,
+                                                              "focus_blocks": ["b1"]})
+    response = SimpleNamespace(content=json.dumps({"blocks": [{"block_id": "b1", "text": "新文"}]}))
+    runtime = SimpleNamespace(llm_available=lambda *_: True,
+                              llm=lambda *_a, **_k: SimpleNamespace(invoke=lambda _messages: response))
+    patched, note = WritingAgent()._patch_with_llm(task, runtime, UsageRecord(), packet)
+    assert patched is not None, note
+    assert "新文" in patched.all_blocks()[0].text
+    log = patched.revision_log[-1]
+    assert log["issue_ids"] == ["i1"]
+    assert log["changed_blocks"] == ["b1"]

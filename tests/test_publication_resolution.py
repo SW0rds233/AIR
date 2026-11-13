@@ -88,16 +88,24 @@ class AcademicReviewTest(unittest.TestCase):
             "suggested_owner": "writing", "acceptance": ["Use n+1"]})
         self.assertIsNotNone(science)
         self.assertEqual(science.affected_refs[0].id, "block-1")
-        # 科学逻辑问题回到推理(derivation), 不再把整篇改稿派给写作; 块身份仍保留.
+        # 审阅明确把这条科学问题交给写作改写时, 走 manuscript_revision 且块身份保留
         need = _needs_from([science])[0]
-        self.assertEqual(need.kind.value, "derivation")
+        self.assertEqual(need.kind.value, "manuscript_revision")
+        self.assertEqual(need.owner, "writing")
         self.assertEqual([ref.id for ref in need.blocked_refs], ["block-1"])
         self.assertEqual(need.hints["root_cause_kind"], "science")
-        # owner 未显式给出时按 NEED_OWNER 推导: derivation 落到 reasoning, 而不是写作
-        self.assertEqual(need.owner, "reasoning")
+
+        # 没有指定 owner 的科学问题按类别回到推理(derivation), 不默认派给写作
+        unowned = _issue_from({"severity": "major", "category": "science",
+            "summary": "Dimension mismatch", "affected_ids": ["block-2"],
+            "acceptance": ["Use n+1"]})
+        need_unowned = _needs_from([unowned])[0]
+        self.assertEqual(need_unowned.kind.value, "derivation")
+        self.assertEqual(need_unowned.owner, "reasoning")
+        self.assertEqual([ref.id for ref in need_unowned.blocked_refs], ["block-2"])
 
         readability = _issue_from({"severity": "major", "category": "readability",
-            "summary": " Sentences too long", "affected_ids": ["block-2"],
+            "summary": " Sentences too long", "affected_ids": ["block-3"],
             "suggested_owner": "writing", "acceptance": ["Split sentences"]})
         self.assertEqual(_needs_from([readability])[0].kind.value, "manuscript_revision")
 
