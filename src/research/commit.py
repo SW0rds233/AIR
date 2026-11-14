@@ -250,6 +250,24 @@ class ResearchCommitService:
             writes[(kind, object_id)] = payload
             staged[proposal.proposal_id] = proposal
 
+        # A formal assertion must never exist without its versioned proof duty.
+        # Register it in the same transaction; execution remains the reasoner's job.
+        from src.research.problem_formulator import obligations_for_claim
+        for (kind, claim_id), payload in list(writes.items()):
+            if kind != "claim" or not payload.get("formal_spec"):
+                continue
+            claim = Claim.model_validate(payload)
+            existing = self._obligations_for_claim(claim_id, writes)
+            for obligation in obligations_for_claim(claim):
+                if any(old.claim_version == claim.version and old.kind == obligation.kind for old in existing):
+                    continue
+                obligation.id = stable_id("obl", claim.id, claim.version, obligation.kind)
+                writes[("obligation", obligation.id)] = {
+                    **obligation.model_dump(mode="json"), **_scope_meta(task, result)}
+                events.append(("obligation_registered", {"claim_id": claim.id,
+                    "claim_version": claim.version, "obligation_id": obligation.id,
+                    "kind": obligation.kind, "by": "commit_service"}))
+
         # 证据角色只提交“相反来源”的候选关系；真正的科学状态变更在唯一提交口
         # 与证据关系同事务完成。没有可定位来源、未复核关系或引用了旧命题版本时
         # 只保留材料，不凭它推翻先前结论。

@@ -537,6 +537,7 @@ class TeamRun:
             self.runtime.emit("run_stopped", {"reason": state.stop_reason})
             return False
 
+        self._enqueue_unverified_formal_claims()
         decision = self.supervisor.decide(
             brief=state.brief, plan=state.plan, results=state.results,
             pending=[t for t in state.plan.task_ids() if t not in state.results],
@@ -567,6 +568,10 @@ class TeamRun:
             elif review_retry:
                 decision = SupervisorDecision(decision=DecisionKind.dispatch, tasks=[review_retry],
                     reason="当前审阅无效，先完成一次有界恢复，不继续检索")
+            elif (final_review is None and decision.tasks
+                  and all(task.hints.get("verification_only") for task in decision.tasks)
+                  and state.rounds <= self.max_rounds - 2):
+                pass  # Complete bounded solver work before final synthesis, leaving room for review.
             elif closing and not synthesis_tried and (writer_pos < 0 or research_pos > writer_pos):
                 decision = SupervisorDecision(decision=DecisionKind.dispatch,
                     tasks=[AgentTask(agent="writing", objective="汇总最终推导、证据边界与可执行实验建议，提交完整稿件供独立审阅",
@@ -1018,6 +1023,35 @@ class TeamRun:
             attachments=self.attachments,
         )
         return self._cached_default_builder
+
+    def _enqueue_unverified_formal_claims(self):
+        """Recover missing proof needs from committed objects, including after resume."""
+        store = getattr(getattr(self, "task_store", None), "store", None)
+        if store is None or not callable(getattr(store, "list_latest", None)):
+            return
+        records = object_rows(store, "verification", run_id=self.run_id)
+        attempted = {(str((row.get("hints") or {}).get("claim_id") or ""),
+                      int((row.get("hints") or {}).get("claim_version") or 1))
+                     for row in self.loop.plan.tasks
+                     if row.get("task_id") in self.loop.results
+                     and (row.get("hints") or {}).get("verification_only")}
+        for claim in object_rows(store, "claim", run_id=self.run_id):
+            if not claim.get("formal_spec") or claim.get("statement_role") != "assertion":
+                continue
+            cid, version = claim["id"], int(claim.get("version") or 1)
+            done = (cid, version) in attempted or any(
+                record.get("claim_id") == cid and int(record.get("claim_version") or 1) == version
+                and not record.get("stale") and record.get("scope") == "target" for record in records)
+            self.loop.open_needs = [need for need in self.loop.open_needs
+                if not (need.hints.get("verification_only") and need.hints.get("claim_id") == cid)]
+            if done:
+                continue
+            self.loop.open_needs.append(ResearchNeed(kind="derivation",
+                statement=f"核验已编码命题 {cid} v{version}: {claim['statement'][:300]}",
+                why="登记形式化编码后必须实际执行；工具不支持则保留诊断，不扩展旁支",
+                hints={"verification_only": True, "claim_id": cid, "claim_version": version,
+                       "root_claim_id": cid, "trigger_id": f"reasoning-proof:{cid}:v{version}"},
+                acceptance=["提交与当前版本对齐的真实核验证书、反例或能力限制"], blocking=True))
 
     def _latest_manuscript(self):
         projection = getattr(self, "projection", None)

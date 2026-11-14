@@ -781,6 +781,7 @@ def _coverage_dict(coverage: Any) -> dict[str, Any]:
         "policy": str(getattr(getattr(coverage, "policy", None), "value", "") or ""),
         "executed": bool(getattr(coverage, "executed", False)),
         "queries": list(getattr(coverage, "queries", []) or []),
+        "library_searches": list(getattr(coverage, "library_searches", []) or []),
         "hits": int(getattr(coverage, "hits", 0) or 0),
         "ingested": int(getattr(coverage, "ingested", 0) or 0),
         "fulltext_available": int(getattr(coverage, "fulltext_available", 0) or 0),

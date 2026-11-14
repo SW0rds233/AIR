@@ -536,13 +536,13 @@ class TeamSession:
             except OSError:                     # 改名失败不掩蔽真正的编译失败原因
                 pass
         if "未安装" in (log or ""):
-            return "unavailable", log[-2000:]
+            return "unavailable", log
         if ok and not has_pdf:
-            return "failed: 编译器报告成功但未生成 PDF", log[-2000:]
+            return "failed: 编译器报告成功但未生成 PDF", log
         first_error = next((line.strip() for line in (log or '').splitlines()
                             if line.lstrip().startswith('!')), '')
         detail = first_error or ((log or '').splitlines()[0] if log else '无编译诊断')
-        return f"failed: {detail[:400]}", log[-2000:]
+        return f"failed: {detail[:400]}", log
 
 
 def _snapshot_from_store(store, team: TeamRun):

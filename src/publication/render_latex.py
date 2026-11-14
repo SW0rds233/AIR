@@ -116,6 +116,7 @@ _INLINE_SUBSUP_RE = re.compile(
 #: 通用中文论文前言 (ctexart + xelatex)。这里是**唯一**定义, 综述侧的 Markdown
 #: 渲染器从本模块取用, 避免两处 preamble 漂移。
 LATEX_PREAMBLE = r"""\documentclass[UTF8,a4paper,12pt]{ctexart}
+\tracinglostchars=3
 \usepackage[hmargin=1.2in,vmargin=1in]{geometry}
 \usepackage{amsmath,amssymb}
 \usepackage{graphicx}
@@ -311,10 +312,19 @@ def _math_body(chunk: str) -> str:
     形状会被切碎)。不在片段内部再转一次, `{+1,−1}^{668}` 的 `−`(U+2212) 就会带着
     Unicode 落进数学模式, 日志报 `Missing character: There is no − in font cmmi12`。
     """
-    for char, latex in _UNICODE_TO_LATEX_MATH.items():
-        if char in chunk:
-            chunk = chunk.replace(char, latex)
+    chunk = _normalize_unicode_math(chunk)
     return _separate_glued_commands(chunk)
+
+
+def _normalize_unicode_math(text: str) -> str:
+    """One normalization path, including indices and explicit math delimiters."""
+    def replace(match):
+        latex = _UNICODE_TO_LATEX_MATH[match.group()]
+        # A following variable must not become part of a control word: ∈K -> \in K.
+        if re.search(r"\\[A-Za-z]+$", latex) and re.match(r"[A-Za-z]", text[match.end():]):
+            latex += " "
+        return latex
+    return re.sub("[" + re.escape("".join(_UNICODE_TO_LATEX_MATH)) + "]", replace, text)
 
 
 def _protect_bare_commands(text: str, protect) -> str:
@@ -416,8 +426,7 @@ def escape_latex(text: str) -> str:
         # 模型自撰的行内公式同样要规范化: `$0\leqz\leqL$` 里的 `\leqz` 会让整篇
         # 编译报 `! Undefined control sequence.`（见 `_separate_glued_commands`）；
         # `\text{...}` 里的数学记法同理会报 `! Missing $ inserted.`
-        math_blocks.append(_separate_glued_commands(
-            _fix_text_groups(match.group(0))))
+        math_blocks.append("$" + escape_math(match.group(0)[1:-1]) + "$")
         return f"\x00MATH{len(math_blocks) - 1}\x00"
 
     # 正文块也可能包含展示公式；先保护整块，避免把其中的命令当成普通文本转义。
@@ -493,11 +502,11 @@ def escape_latex(text: str) -> str:
 
     def _inline_subscript(match: "re.Match[str]") -> str:
         base = _math_body(match.group(1))
-        return _snippet(f"${base}_{{{match.group(2).strip('{}')}}}$")
+        return _snippet(f"${base}_{{{_math_body(match.group(2).strip('{}'))}}}$")
 
     def _inline_subsup(match: "re.Match[str]") -> str:
         base = _math_body(match.group(1))
-        return _snippet(f"${base}_{{{match.group(2).strip('{}')}}}"
+        return _snippet(f"${base}_{{{_math_body(match.group(2).strip('{}'))}}}"
                         f"^{_exponent(match.group(3))}$")
 
     text = _INLINE_SET_POWER_RE.sub(_inline_set_power, text)
@@ -533,10 +542,7 @@ def escape_math(text: str) -> str:
     不做这一步的后果实测: 公式里带 `λ`/`，`/`−` 时日志报
     `Missing character: There is no λ in font cmmi12`, 公式出现空洞。
     """
-    body = text or ""
-    for char, latex in _UNICODE_TO_LATEX_MATH.items():
-        if char in body:
-            body = body.replace(char, latex)
+    body = _normalize_unicode_math(text or "")
     for char, latex in _CJK_PUNCT_IN_MATH.items():
         if char in body:
             body = body.replace(char, latex)

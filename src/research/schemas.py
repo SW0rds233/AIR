@@ -426,6 +426,7 @@ class RetrievalCoverage(BaseModel):
     executed: bool = False     # 是否真的执行过检索 (区分"检索失败"与"无命中")
     queries: list[str] = Field(default_factory=list)
     engines: list[str] = Field(default_factory=list)
+    library_searches: list[dict[str, Any]] = Field(default_factory=list)
     started_at: str = ""
     finished_at: str = ""
     hits: int = 0
@@ -446,6 +447,7 @@ class RetrievalCoverage(BaseModel):
         self.executed = self.executed or other.executed
         self.queries = list(dict.fromkeys(self.queries + other.queries))
         self.engines = list(dict.fromkeys(self.engines + other.engines))
+        self.library_searches.extend(other.library_searches)
         self.hits += other.hits
         self.ingested += other.ingested
         self.duplicates += other.duplicates

@@ -172,6 +172,8 @@ class ReasoningAgent(AgentBase):
             formal = self.formal_closure(task, context, runtime, usage)
             if formal is not None:
                 return formal
+        if task.hints.get("verification_only"):
+            return self.blocked(task, "指定命题没有可执行的核验输入，保留未决；本任务不扩展推导", usage=usage)
         claims: list[dict[str, Any]] = []
         counterexamples: list[dict[str, Any]] = []
         missing: list[str] = []
@@ -441,6 +443,17 @@ class ReasoningAgent(AgentBase):
         if subject is None:
             return None
         claim, obligations, evidence, form_notes = subject
+        from src.verification.definitions import is_notation_definition
+        if is_notation_definition(claim):
+            from src.research.problem_formulator import obligations_for_claim
+            disclosures = obligations_for_claim(claim)
+            changes = [build_proposal("obligation", object_id=obligation.id,
+                payload={**obligation.model_dump(mode="json"), "required": False},
+                rationale="记号披露不当作定理证明", input_versions={claim.id: claim.version})
+                for obligation in [*obligations, *disclosures]]
+            return self.partial(task, "有限求和/乘积仅登记为记号定义，未作为已证结论",
+                changes=changes, unresolved=[disclosures[0].detail], usage=usage,
+                payload={"notation_only": True, "claim_id": claim.id})
         from src.research.classification import is_formal_question
 
         question = str((context.objects.get("brief") or [{}])[0].get("main_question")

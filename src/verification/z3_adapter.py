@@ -179,6 +179,11 @@ def op_check_implication(arguments: dict) -> VerificationResult:
             consistency.add(_eval(_parse(p), env, int_mode, z3))
         consistent = consistency.check()
         if consistent == z3.unsat:
+            goal_tree = _parse(conclusion).body
+            if isinstance(goal_tree, ast.Constant) and goal_tree.value is False:
+                return _result(VerificationStatus.passed,
+                    "显式不可满足性目标 A => False 已证：约束集合 A 无满足赋值；不推及其他结论",
+                    f"unsat(A); explicit_goal=False; logic={'Int' if int_mode else 'Real'}")
             return _result(VerificationStatus.unknown, "premises_unsatisfiable",
                            "前提本身矛盾, 蕴含为空洞, 不作为有意义发现")
         if consistent != z3.sat:

@@ -466,6 +466,15 @@ def _claim_goal(claim: Claim | None) -> str:
     return claim.statement or ""
 
 
+def _record_library_search(coverage, service, query, outcome):
+    executed = outcome.searched or bool(outcome.refs)
+    coverage.executed = coverage.executed or executed
+    coverage.library_searches.append({"source_set_id": service.topic, "query": query,
+        "executed": executed, "hits": len(outcome.refs),
+        "recall_channels": list(outcome.recall_channels), "channel_counts": dict(outcome.channel_counts),
+        "failures": list(outcome.failures)})
+
+
 def gather_sources(
     service: KnowledgeService | None,
     contract: ProblemContract | None,
@@ -536,6 +545,7 @@ def gather_sources(
             outcome = service.search(RetrievalRequest(
                 query=query, claim_id=claim.id if claim else "", gap_type=gap_type,
                 max_results=k))
+            _record_library_search(coverage, service, query, outcome)
             coverage.failures.extend(str(f) for f in outcome.failures)
             if outcome.searched:
                 coverage.executed = True
@@ -572,6 +582,7 @@ def gather_sources(
                     outcome = session_service.search(RetrievalRequest(
                         query=query, claim_id=claim.id if claim else "",
                         gap_type=gap_type, max_results=k))
+                    _record_library_search(coverage, session_service, query, outcome)
                     coverage.failures.extend(str(f) for f in outcome.failures)
                     external_items.extend(ref_to_evidence(session_service, ref, claim)
                                           for ref in outcome.refs)

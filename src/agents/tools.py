@@ -93,6 +93,37 @@ def _topic_from(kwargs: dict) -> str:
     return str(kwargs.get("topic", "") or "")
 
 
+def bind_library_tools(tools: list[ToolSpec], topics: list[str]) -> list[ToolSpec]:
+    """Search/read across the task's authorized libraries when no topic is given."""
+    from dataclasses import replace
+    from functools import wraps
+    allowed = tuple(dict.fromkeys(topic for topic in topics if topic))
+
+    def scoped(fn):
+        @wraps(fn)
+        def call(*args, **kwargs):
+            requested = str(kwargs.get("topic") or "")
+            if requested and requested not in allowed:
+                return f"资料库 {requested!r} 未授权给当前任务"
+            selected = (requested,) if requested else allowed
+            if not selected:
+                return "当前任务没有已授权资料库"
+            outputs = []
+            for topic in selected:
+                try:
+                    result = fn(*args, **{**kwargs, "topic": topic})
+                except Exception as error:
+                    result = f"读取失败: {type(error).__name__}: {error}"
+                outputs.append(f"资料库 {topic}\n{result}" if len(allowed) > 1 else str(result))
+            return "\n\n".join(outputs)
+        return call
+
+    return [replace(spec, fn=scoped(spec.fn),
+                    default_arguments={**spec.default_arguments, "topic": "" if len(allowed) != 1 else allowed[0]},
+                    description=spec.description + "；省略 topic 时检索/读取所有已授权库，结果标明来源库")
+            if spec.name in {"search_local_kb", "read_source"} else spec for spec in tools]
+
+
 def _search_local_kb(query: str, topic: str = "", limit: int = 8) -> str:
     from src.kb.service import KnowledgeService, RetrievalRequest
 
@@ -101,9 +132,10 @@ def _search_local_kb(query: str, topic: str = "", limit: int = 8) -> str:
         if not service.usable:
             return f"资料库 {topic!r} 不可用或为空: 没有可检索的已登记资料"
         outcome = service.search(RetrievalRequest(query=query, max_results=limit))
-        if not outcome.searched:
-            return "资料库检索未执行: " + "; ".join(str(f) for f in outcome.failures)
-        return _format_refs(outcome.refs)
+        result = _format_refs(outcome.refs)
+        if outcome.failures:
+            result += "\n部分检索通道失败: " + "; ".join(str(f) for f in outcome.failures)
+        return result
     finally:
         if service.store is not None:
             service.store.close()
@@ -118,7 +150,7 @@ def _format_refs(refs: Any) -> str:
         locatable = "可定位" if getattr(ref, "is_locatable", lambda: False)() else "无定位"
         lines.append(
             f"{index}. [{ref.kind}] {ref.title} @ {ref.locator or '(无定位)'} "
-            f"({locatable}) id={ref.source_id}")
+            f"({locatable}) id={ref.source_id} topic={getattr(ref, 'topic', '')}")
         excerpt = str(getattr(ref, "excerpt", "") or "")[:240]
         if excerpt:
             lines.append(f"   片段: {excerpt}")
