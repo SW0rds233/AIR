@@ -126,6 +126,7 @@ class ReasoningAgent(AgentBase):
   具体参数取值或经验假设的来源需求，不要求文献支持自拟公式。代数推导与经验前提分开核验。
   优先推导直接回答原研究问题的核心命题，不以增殖命名、定义、零因子引理作为进展。
   定义只设 statement_role="definition"，陈述仅包含命名；附带性质另用 assertion。
+  若左端是 Nc-Nv 等复合表达式，它是依赖其他定义的推论：用 assertion + formal_spec 显式列出 Nc、Nv 的定义约束，不把它们视作独立自由变量。
   条件命题的编码示例：formal_spec={"premises":["x >= 0","y > x"],
   "conclusion":"y > 0","variables":{"x":"Real","y":"Real"}}；示例不是应生成的研究结果。
   所有约束必须显式编码，variables 支持 Real/Int，等号写 ==，使用 and/or/not 表示逻辑。
@@ -331,6 +332,8 @@ class ReasoningAgent(AgentBase):
                     blocked_refs=[ObjectRef(id=object_id, version=int(claim.get("version") or 1))],
                     acceptance=["核对编码与原命题等价、前提与定理条件，并提交实际核验；不能编码时明确未决"],
                     hints={"claim_id": object_id, "root_claim_id": root_id or object_id,
+                           "verification_only": bool(claim.get("formal_spec") or
+                               (claim.get("lhs") and claim.get("rhs")) or (claim.get("expr") and claim.get("wrt"))),
                            "derivation_depth": depth + int(object_id != target_id),
                            "trigger_id": f"reasoning-proof:{object_id}:v{claim.get('version', 1)}"},
                     blocking=True))

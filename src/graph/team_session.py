@@ -33,6 +33,12 @@ class TeamApp:
     def __init__(self, session: TeamSession) -> None:
         self.session = session
 
+    handles_stop = True
+
+    def request_stop(self, reason: str = "用户停止") -> None:
+        # UI thread only signals; the research worker owns persistence/export.
+        self.session.team.cancel.cancel(reason)
+
     # ---- 驱动 ----
     def stream(self, inputs: Any = None, config: Any = None) -> Iterator[dict[str, Any]]:
         # 恢复: 驱动把用户答复包在 `Command(resume=...)` 里再喂回来
@@ -50,6 +56,8 @@ class TeamApp:
             self.session.pending_interrupt = payload
             yield {"__interrupt__": (_Interrupt(payload),)}
             return
+        if self.session.team.cancel.cancelled:
+            self.session.team.stop()
         if not self.session.team.loop.finished:
             self.session.team.prepare()
         while not self.session.team.loop.finished:
@@ -365,6 +373,7 @@ class TeamSession:
         tex_text = ""
         compile_status = "not_attempted"
         compile_log = ""
+        stopped = self.team.outcome.status in {"stopped", "interrupted"}
         if manuscript_obj is not None:
             from src.publication.render_latex import render_latex
 
@@ -413,6 +422,7 @@ class TeamSession:
         try:
             package = export_package(
                 snapshot, spec, [decision.to_dict() for decision in self.team.outcome.decisions], manuscript_md,
+                manuscript_tex=tex_text if stopped else None,
                 manuscript=manuscript_obj,
                 notes=package_notes,
                 gate=assessment.theory,
@@ -440,7 +450,7 @@ class TeamSession:
             _copy_figure_assets(package, figure_sources, figure_warnings)
         except Exception as e:  # noqa: BLE001 - 图文件必须真实进入交付包
             raise ExportError(f"图表打包失败: {type(e).__name__}: {e}") from e
-        if tex_text:
+        if tex_text and not stopped:
             compile_status, compile_log = self._compile_package(package, tex_text)
             # 编译结论要**回头改写**交付等级: 出版层产物是在第一次评估之后才落盘的,
             # 不重评就会让 manifest 停在"尚未尝试编译"的等级上。
@@ -458,10 +468,20 @@ class TeamSession:
         package_notes = [note for note in package_notes
                          if "尚未尝试编译 .tex" not in note]
         delivery_result = self.delivery.to_dict()
+        if stopped:
+            delivery_result.update(accepted=False, level="部分成果（运行已停止）")
+            delivery_result.setdefault("unresolved", []).append(
+                "运行已停止；已封存现有对象与稿件，未继续调用模型或编译 PDF")
         previous_review = self.team.outcome.delivery.get("review")
         if previous_review is not None:
             delivery_result = apply_review_gate(delivery_result, previous_review)
         _record_delivery_verdict(package, delivery_result)
+        if stopped:
+            manifest_path = package / "manifest.json"
+            manifest = json.loads(manifest_path.read_text("utf-8"))
+            manifest.update(run_status=self.team.outcome.status, partial=True,
+                            stop_reason=self.team.outcome.stop_reason, compile_status="not_attempted")
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         write_unresolved_report(package, snapshot, [
             *package_notes, *(delivery_result.get("blocking") or []),
             *(delivery_result.get("unresolved") or [])
@@ -482,7 +502,8 @@ class TeamSession:
             *notes, *delivery.get("blocking", []), *delivery.get("unresolved", [])]))
         reason = outcome.stop_reason.split(" | 交付门槛未通过", 1)[0]
         if not delivery.get("accepted"):
-            outcome.status = TaskStatus.partial.value
+            if outcome.status not in {"stopped", "interrupted"}:
+                outcome.status = TaskStatus.partial.value
             detail = "; ".join([*delivery.get("blocking", []), *delivery.get("unresolved", [])][:4])
             reason += f" | 交付门槛未通过 (等级 {delivery.get('level', '')}): {detail}"
         outcome.stop_reason = self.team.loop.stop_reason = reason.strip(" |")

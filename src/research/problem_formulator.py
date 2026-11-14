@@ -233,6 +233,11 @@ def _obligations_for(claim: Claim, wants_equality: bool, method_available: dict[
 
     from src.research.classification import is_theoretical_claim
     theoretical = is_theoretical_claim(claim)
+    from src.verification.definitions import is_definition_assignment
+    if claim.statement_role == "definition" and not is_definition_assignment(claim):
+        return [ProofObligation(statement="复合等式须保留所依赖的定义，不能把各量当独立自由变量核验",
+            kind="formal_argument", acceptance_method="formal_encoding", claim_id=claim.id, claim_version=ver,
+            detail="拆为单个命名对象的定义；或用 assertion + formal_spec 将定义约束列为前提，再证明复合等式")]
     if theoretical and claim.formal_spec and claim.claim_type in {ClaimType.definitional, ClaimType.descriptive}:
         return [ProofObligation(statement="核验显式前提下的结论；前提的现实适用性不在证明范围内",
                     kind="check_implication", acceptance_method="z3",

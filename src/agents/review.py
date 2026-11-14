@@ -61,7 +61,10 @@ def judge_review(issues: list[ReviewIssueRef], *, threshold: int = 80,
         raise ValueError("review threshold must be between 0 and 100")
     if not semantic_reviewed:
         return {"score": 0, "threshold": threshold, "decision": "unreviewed",
-                "accepted": False, "category_scores": {}, "fatal_issue_ids": [],
+                "accepted": False, "category_scores": {key:value for key,value in (category_scores or {}).items()
+                    if key in _CATEGORY_WEIGHTS and key not in (excluded_categories or set())
+                    and isinstance(value,(int,float)) and not isinstance(value,bool) and 0 <= value <= 100},
+                "fatal_issue_ids": [],
                 "semantic_reviewed": False}
     weights = {key: value for key, value in _CATEGORY_WEIGHTS.items()
                if key not in (excluded_categories or set()) & {"figure"}}
@@ -183,6 +186,8 @@ class ReviewAgent(AgentBase):
         semantic_reviewed = False
         llm_scores: dict[str, Any] = {}
         category_notes: dict[str, str] = {}
+        grounding_conflicts: dict[int, str] = {}
+        validation_details: dict[str, Any] = {}
 
         if runtime.llm_available("review") and not task.budget.exceeded_by(usage):
             from langchain_core.messages import HumanMessage, SystemMessage
@@ -203,8 +208,12 @@ class ReviewAgent(AgentBase):
             except Exception as e:  # noqa: BLE001
                 payload, parse_note = None, f"审阅调用失败: {e}"
             if isinstance(payload, dict):
-                contradictions = _review_date_conflicts(payload) + list(_review_grounding_conflicts(payload, context).values())
-                if contradictions and not task.budget.exceeded_by(usage):
+                payload = _normalize_review_anchors(payload, context)
+                date_conflicts = _review_date_conflicts(payload)
+                anchor_conflicts = _review_grounding_conflicts(payload, context)
+                contradictions = date_conflicts + list(anchor_conflicts.values())
+                all_unanchored = bool(anchor_conflicts) and len(anchor_conflicts) == len(payload.get('issues') or [])
+                if (date_conflicts or all_unanchored) and not task.budget.exceeded_by(usage):
                     # One factual correction, not a second vote or a score booster.
                     import json
                     try:
@@ -215,7 +224,7 @@ class ReviewAgent(AgentBase):
                                 + "\n按当前日期、元数据及当前正文原句重新核查，保留真正问题并重新给出完整 JSON；不得机械提高分数。")])
                         repaired, _ = extract_json(getattr(response, "content", ""))
                         if isinstance(repaired, dict):
-                            payload = repaired
+                            payload = _normalize_review_anchors(repaired, context)
                     except Exception as error:
                         unresolved.append(f"审阅一致性复核未完成: {type(error).__name__}")
                 grounding_conflicts = _review_grounding_conflicts(payload, context)
@@ -239,9 +248,21 @@ class ReviewAgent(AgentBase):
                     llm_scores[category] >= int((task.hints or {}).get("review_threshold", 80))
                     or category_notes.get(category)
                     for category in categories)
+                validation_details = {
+                    "invalid_score_categories": [category for category in categories
+                        if not isinstance(llm_scores.get(category), (int, float))
+                        or isinstance(llm_scores.get(category), bool)
+                        or not 0 <= llm_scores[category] <= 100],
+                    "missing_score_explanations": [category for category in categories
+                        if isinstance(llm_scores.get(category), (int, float))
+                        and llm_scores[category] < int(task.hints.get("review_threshold", 80))
+                        and not category_notes.get(category)],
+                }
                 semantic_reviewed = (isinstance(payload.get("issues"), list)
-                                     and complete_scores and explained_low_scores and not grounding_conflicts)
+                                     and complete_scores and explained_low_scores
+                                     and (not grounding_conflicts or bool(issues)))
                 date_conflicts = _review_date_conflicts(payload)
+                validation_details["date_conflicts"] = date_conflicts
                 if date_conflicts:
                     semantic_reviewed = False
                     unresolved.extend(date_conflicts)
@@ -249,7 +270,7 @@ class ReviewAgent(AgentBase):
                     unresolved.append("独立审阅的定位或分项评分不完整，不能视为通过")
 
         deterministic = deterministic_issues(context)
-        issues = _merge_issues(issues, deterministic)
+        issues = _reuse_review_ids(_merge_issues(issues, deterministic), context)
         issues = [issue for issue in issues if issue.category not in excluded]
         if parse_note:
             unresolved.append(parse_note)
@@ -259,6 +280,11 @@ class ReviewAgent(AgentBase):
                                  semantic_reviewed=semantic_reviewed,
                                  category_scores=llm_scores, excluded_categories=excluded)
         judgement["not_applicable_categories"] = sorted(excluded)
+        judgement["reported_category_scores"] = llm_scores
+        judgement["grounding_conflicts"] = list(grounding_conflicts.values())
+        judgement["validation_details"] = validation_details
+        if grounding_conflicts and judgement["accepted"]:
+            judgement.update(accepted=False, decision="incomplete")
         from src.publication.manuscript_state import manuscript_identity
         manuscript = (context.objects.get("manuscript") or [{}])[-1]
         judgement["reviewed_manuscript"] = manuscript_identity(manuscript)
@@ -304,6 +330,7 @@ class ReviewAgent(AgentBase):
             needs.append(_revision_need(context, writing_issues, judgement))
         changes = [ChangeProposal(
             kind="review_issue",
+            object_id=_review_object_id(issue, task, context),
             payload=issue.to_dict(),
             rationale=f"审阅问题 ({issue.category}, {issue.severity.value})",
             input_versions={},
@@ -479,8 +506,48 @@ def _unit_conflict(caption: str, figure: dict[str, Any]) -> bool:
 
 
 # 合并与辅助
+def _normalize_review_anchors(payload: dict, context: ContextPack) -> dict:
+    """Recover legacy anchors only when their quoted words occur in this version."""
+    if not isinstance(payload.get('issues'), list):
+        return payload
+    paper = (context.objects.get('manuscript') or [{}])[-1]
+    blocks = {b.get('block_id'): '\n'.join(str(b.get(key) or '') for key in ('text', 'math'))
+              for section in paper.get('sections') or [] for b in section.get('blocks') or []
+              if b.get('block_id')}
+    normalize = lambda value: re.sub(r'\s+', '', str(value or ''))
+    items = []
+    for original in payload.get('issues') or []:
+        if not isinstance(original, dict):
+            items.append(original)
+            continue
+        item = dict(original)
+        ids = list(item.get('affected_ids') or [])
+        ids.extend(ref.get('id') for ref in item.get('affected_refs') or [] if isinstance(ref, dict))
+        location = str(item.get('locator') or '') + ' ' + str(item.get('detail') or '')
+        ids.extend(re.findall(r'\bblk-[A-Za-z0-9-]+', location))
+        item['affected_ids'] = list(dict.fromkeys(str(value) for value in ids if value))
+        targets = ([item['block_id']] if item.get('block_id') else
+                   [value for value in item['affected_ids'] if value in blocks])
+        if not item.get('quoted_text'):
+            quotes = re.findall(r'“([^”]+)”|‘([^’]+)’|"([^"\n]+)"|\x27([^\x27\n]+)\x27', location)
+            for candidates in quotes:
+                quote = next((value for value in candidates if value), '')
+                if len(normalize(quote)) < 8:
+                    continue
+                match = next((target for target in targets
+                              if normalize(quote) in normalize(blocks.get(target, ''))), None)
+                if match:
+                    item['block_id'], item['quoted_text'] = match, quote
+                    item['anchor_recovered'] = True
+                    break
+        items.append(item)
+    return {**payload, 'issues': items}
+
+
 def _review_grounding_conflicts(payload: dict, context: ContextPack) -> dict[int, str]:
     """Unanchored accusations trigger review repair, never manuscript rewriting."""
+    if not isinstance(payload.get('issues'), list):
+        return {0: '审阅 issues 必须是结构化列表'}
     paper = (context.objects.get('manuscript') or [{}])[-1]
     blocks = {b.get('block_id'): '\n'.join(str(b.get(key) or '') for key in ('text', 'math'))
               for section in paper.get('sections') or [] for b in section.get('blocks') or []
@@ -489,11 +556,21 @@ def _review_grounding_conflicts(payload: dict, context: ContextPack) -> dict[int
         return {}
     normalize = lambda text: re.sub(r'\s+', '', str(text or ''))
     conflicts = {}
+    sources = {str(row.get('source_id') or row.get('id')) for row in context.objects.get('evidence') or []}
+    payload = _normalize_review_anchors(payload, context)
     for index, item in enumerate(payload.get('issues') or []):
         if not isinstance(item, dict):
+            conflicts[index] = f'审阅意见 {index + 1} 不是结构化对象'
             continue
         block_id, quote = item.get('block_id'), item.get('quoted_text')
-        targets = [block_id] if block_id else [i for i in item.get('affected_ids') or [] if i in blocks]
+        metadata = (item.get('category') == 'citation' and not quote
+                    and sources.intersection(item.get('affected_ids') or [])
+                    and (item.get('repair_action') in {'verify_metadata', 'fix_metadata'}
+                         or re.search(r'DOI|doi|作者|出版年|卷期|页码|书目|元数据', str(item.get('summary') or ''))))
+        if metadata:
+            continue
+        targets = [block_id] if block_id else [i for i in item.get('affected_ids') or []
+                                              if i in blocks or str(i).startswith('blk-')]
         if not targets and not quote:
             continue  # Source metadata / research objects need not quote manuscript prose.
         if not targets or any(target not in blocks for target in targets):
@@ -533,6 +610,35 @@ def _issue_from(item: Any) -> ReviewIssueRef | None:
         )
     except Exception:  # noqa: BLE001 - 未登记的严重度/角色跳过该条
         return None
+
+
+def _reuse_review_ids(issues: list[ReviewIssueRef], context: ContextPack) -> list[ReviewIssueRef]:
+    """Keep an anchored, substantially unchanged finding in the same issue history."""
+    from difflib import SequenceMatcher
+    previous = context.objects.get('review_issue') or []
+    used = set()
+    for issue in issues:
+        targets = {ref.id for ref in issue.affected_refs}
+        for old in previous:
+            old_id = old.get('issue_id')
+            old_targets = {ref.get('id') for ref in old.get('affected_refs') or [] if isinstance(ref, dict)}
+            if not old_id or old_id in used or old.get('category') != issue.category:
+                continue
+            same = ' '.join(str(old.get('summary') or '').split()) == ' '.join(issue.summary.split())
+            similar = bool(targets & old_targets) and SequenceMatcher(
+                None, str(old.get('summary') or ''), issue.summary).ratio() >= .8
+            if same or similar:
+                issue.issue_id = old_id
+                used.add(old_id)
+                break
+    return issues
+
+
+def _review_object_id(issue, task, context):
+    from src.research.schemas import stable_id
+    old = next((row for row in context.objects.get('review_issue') or []
+                if row.get('issue_id') == issue.issue_id and row.get('id')), None)
+    return str(old['id']) if old else stable_id('review', task.project_id, task.problem_id, task.run_id, issue.issue_id)
 
 
 def _issue(*, category: str, severity: str, summary: str,

@@ -93,6 +93,26 @@ def _current_review_needs(needs, review):
                  or bool(set(need.hints["review_issue_ids"]) & current))]
 
 
+def _review_recovery(state, task_order, manuscript):
+    """One retry of an invalid current review; never spend the next round on research."""
+    if not manuscript or not _review_matches_manuscript(state.results, task_order, manuscript, semantic=False):
+        return None, ""
+    writer, last, _ = _review_positions(state.results, task_order)
+    if last < 0 or state.results[task_order[last]].payload.get("semantic_reviewed"):
+        return None, ""
+    from src.publication.manuscript_state import manuscript_identity
+    identity = manuscript_identity(manuscript)
+    failed = [state.results[tid] for index, tid in enumerate(task_order) if tid in state.results
+              and state.results[tid].agent == "review" and not state.results[tid].pending_resume
+              and not state.results[tid].payload.get("semantic_reviewed")
+              and (state.results[tid].payload.get("reviewed_manuscript", {}).get("content_hash") == identity["content_hash"]
+                   or (index > writer and not state.results[tid].payload.get("reviewed_manuscript")))]
+    if len(failed) >= 2:
+        return None, "当前稿件的独立审阅连续两次无效，停止重复调用并封存诊断与部分成果"
+    return AgentTask(agent="review", objective="修复当前稿件的审阅格式与定位，不扩展研究",
+                     hints={"review_recovery_for": identity["content_hash"]}), ""
+
+
 def _review_before_delivery(state, task_order, max_revisions, max_rounds, remaining_budget=None):
     """A failed current review gets a bounded repair or an explicit partial reason."""
     reviews = [(tid, state.results[tid]) for tid in task_order if tid in state.results
@@ -357,6 +377,18 @@ class TeamRun:
         if self._owns_task_store:
             self.task_store.close()
 
+    def stop(self, reason: str = "") -> None:
+        """Seal committed work on the owning worker, including a stop before planning."""
+        if self.loop.finished and self.outcome.status == "stopped":
+            return
+        self.cancel.cancel(reason or self.cancel.reason or "用户停止")
+        self.loop.brief = self.loop.brief or ResearchBrief(main_question=self.request,
+            project_id=self.project_id, problem_id=self.problem_id)
+        self.loop.plan = self.loop.plan or TeamPlan()
+        self.outcome.brief, self.outcome.plan = self.loop.brief, self.loop.plan
+        self._finish(self.loop, self.cancel.reason, status="stopped")
+        self.runtime.emit("run_stopped", {"reason": self.loop.stop_reason})
+
     def __enter__(self) -> TeamRun:
         return self
 
@@ -471,6 +503,7 @@ class TeamRun:
                 "stage": "planned", "reason": f"{type(e).__name__}: {e}"})
         # 画像/计划一算出来就落盘: "任务落盘不等于恢复团队" —— 只有画像
         # 与计划也在磁盘上, 续跑才能复用**同一批任务身份与依赖边**, 而不是重新画像。
+        self.outcome.status = TaskStatus.running.value
         self.save_state()
         self.runtime.emit("brief_ready", {"project_id": self.project_id,
                                           "problem_id": self.problem_id,
@@ -489,6 +522,9 @@ class TeamRun:
         `run()` 就是 `prepare()` + 反复 `step()` 直到返回 False —— 因此两条路径
         **共用同一份实现**, 不会出现"逐轮驱动"与"一次跑完"行为不一致。
         """
+        if self.cancel.cancelled:
+            self.stop()
+            return False
         self.prepare()
         state = self.loop
         state.review_revisions = max(
@@ -516,15 +552,22 @@ class TeamRun:
         closing = closing and any(row.get("agent") == "writing" for row in state.plan.tasks)
         if not resumable and decision.decision in {
                 DecisionKind.dispatch, DecisionKind.deliver, DecisionKind.stop_with_report}:
-            final_review = _final_review_task(state.results, self.outcome.task_order, self._latest_manuscript())
-            writer_pos, _, _ = _review_positions(state.results, self.outcome.task_order)
+            writer_pos, _, written = _review_positions(state.results, self.outcome.task_order)
+            manuscript = self._latest_manuscript() or written
+            final_review = _final_review_task(state.results, self.outcome.task_order, manuscript)
+            review_retry, review_stop = _review_recovery(state, self.outcome.task_order, manuscript)
             research_pos = max((i for i, tid in enumerate(self.outcome.task_order)
                                 if tid in state.results and state.results[tid].agent in {
                                     "reasoning", "modeling", "evidence", "validation"}),
                                default=-1)
             synthesis_tried = any((row.get("hints") or {}).get("closing_synthesis")
                                   for row in state.plan.tasks)
-            if closing and not synthesis_tried and (writer_pos < 0 or research_pos > writer_pos):
+            if review_stop:
+                decision = SupervisorDecision(decision=DecisionKind.stop_with_report, reason=review_stop)
+            elif review_retry:
+                decision = SupervisorDecision(decision=DecisionKind.dispatch, tasks=[review_retry],
+                    reason="当前审阅无效，先完成一次有界恢复，不继续检索")
+            elif closing and not synthesis_tried and (writer_pos < 0 or research_pos > writer_pos):
                 decision = SupervisorDecision(decision=DecisionKind.dispatch,
                     tasks=[AgentTask(agent="writing", objective="汇总最终推导、证据边界与可执行实验建议，提交完整稿件供独立审阅",
                         hints={"closing_synthesis": True},
@@ -558,12 +601,11 @@ class TeamRun:
             if not decision.tasks:
                 self._finish(state, "主控决定派工但没有给出任务")
                 return False
-            selected_needs = {str(t.hints.get("need_assignment") or "")
-                              for t in decision.tasks}
-            state.open_needs = [need for need in state.open_needs
-                               if need.assignment_key(state.brief.project_id,
-                                                      state.brief.problem_id) not in selected_needs]
             for task in decision.tasks:
+                if self.cancel.cancelled:
+                    self._finish(state, self.cancel.reason or "用户停止", status="stopped")
+                    self.runtime.emit("run_stopped", {"reason": state.stop_reason})
+                    return False
                 resuming = task.task_id in state.results and state.results[task.task_id].pending_resume
                 if _is_review_revision(task) and not resuming and state.review_revisions >= self.max_review_revisions:
                     self._finish(
@@ -581,6 +623,10 @@ class TeamRun:
                 # 补派/返工任务**并入**计划 (保持既有任务身份与依赖边不变)
                 if task.task_id not in state.plan.edges:
                     self.supervisor.adopt(state.plan, task)
+                state.open_needs = [need for need in state.open_needs
+                    if need.assignment_key(state.brief.project_id, state.brief.problem_id) != need_key]
+                self.outcome.status = TaskStatus.running.value
+                self.save_state()
                 result = self._execute_one(task, state.results)
                 if _is_review_revision(task) and not resuming:
                     state.review_revisions += 1
@@ -594,6 +640,13 @@ class TeamRun:
                 state.plan = self.supervisor.replan(
                     state.plan, {task.task_id: result}, version=state.plan.version)
                 self.outcome.plan = state.plan
+                # Persist each completed task, not just the entire batch. A hard
+                # exit during the next task must not replay already committed work.
+                self.save_state()
+                if self.cancel.cancelled:
+                    self._finish(state, self.cancel.reason or "用户停止", status="stopped")
+                    self.runtime.emit("run_stopped", {"reason": state.stop_reason})
+                    return False
                 if result.pending_resume:
                     self._finish(state, "网络或等待预算受限，研究未完成（可恢复）",
                                  status=TaskStatus.partial.value)
@@ -1186,6 +1239,11 @@ class TeamRun:
             found.append(row["task_id"])
         if not found:
             return False
+        if self.outcome.status == "stopped":
+            # This method is called only on explicit resume, never on a stop request.
+            self.cancel.cancelled = False
+            self.cancel.reason = ""
+            self.cancel.requested_at = ""
         transient_needs = {need.need_id for tid in pending
                            for need in self.loop.results[tid].followup_needs}
         self.loop.open_needs = [need for need in self.loop.open_needs if need.need_id not in transient_needs]
@@ -1224,6 +1282,14 @@ class TeamRun:
         self.outcome.stop_reason = restored.stop_reason
         self.outcome.delivery = dict(payload.get("delivery") or {})
         self.outcome.unresolved_report = dict(payload.get("unresolved_report") or {})
+        if not restored.finished and self.outcome.status in {"queued", "running"}:
+            self.outcome.status = "interrupted"
+            restored.stop_reason = self.outcome.stop_reason = "上次运行未正常收尾；已恢复逐任务检查点，可继续或导出部分成果"
+            for row in restored.plan.tasks:
+                if row.get("task_id") not in restored.results:
+                    restored.pending_retries.add(assignment_key(restored.brief, row["agent"], row["objective"]))
+            self.save_state(status="interrupted")
+            self.runtime.emit("run_interrupted", {"run_id": self.run_id, "reason": restored.stop_reason})
         return True
 
     def _current_versions(self) -> dict[str, int]:

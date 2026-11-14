@@ -1018,6 +1018,7 @@ class ReviewIssueRef(BaseModel):
             "acceptance": list(self.acceptance),
             "blocking": self.blocking,
             "locator": self.locator,
+            "quoted_text": self.quoted_text,
         }
 
 
