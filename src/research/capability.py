@@ -48,7 +48,7 @@ CAPABILITIES: dict[str, Capability] = {
         backends=("sympy", "z3", "lean"),
         description="定义性命题: 在声明变量域内可由符号/求解器内核验",
         obligation_kinds=("prove_inequality", "prove_identity", "prove_monotonicity",
-                          "equality_condition", "check_implication"),
+                          "equality_condition", "check_implication", "check_definition", "definition_scope"),
     ),
     "descriptive": Capability(
         category="descriptive", claim_type=ClaimType.descriptive,

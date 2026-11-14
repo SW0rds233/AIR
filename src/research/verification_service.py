@@ -205,7 +205,7 @@ class VerificationService:
         updates: dict[str, Any] = {
             "validation_status": disposition.validation_status,
             "support_kind": support_kind_for_tool(check.tool),
-            "coverage": coverage_for_tool(check.tool),
+            "coverage": (Coverage.step if result.scope == 'step' else coverage_for_tool(check.tool)),
             "detail": disposition.reason or disposition.note,
         }
         if disposition.action == "closed":
@@ -273,18 +273,19 @@ class VerificationService:
                                      "args": check.arguments}),
             claim_id=claim.id, claim_version=int(getattr(claim, "version", 1) or 1),
             assumption_ids=list(getattr(claim, "assumption_ids", []) or []),
-            scope=VerificationScope.target,
+            scope=VerificationScope(result.scope),
             arguments=dict(check.arguments),
             raw_output=getattr(result, "raw_output", "") or "",
+            detail=result.detail,
+            usable=usable,
             status=getattr(result.status, "value", str(result.status)),
             certificate=getattr(result, "certificate", "") or "",
             counterexample=dict(getattr(result, "counterexample", None) or {}),
             verification_closure=self.closure(claim),
             validation_status=_to_validation_status(result),
             support_kind=support_kind or support_kind_for_tool(check.tool),
-            # 原始结果先按"尚未确认可用"落盘, 判定确认后才解除 —— 顺序不能颠倒,
-            # 否则裁决命题状态时会看到一条还没被采纳的记录。
-            stale=not usable,
+            # Failed/unsupported is a result, not a dependency version change.
+            stale=False,
         )
         if obligation is not None:
             from src.research.schemas import ObjectRef

@@ -987,6 +987,7 @@ class ReviewIssueRef(BaseModel):
     blocking: bool = False
     #: 原始定位 (原文片段/行号), 供界面回链。
     locator: str = ""
+    quoted_text: str = ""  # exact current-manuscript evidence, when reviewing a block
 
     @field_validator("suggested_owner")
     @classmethod

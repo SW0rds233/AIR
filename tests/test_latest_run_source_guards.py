@@ -44,6 +44,7 @@ def test_background_paper_cannot_back_external_framework_assumption():
     runtime = SimpleNamespace(
         llm_available=lambda *_: True,
         llm=lambda *_args, **_kwargs: SimpleNamespace(invoke=lambda _messages: response),
+        emit=lambda *_args: None,
     )
     task = AgentTask(agent="modeling", objective="研究产业影响", source_policy="both")
     context = ContextPack(request="研究某产业影响", objects={

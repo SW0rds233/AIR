@@ -242,7 +242,7 @@ def _normalize_expr(text: str) -> str:
 
 def _aligned(record: VerificationRecord, claim: Claim) -> bool:
     """核对验证请求编码的变量域/关系/表达式与原命题是否一致 (防止陈述被偷换)。"""
-    if record.claim_version != claim.version:
+    if record.scope.value != 'target' or record.usable is False or record.claim_version != claim.version:
         return False
     args = record.arguments or {}
     # 设计/计数类命题: 判定输入 (v,k,λ,b,r) 必须与命题记录的一致, 否则"换一组

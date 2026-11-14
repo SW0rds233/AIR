@@ -88,6 +88,11 @@ class WritingAgent(AgentBase):
    可以写出候选推理，但需明确其尚未核验；不能把本轮未核查误写成学术界公认未解决。
    子节必须在 sections 中实际建立，使用 level=2/3；不得引用没有标题的“第3.1节”。
 6. 发现缺少依据时, 在 "needs" 里提出需求, 不要自己补数据或条件。
+7. 修订要改变有问题的推理或引文用途，不只在段尾叠加免责声明。相同证据边界集中说明，
+   各节只保留影响本节论证的限定；结论回答研究问题，不逐章重讲机制链。
+   后续研究写成建议，不编造作者分工、完成日期、预注册平台或已承诺的执行计划。
+   核验 scope=step 只支持局部编码检查；unsupported 是工具不受理，不是反例，
+   也不是“定义尚未成立”。仅在影响读者判断时说明科学边界，具体错误留在研究记录。
 
 不得: 编造数值/引用/定理; 把非形式化论证写成"已证明"; 把案例类比写成普适结论。
 密集代数式使用完整的 LaTeX 数学表达式，不要混成文本模式的 ASCII 运算串。
@@ -884,10 +889,15 @@ def _section_material(packet: WritingPacket, role: str,
             for row in packet.models[:10]], ensure_ascii=False)[:14000])
         pieces.append("验证与数据计划: " + json.dumps(packet.validations[:5], ensure_ascii=False)[:4500])
     if role in {"result", "revision"}:
-        pieces.append("有效核验记录: " + json.dumps([
+        pieces.append("已通过的核验记录（scope=step 仅覆盖局部）: " + json.dumps([
             row for row in packet.verifications
             if row.get("validation_status") == "verified" and not row.get("stale")
         ][:12], ensure_ascii=False)[:8500])
+        pieces.append("未完成的核验及原因（用于修复，不当作反例）: " + json.dumps([
+            {key: row.get(key) for key in ('id', 'claim_id', 'status', 'detail', 'scope', 'stale', 'stale_reason')}
+            for row in packet.verifications
+            if row.get('validation_status') != 'verified' or row.get('stale')
+        ][:8], ensure_ascii=False)[:3500])
     if role in {"result", "discussion"}:
         pieces.append("已登记图: " + json.dumps([
             {"id": row.get("id"), "title": row.get("title"), "caption": row.get("caption")}

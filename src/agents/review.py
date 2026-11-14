@@ -120,6 +120,8 @@ class ReviewAgent(AgentBase):
 - 每个问题必须给出: 严重度 (blocking/major/minor/advisory)、类别、受影响对象 id、
   建议由谁返工、以及**可核验的验收标准**;
 - 引用问题时给出原文片段作为定位;
+- 针对正文的意见必须给出 block_id 与 quoted_text（当前块中逐字摘录的原句），
+  不得把旧版本的问题或自己的概括冒充原文。对整节缺项可引用该节现有的代表句说明缺口。
 - **引用编号每轮重新排序**: 上一轮台账里对 `[n]` 的主题描述不得沿用 —— 重排之后
   `[34]` 已经是另一篇文献, 沿用旧描述会把同一个问题反复报成"未解决"
   (实测: 连续 4 轮误判 Critical 未解决)。判断"是否已解决"必须回到**本轮正文与文献表**;
@@ -145,6 +147,7 @@ class ReviewAgent(AgentBase):
 最终输出 JSON:
 {"issues": [{"severity": "blocking|major|minor|advisory", "category": "science|fidelity|citation|readability|figure|completeness",
              "summary": "", "detail": "", "locator": "", "affected_ids": [""],
+             "block_id": "", "quoted_text": "",
              "repair_action": "verify_source|replace_source|revise_citation|revise_text|research",
              "suggested_owner": "evidence|modeling|reasoning|validation|writing|figures",
              "acceptance": [""]}],
@@ -193,7 +196,7 @@ class ReviewAgent(AgentBase):
             except Exception as e:  # noqa: BLE001
                 payload, parse_note = None, f"审阅调用失败: {e}"
             if isinstance(payload, dict):
-                contradictions = _review_date_conflicts(payload)
+                contradictions = _review_date_conflicts(payload) + list(_review_grounding_conflicts(payload, context).values())
                 if contradictions and not task.budget.exceeded_by(usage):
                     # One factual correction, not a second vote or a score booster.
                     import json
@@ -202,13 +205,16 @@ class ReviewAgent(AgentBase):
                             SystemMessage(content=self.SYSTEM),
                             HumanMessage(content=prompt + "\n待复核审阅草案:\n" + json.dumps(payload, ensure_ascii=False)
                                 + "\n确定性一致性检查:\n" + "\n".join(contradictions)
-                                + "\n按当前日期及元数据重新核查，保留真正问题并重新给出完整 JSON；不得机械提高分数。")])
+                                + "\n按当前日期、元数据及当前正文原句重新核查，保留真正问题并重新给出完整 JSON；不得机械提高分数。")])
                         repaired, _ = extract_json(getattr(response, "content", ""))
                         if isinstance(repaired, dict):
                             payload = repaired
                     except Exception as error:
-                        unresolved.append(f"审阅日期一致性复核未完成: {type(error).__name__}")
-                issues = _issues_from_payload(payload.get("issues"))
+                        unresolved.append(f"审阅一致性复核未完成: {type(error).__name__}")
+                grounding_conflicts = _review_grounding_conflicts(payload, context)
+                issues = _issues_from_payload([item for index, item in enumerate(payload.get('issues') or [])
+                                              if index not in grounding_conflicts])
+                unresolved.extend(grounding_conflicts.values())
                 llm_scores = (payload.get("category_scores")
                               if isinstance(payload.get("category_scores"), dict) else {})
                 raw_notes = payload.get("category_notes")
@@ -227,13 +233,13 @@ class ReviewAgent(AgentBase):
                     or category_notes.get(category)
                     for category in REVIEW_CATEGORIES)
                 semantic_reviewed = (isinstance(payload.get("issues"), list)
-                                     and complete_scores and explained_low_scores)
+                                     and complete_scores and explained_low_scores and not grounding_conflicts)
                 date_conflicts = _review_date_conflicts(payload)
                 if date_conflicts:
                     semantic_reviewed = False
                     unresolved.extend(date_conflicts)
                 if not semantic_reviewed:
-                    unresolved.append("独立审阅未给出完整分项评分或低分理由，不能视为通过")
+                    unresolved.append("独立审阅的定位或分项评分不完整，不能视为通过")
 
         deterministic = deterministic_issues(context)
         issues = _merge_issues(issues, deterministic)
@@ -280,6 +286,9 @@ class ReviewAgent(AgentBase):
                    f"(阻断 {len(blocking)}); 分项: "
                    + ", ".join(f"{k} {v}" for k, v in _tally(issues).items()))
         needs = _needs_from(issues)
+        if not semantic_reviewed:
+            needs.append(ResearchNeed(kind=NeedKind.review, statement="复核未能定位到当前正文的审阅意见与评分",
+                                      why='; '.join(unresolved[:3]), blocking=True))
         writing_issues = [issue for issue in issues if repair_owner(issue) == "writing"]
         needs = [need for need in needs if need.kind != NeedKind.manuscript_revision]
         if not judgement["accepted"] and semantic_reviewed and writing_issues:
@@ -451,6 +460,30 @@ def _unit_conflict(caption: str, figure: dict[str, Any]) -> bool:
 
 
 # 合并与辅助
+def _review_grounding_conflicts(payload: dict, context: ContextPack) -> dict[int, str]:
+    """Unanchored accusations trigger review repair, never manuscript rewriting."""
+    paper = (context.objects.get('manuscript') or [{}])[-1]
+    blocks = {b.get('block_id'): '\n'.join(str(b.get(key) or '') for key in ('text', 'math'))
+              for section in paper.get('sections') or [] for b in section.get('blocks') or []
+              if b.get('block_id')}
+    if not blocks:
+        return {}
+    normalize = lambda text: re.sub(r'\s+', '', str(text or ''))
+    conflicts = {}
+    for index, item in enumerate(payload.get('issues') or []):
+        if not isinstance(item, dict):
+            continue
+        block_id, quote = item.get('block_id'), item.get('quoted_text')
+        targets = [block_id] if block_id else [i for i in item.get('affected_ids') or [] if i in blocks]
+        if not targets and not quote:
+            continue  # Source metadata / research objects need not quote manuscript prose.
+        if not targets or any(target not in blocks for target in targets):
+            conflicts[index] = f'审阅意见 {index + 1} 的正文块不存在于当前版本'
+        elif not normalize(quote) or not any(normalize(quote) in normalize(blocks[t]) for t in targets):
+            conflicts[index] = f'审阅意见 {index + 1} 的 quoted_text 缺失或不在所指当前正文块中'
+    return conflicts
+
+
 def _issues_from_payload(value: Any) -> list[ReviewIssueRef]:
     out: list[ReviewIssueRef] = []
     for item in value or []:
@@ -473,7 +506,9 @@ def _issue_from(item: Any) -> ReviewIssueRef | None:
             detail=clip(str(item.get("detail") or ""), 1600),
             repair_action=str(item.get("repair_action") or ""),
             locator=clip(str(item.get("locator") or ""), 400),
-            affected_refs=[ObjectRef(id=str(value)) for value in item.get("affected_ids") or [] if value],
+            quoted_text=str(item.get('quoted_text') or ''),
+            affected_refs=[ObjectRef(id=str(value)) for value in dict.fromkeys(
+                [*(item.get("affected_ids") or []), item.get('block_id')]) if value],
             suggested_owner=str(item.get("suggested_owner") or ""),
             acceptance=as_list_of_str(item.get("acceptance")),
         )

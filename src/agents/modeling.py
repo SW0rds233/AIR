@@ -63,6 +63,9 @@ class ModelingAgent(AgentBase):
 - 不得为了适配某个求解器而偷换题意; 量词与域必须与原题一致;
 - 变不出来就如实列为未知, 不要编造;
 - 只提交**候选模型**, 不声明结论成立。
+- background 关系只说明选题或机制背景，不支持外部假设。只有背景材料时仍可提出
+  条件模型：将本研究引入的假设明确标为 proposed，逐条列出可证伪的 open_conditions。
+  不得把未知外部事实改名为假设以冒充事实；写清它是假设且尚待检验。
 纯数学问题应保持题面的对象、整数域、量词和约束，给出等价编码与两个方向的映射。
 不得套用人群、处理/对照、测量误差等实证机制；题面定义可作为输入前提，
 不需要为题面自定义对象虚构外部机制来源。使用既有定理仍需核读原文与适用条件。
@@ -118,7 +121,8 @@ class ModelingAgent(AgentBase):
                 f"- ref_id={row.get('source_id') or row.get('id')} "
                 f"{clip(str(row.get('title', '')), 140)} | "
                 f"{clip(str(row.get('excerpt', '')), 350)} | "
-                f"定位 {row.get('locator') or '无'}"
+                f"定位 {row.get('locator') or '无'} | relation={row.get('relation') or row.get('support')} "
+                f"claim_id={row.get('claim_id', '')} scope={row.get('support_scope', '')}"
                 for row in grounded_evidence[:20])
             prompt = (
                 f"# 原始研究问题\n{clip(str(brief.get('main_question') or context.request), 2000)}\n"
@@ -192,7 +196,9 @@ class ModelingAgent(AgentBase):
             for row in (context.objects.get(kind) or [])
             if row.get("id") or row.get("source_id")
         }
-        candidates = self.repair_schema_once(candidates, task, runtime, usage, known_source_ids)
+        candidates = self.repair_schema_once(
+            candidates, task, runtime, usage, known_source_ids,
+            supporting_sources=supporting_source_ids, known_inputs=known_input_ids)
         for index, model in enumerate(candidates):
             model = normalise_model_candidate(model)
             if not model.get("claim_id") and len(claim_rows) == 1:
@@ -219,7 +225,7 @@ class ModelingAgent(AgentBase):
                    or "缺少支持关系" in problem
                    for problem in problems):
                 rejected_models += 1
-                unknowns.append(f"候选模型 {index + 1} 未提交：框架或外部假设缺少有效来源")
+                unknowns.append(f"候选模型 {index + 1} 未提交：" + '; '.join(problems))
                 continue
             accepted_candidates.append(model)
             changes.append(build_proposal(
@@ -243,10 +249,10 @@ class ModelingAgent(AgentBase):
                 task, summary,
                 needs=[ResearchNeed(
                     kind=NeedKind.model_condition,
-                    statement="重新给出符合模型字段契约的候选编码",
+                    statement="修复候选模型的字段或来源关系；缺乏支持的机制须明确列为待检验假设",
                     why="; ".join(unknowns[:3]) or "候选模型未通过入库校验",
-                    hints={"schema_errors": schema_errors},
-                    acceptance=["给出名称、变量符号与可保存的形式化编码"],
+                    hints={"schema_errors": schema_errors, "fidelity_checks": checks},
+                    acceptance=["修复列出的具体字段或来源错误，区分外部事实与本研究假设"],
                     blocking=False)],
                 usage=usage, payload=payload_out)
         if rejected_models:
@@ -255,11 +261,19 @@ class ModelingAgent(AgentBase):
         return self.completed(task, summary, changes=changes, unresolved=checks[:6],
                               usage=usage, payload=payload_out)
 
-    def repair_schema_once(self, candidates, task, runtime, usage, known_sources):
+    def repair_schema_once(self, candidates, task, runtime, usage, known_sources,
+                           *, supporting_sources=None, known_inputs=None):
         invalid = []
         for index, candidate in enumerate(candidates):
             try:
-                ResearchModel.model_validate(normalise_model_candidate(candidate))
+                model = ResearchModel.model_validate(normalise_model_candidate(candidate))
+                problems = validate_model_payload(model.model_dump(mode='json'),
+                    known_source_ids=known_sources, supporting_source_ids=supporting_sources,
+                    known_input_ids=known_inputs)
+                source_errors = [p for p in problems if any(term in p for term in
+                    ('未登记来源', '未关联来源', '缺少支持关系'))]
+                if source_errors:
+                    invalid.append({'index': index, 'model': candidate, 'errors': source_errors})
             except ValidationError as error:
                 invalid.append({"index": index, "model": candidate,
                     "errors": [{"field": ".".join(map(str, row["loc"])), "message": row["msg"]}
@@ -269,8 +283,10 @@ class ModelingAgent(AgentBase):
         from langchain_core.messages import HumanMessage, SystemMessage
         try:
             response = runtime.llm(task, usage, stage="modeling").invoke([
-                SystemMessage(content=self.SYSTEM + "\n只修复字段格式，不改变科学含义、不增造来源。"),
-                HumanMessage(content=json.dumps({"invalid": invalid, "known_source_ids": sorted(known_sources)},
+                SystemMessage(content=self.SYSTEM + "\n修复列出的字段与来源关系错误，不增造来源。"
+                    "无证据的外部事实保持未决；允许明确提出条件模型，但不得宣称假设已被资料支持。"),
+                HumanMessage(content=json.dumps({"invalid": invalid, "known_source_ids": sorted(known_sources),
+                    "supporting_source_ids": sorted(supporting_sources or [])},
                                                ensure_ascii=False)
                     + '\n只返回 {"repairs":[{"index":0,"model":{}}]}，保留原序号。来源不足须保留为未决。')])
             payload, _ = extract_json(getattr(response, "content", ""))
@@ -316,6 +332,10 @@ class ModelingAgent(AgentBase):
         if is_theoretical_claim(claim) or (is_formal_question(question) and not has_empirical_context(claim)):
             return None  # Mathematical encoding must not be selected by an empirical mechanism template.
         if not evidence:
+            if _model_grounding_evidence(context):
+                # The empirical kernel requires effect support. Background can
+                # still motivate an explicitly conditional model via the LLM.
+                return None
             # 有命题但没读到原文: 内核会拒绝, 这里如实提出需求 (不调 LLM 编模型)
             needs = [ResearchNeed(
                 kind=NeedKind.more_sources,

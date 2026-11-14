@@ -337,6 +337,14 @@ def _obligations_for(claim: Claim, wants_equality: bool, method_available: dict[
             detail="严格不等式还需确认等号是否可达",
         ))
     elif claim.relation == Relation.eq:
+        from src.verification.definitions import is_definition_assignment
+        if is_definition_assignment(claim):
+            return [ProofObligation(statement="核对定义编码（不证明附带推论）",
+                        kind="check_definition", acceptance_method=method,
+                        claim_id=claim.id, claim_version=ver),
+                    ProofObligation(statement="核查定义的域、量纲、适用条件；附带推论须拆成独立证明目标",
+                        kind="definition_scope", acceptance_method="manual",
+                        claim_id=claim.id, claim_version=ver)]
         obligations.append(ProofObligation(
             statement=f"核验恒等: {claim.lhs} = {claim.rhs}",
             kind="prove_identity",

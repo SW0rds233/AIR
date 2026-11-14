@@ -317,6 +317,80 @@ def _math_body(chunk: str) -> str:
     return _separate_glued_commands(chunk)
 
 
+def _protect_bare_commands(text: str, protect) -> str:
+    r"""Lex bare math before subscript/Unicode escaping can split its structure.
+
+    Explicit math is already replaced by placeholders. Balanced groups belong to
+    the command, but a closing text group, punctuation or prose ends the span.
+    Unknown control words are printed literally instead of executed by TeX.
+    """
+    math_commands = _KNOWN_TEX_COMMANDS - _TEXT_SAFE_COMMANDS - {
+        'begin', 'end', 'item', 'itemize', 'enumerate', 'description',
+        'tag', 'notag', 'nonumber', 'textwidth', 'textheight',
+    }
+    out, cursor = [], 0
+    while cursor < len(text):
+        match = _CONTROL_WORD_RE.match(text, cursor)
+        if not match:
+            out.append(text[cursor])
+            cursor += 1
+            continue
+        command = match.group(1)
+        if command in _TEXT_SAFE_COMMANDS:
+            out.append(match.group())
+            cursor = match.end()
+            continue
+        if command not in math_commands:
+            out.append(r'\textbackslash{}' + command)
+            cursor = match.end()
+            continue
+        end, stack = cursor, []
+        while end < len(text):
+            char = text[end]
+            token = _CONTROL_WORD_RE.match(text, end)
+            if token:
+                if token.group(1) not in math_commands | {'text', 'textrm', 'textbf'}:
+                    break
+                # A new text-formatting command outside a math group is prose.
+                if token.group(1) in _TEXT_SAFE_COMMANDS and not stack:
+                    break
+                end = token.end()
+                continue
+            if char in '{([':
+                stack.append(char)
+            elif char in '})]':
+                if not stack or stack[-1] != {'}': '{', ')': '(', ']': '['}[char]:
+                    break
+                stack.pop()
+            elif char == '\\' and end + 1 < len(text) and text[end + 1] in '{} ,;!':
+                end += 2
+                continue
+            elif not stack:
+                word = re.match(r'[A-Za-z]+', text[end:])
+                if word:
+                    # Keep English prose out of math; identifiers in arguments
+                    # and subscripts are unrestricted inside balanced groups.
+                    if len(word.group()) > 3 or word.group().lower() in {
+                        'is', 'are', 'the', 'and', 'or', 'of', 'to', 'in',
+                        'for', 'was', 'be', 'as', 'by', 'on', 'not',
+                    }:
+                        break
+                    end += len(word.group())
+                    continue
+                if not re.match(r'[0-9_\^\s+*/=<>!−×±≤≥≠\-\u0370-\u03ff]', char) or char in '\r\n':
+                    break
+            end += 1
+        raw = text[cursor:end].rstrip()
+        # Never repair an incomplete group by inventing its missing contents.
+        if stack or not raw:
+            out.append(r'\textbackslash{}' + command)
+            cursor = match.end()
+            continue
+        out.append(protect('$' + escape_math(raw) + '$'))
+        cursor += len(raw)
+    return ''.join(out)
+
+
 def escape_latex(text: str) -> str:
     """转义普通文本里的 LaTeX 特殊字符 (**保持**数学公式与已有命令)。
 
@@ -359,7 +433,12 @@ def escape_latex(text: str) -> str:
     text = re.sub(r"\\\[(.*?)\\\]", _protect_display, text, flags=re.DOTALL)
     text = re.sub(r"\\\((.*?)\\\)", _protect_inline_delimited, text, flags=re.DOTALL)
     # 原有的 $...$ 先摘出来, 下面所有替换都不碰数学模式内部
-    text = re.sub(r"\$[^$]*\$", _protect, text or "")
+    text = re.sub(r"(?<!\\)\$(?!\$)(?:\\.|[^$\\])*(?<!\\)\$", _protect, text or "")
+    def _store_math(value: str) -> str:
+        math_blocks.append(value)
+        return f"\x00MATH{len(math_blocks) - 1}\x00"
+
+    text = _protect_bare_commands(text, _store_math)
     # Keep a relational expression together instead of emitting '$-$' per symbol.
     plain_math = re.compile(r"[A-Za-z0-9\u0370-\u03ff_{}()\[\].=+*/^<>!−×±≤≥≠ᵀ′″]+")
 
@@ -382,7 +461,7 @@ def escape_latex(text: str) -> str:
 
     text = plain_math.sub(_protect_expression, text)
     # `_` **先不转义**: 下面的下标还原要能看到原始的 `X_y`, 写成 `X\_y` 就认不出来了
-    for ch in ("&", "%", "#"):
+    for ch in ("&", "%", "#", "$"):
         text = _escape_active(text, ch)
     # 文本模式下的活动字符。先把可识别的上标/下标转成行内数学并**摘出来**, 否则下面
     # 的兜底替换会把刚生成的 `^{...}`/`_{...}` 一起改掉 (实测产出

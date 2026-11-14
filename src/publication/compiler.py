@@ -55,10 +55,15 @@ def compile_latex(tex_path: str, workdir: str | None = None, engine: str = "xela
             )
             log = result.stdout + result.stderr
             # TeX can leave a partial PDF on failure; its presence is not success.
-            errors = [line.strip() for line in log.splitlines() if line.startswith("!")]
+            lines = log.splitlines()
+            errors = ['\n'.join(lines[index:index + 5]).strip()
+                      for index, line in enumerate(lines) if line.startswith('!')]
             if errors:
                 return False, "LaTeX 编译报错, 输出可能被截断:\n" + "\n".join(errors[:10])
             if result.returncode != 0:
+                if result.returncode & 0xFFFFFFFF == 0xC0000135:
+                    return False, (f"{engine} 无法启动：Windows 缺少运行库 DLL (0xC0000135)。"
+                                   "请修复 TeX 发行版所需运行库；此错误与稿件 LaTeX 内容无关。")
                 return False, (f"{engine} 退出码 {result.returncode}, 编译未正常结束:\n"
                                + log[-2000:])
             if "No pages of output" in log:

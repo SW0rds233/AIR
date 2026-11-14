@@ -33,6 +33,7 @@ class VerificationResult(BaseModel):
     counterexample: dict[str, Any] = Field(default_factory=dict)
     values: dict[str, Any] = Field(default_factory=dict)  # 结构化数值结果 (效应量/CI 等)
     detail: str = ""
+    scope: str = "target"  # step: a partial check cannot certify the whole claim
 
     @property
     def is_conclusive(self) -> bool:

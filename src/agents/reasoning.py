@@ -117,6 +117,11 @@ class ReasoningAgent(AgentBase):
   多环节机制先拆成每条只含一个因果箭头的小命题，逐环登记支持与迁移条件；
   整条作用链通过 dependencies 引用小命题，不能用某一环的证据证明全链。
   自定义量的等式仅表示定义；真实量的乘法分解需声明假设和量纲，不得冒充恒等式。
+  定义与其后续性质必须分成不同命题。定义声明全部函数名和形参，指示函数可写
+  1[coverage(v,t)=1 ∧ R_avail(v,t)>=D(v,t)]；该检查只核对编码，不证明经验适用性。
+  恒等式目标不能把新定义的左端当独立自由变量；先代入定义再比较两端表达式。
+  求和、集合基数与量词不可混用 LaTeX 和自然语言直接交给 SymPy；先拆成可核验的
+  原子引理及归纳/集合论论证。工具 unsupported 时按 detail 修复编码，不重复提交原输入。
   机制命题用 mechanism_links 显式登记链环；公式命题用 evidence_requirements 登记
   具体参数取值或经验假设的来源需求，不要求文献支持自拟公式。代数推导与经验前提分开核验。
 
@@ -152,7 +157,8 @@ class ReasoningAgent(AgentBase):
         # 形式化推导策略先走**闭环路径**: 它把
         # "候选/义务 → 工具核验 → 结构化记录 → 状态归并"整条链接进同一任务协议 ——
         # 义务与核验记录作为候选提交, 命题状态由唯一提交口按内核判据重算。
-        if strategy == "derivation":
+        repair_encoding = task.hints.get('verification_status') == 'unsupported'
+        if strategy == "derivation" and not repair_encoding:
             formal = self.formal_closure(task, context, runtime, usage)
             if formal is not None:
                 return formal
@@ -178,6 +184,15 @@ class ReasoningAgent(AgentBase):
                             for s in (context.objects.get("evidence") or [])[:15])
                 + f"\n# 上下文\n{context_summary(context)}"
             )
+            if repair_encoding:
+                import json
+                target = next((row for row in context.objects.get('claim') or []
+                               if row.get('id') == task.hints.get('claim_id')), {})
+                prompt += '\n# 编码修复（先改输入，不能原样重复执行）\n' + json.dumps({
+                    'claim': target, 'diagnostic': task.hints.get('verification_detail'),
+                    'failed_arguments': task.hints.get('failed_arguments')}, ensure_ascii=False)
+                prompt += ('\n保留原命题 id、科学含义、域和量词；只修复或明确拆解编码。'
+                           '补全全部函数及形参声明；无法等价编码时说明缺口，不伪造证书。')
             try:
                 text, observations = self.tool_loop(
                     task, runtime, tools, usage,
@@ -282,7 +297,7 @@ class ReasoningAgent(AgentBase):
             claim["id"] = object_id
             version = int(existing.get("version") or 1) if existing else 1
             encoding_changed = existing and any(claim.get(key) and claim.get(key) != existing.get(key)
-                for key in ("lhs", "rhs", "expr", "wrt", "relation", "variable_domains", "study"))
+                for key in ("lhs", "rhs", "expr", "wrt", "relation", "variables", "variable_domains", "study"))
             if existing and str(existing.get("statement") or "").strip() == statement and not encoding_changed:
                 # Repeated prose is not new scientific progress and must not reset proof state.
                 continue
@@ -293,7 +308,8 @@ class ReasoningAgent(AgentBase):
                          "informal": bool(claim.get("informal", True))},
                 rationale=clip("; ".join(as_list_of_str(claim.get("reasoning"))[:3]), 400),
                 input_versions={object_id: version} if existing else {}))
-            if claim.get("study", {}).get("design") == "theory":
+            if claim.get("study", {}).get("design") == "theory" or (
+                    claim.get('claim_type') == 'definitional' and claim.get('lhs') and claim.get('rhs')):
                 needs.append(ResearchNeed(kind=NeedKind.derivation,
                     statement="独立核验数学候选: " + statement[:500],
                     why="推理产出尚非核验证据，需要回到具体命题执行证明义务",
@@ -502,14 +518,20 @@ class ReasoningAgent(AgentBase):
                 reason = str(outcome.obligation_updates.get("detail", "")
                              or obligation.statement)
                 unresolved.append(f"{obligation.statement[:120]}: {reason[:200]}")
+                encoding_failed = outcome.result is not None and outcome.result.status.value == 'unsupported'
                 needs.append(ResearchNeed(
-                    kind=(NeedKind.model_condition if obligation.kind == "formal_argument" else NeedKind.clause),
+                    kind=(NeedKind.derivation if encoding_failed else
+                          NeedKind.model_condition if obligation.kind == "formal_argument" else NeedKind.clause),
                     statement=f"义务未关闭: {clip(obligation.statement, 160)}",
                     why=reason[:300],
                     blocked_refs=[ObjectRef(id=claim.id, version=claim.version)],
                     hints={"claim_id": claim.id, "obligation_id": obligation.id,
-                           "trigger_id": "obligation:" + obligation.id},
-                    acceptance=["给出可定位依据、工具核验记录或显式声明"],
+                           "trigger_id": "obligation:" + obligation.id,
+                           "verification_status": outcome.result.status.value if outcome.result else '',
+                           "verification_detail": reason,
+                           "failed_arguments": outcome.record.arguments if encoding_failed and outcome.record else {}},
+                    acceptance=(["按具体诊断修复符号声明或拆解不支持的表达式；不得原样重试或宣称命题已被反驳"]
+                                if encoding_failed else ["给出可定位依据、工具核验记录或显式声明"]),
                     blocking=False))
 
         # 5. claim 候选: 只带**结构化事实** (陈述/形式片段/步骤), 不带科学等级

@@ -18,7 +18,7 @@ __all__ = [
 #: 义务种类 → 优先级 (数值越小越先做)。
 OBLIGATION_PRIORITY: dict[str, int] = {
     "estimate_effect": 0, "prove_inequality": 0, "prove_monotonicity": 0,
-    "prove_identity": 0, "check_implication": 0, "equality_condition": 1,
+    "prove_identity": 0, "check_definition": 0, "check_implication": 0, "equality_condition": 1,
     "control_confound": 2, "scope_check": 3, "evidence_support": 4,
     # 设计/计数类存在性判定: 与计数关系同层, 先于一般规则型义务
     "design_necessity": 2,
