@@ -148,6 +148,7 @@ def test_first_deferred_task_stops_batch_without_consuming_another_revision(resu
         results={task.task_id: deferred} if resuming else {})
     run.outcome = TeamRunOutcome(run_id='run')
     run.prepare = lambda: None
+    run.save_state = lambda **_: True
     run.cancel = SimpleNamespace(cancelled=False)
     run.runtime = SimpleNamespace(run_budget=None, emit=lambda *_: None)
     run.max_rounds, run.max_review_revisions = 24, 3

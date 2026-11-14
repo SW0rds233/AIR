@@ -108,6 +108,7 @@ def test_live_team_events_are_not_replayed_after_step(tmp_path, monkeypatch):
     team = SimpleNamespace(project_id="p", problem_id="q", run_id="r", loop=loop,
                            runtime=SimpleNamespace(sink=SimpleNamespace(event=lambda *args: None)),
                            outcome=SimpleNamespace(delivery={}),
+                           cancel=SimpleNamespace(cancelled=False),
                            prepare=lambda: None, reopen_deferred=lambda: False)
     session = TeamSession(team, emit=emitted.append)
 
