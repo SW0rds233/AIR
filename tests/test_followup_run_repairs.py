@@ -71,10 +71,15 @@ def test_omitted_or_empty_topic_uses_task_library_and_is_recorded():
             loop = ToolLoop(tools)
             for args, expected in [({'query': 'x'}, 'bound'),
                     ({'query': 'x', 'topic': ''}, 'bound'),
-                    ({'query': 'x', 'topic': 'explicit'}, 'explicit')]:
+                    ({'query': 'x', 'topic': 'bound'}, 'bound')]:
                 observed = loop._execute({'name': 'search_local_kb', 'args': args}, grant=None)
                 assert observed.result == expected
                 assert observed.arguments['topic'] == expected
+            # 新契约: 显式 topic 必须属于已授权资料库; 越权请求被拒绝而不是越库查询.
+            denied = loop._execute({'name': 'search_local_kb',
+                                    'args': {'query': 'x', 'topic': 'explicit'}}, grant=None)
+            assert '未授权' in str(denied.result)
+            assert denied.arguments['topic'] == 'explicit'
             return self.completed(task, 'checked')
     Probe().run(AgentTask(agent='evidence', objective='search', source_set_ids=['bound']),
                 ContextPack(), AgentRuntime())
