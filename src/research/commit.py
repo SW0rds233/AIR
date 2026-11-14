@@ -383,6 +383,7 @@ class ResearchCommitService:
                     continue
                 changed = dict(record)
                 changed["stale"] = True
+                changed["stale_reason"] = "出现可定位的相反证据，相关义务与结论须重新核验"
                 changed["raw_output"] = (str(changed.get("raw_output") or "") +
                                          f" | 相反来源 {source_id} 触发重验").strip()
                 writes[("verification", str(record["id"]))] = changed
@@ -578,10 +579,11 @@ class _BlankResult:
 
 def _apply_disposition(record_data: dict[str, Any], obligation: ProofObligation,
                        disposition, result_data: dict[str, Any]) -> dict[str, Any]:
-    """把处置结果写进核验记录 (含 `stale` 解除) 与义务。"""
+    """记录结果是否可采纳；只有依赖换版才能改变 stale。"""
     out = dict(record_data)
-    out["stale"] = not disposition.mark_usable if hasattr(disposition, "mark_usable") \
-        else not getattr(disposition, "mark_record_usable", False)
+    out["usable"] = disposition.mark_usable if hasattr(disposition, "mark_usable") \
+        else getattr(disposition, "mark_record_usable", False)
+    out["detail"] = str(result_data.get("detail") or out.get("detail") or disposition.reason or '')
     if disposition.action == "refuted":
         out["counterexample"] = dict(result_data.get("counterexample") or {})
     return out
@@ -618,7 +620,7 @@ def _apply_obligation_disposition(obligation: ProofObligation, disposition,
         support = support_kind_for_tool(tool)
     if support != SupportKind.none:
         payload["support_kind"] = support.value
-    payload["coverage"] = _coverage_value(tool)
+    payload["coverage"] = 'step' if record.get('scope') == 'step' else _coverage_value(tool)
     payload["detail"] = disposition.reason or payload.get("detail", "")
     return payload
 

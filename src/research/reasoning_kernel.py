@@ -370,7 +370,7 @@ class ObligationDisposition:
     apply_estimate: bool = False       # estimate_effect 成功 → 把估计写入内存态
     record_equality: bool = False      # equality_condition 成功 → 追加等式命题
     keep_counterexample: bool = False  # 保留可回代反例
-    mark_record_usable: bool = False   # 解除记录的 stale (确认可用)
+    mark_record_usable: bool = False   # 结果可采纳；与版本是否过期分开记录
     #: 是否把这次未决写进**路线失败记录**。`estimate_effect` 的失败只是"这次估计没支持
     #: 结论", 不是"该路线失败" —— 旧实现不为它记失败, 这里必须保持同样的语义。
     record_route_failure: bool = True
@@ -383,7 +383,7 @@ def obligation_disposition_for(result: Any, obligation: Any) -> ObligationDispos
     判据。调用方负责落盘与 `_reconcile_claim` (唯一状态写入点)。
 
     规则:
-    - `passed` → 义务关闭 (closed), 记录解除 stale;
+    - `passed` → 覆盖本义务时关闭 (closed), 记录可采纳;
     - `failed` + **可回代反例** → 义务被反驳 (refuted), 属科学结论;
     - 声明 `failed` 却给不出反例 → blocked, **不得**当作数学反驳;
     - `estimate_effect` 类义务的失败只表示"未支持结论", 区间跨零不等于效应不存在;
@@ -409,6 +409,10 @@ def obligation_disposition_for(result: Any, obligation: Any) -> ObligationDispos
     counterexample = dict(getattr(result, "counterexample", None) or {})
 
     if validation == ValidationStatus.verified:
+        if getattr(result, 'scope', 'target') != 'target' and kind != 'check_definition':
+            return ObligationDisposition(action='blocked', validation_status=ValidationStatus.unknown,
+                reason=detail or '局部核验不能关闭完整目标',
+                recovery_condition='将定义与其性质拆开；补充完整目标的可执行编码')
         return ObligationDisposition(
             action="closed", validation_status=validation,
             status=getattr(result, "status", None),
@@ -731,6 +735,7 @@ def claim_state_for(claim: Any, obligations: list[Any], records: list[Any],
                    if int(getattr(o, "claim_version", 1) or 1) == claim_version]
     records = [r for r in records
                if not getattr(r, "stale", False)
+               and getattr(r, "usable", None) is not False
                and int(getattr(r, "claim_version", 1) or 1) == claim_version]
     required = [o for o in obligations if getattr(o, "required", True)]
     open_required = [o for o in required
@@ -759,7 +764,8 @@ def claim_state_for(claim: Any, obligations: list[Any], records: list[Any],
             note=f"被反例否决: {witness}")
 
     if required and not open_required and not blocked and len(closed) == len(required):
-        aligned_records = [r for r in records if _is_aligned(r)]
+        aligned_records = [r for r in records if _is_aligned(r)
+                           and getattr(r, 'scope', VerificationScope.target) == VerificationScope.target]
         estimate = claim.effect_estimate or {}
         if estimate and not estimate.get("ci_excludes_zero", True):
             return ClaimStateDisposition(

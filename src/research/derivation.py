@@ -28,6 +28,7 @@ TOOL_ACCEPTANCE = ("sympy", "z3", "lean", "stats")
 KIND_TOOLS: dict[str, tuple[str, ...]] = {
     "prove_inequality": ("sympy", "z3"),
     "prove_identity": ("sympy",),
+    "check_definition": ("sympy",),
     "prove_monotonicity": ("sympy",),
     "equality_condition": ("sympy",),
     "estimate_effect": ("stats",),

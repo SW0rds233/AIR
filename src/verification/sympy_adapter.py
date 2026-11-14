@@ -5,6 +5,8 @@ from __future__ import annotations
 import ast
 import re
 
+from src.verification.definitions import check_definition
+
 from src.verification.schemas import VerificationResult, VerificationStatus
 
 MAX_LEN = 2000
@@ -702,6 +704,7 @@ def _exact_witness(value):
 OPERATIONS = {
     "simplify": op_simplify,
     "prove_identity": op_prove_identity,
+    "check_definition": check_definition,
     "prove_inequality": op_prove_inequality,
     "prove_nonnegative": op_prove_nonnegative,
     "prove_monotonicity": op_prove_monotonicity,

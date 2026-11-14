@@ -1022,6 +1022,8 @@ class VerificationRecord(BaseModel):
     premises: list[str] = Field(default_factory=list)
     output_digest: str = ""
     raw_output: str = ""
+    detail: str = ""  # retain parse/unsupported/execution diagnostics
+    usable: bool | None = None  # None for legacy records; distinct from freshness
     status: str = ""  # 见 src.verification.schemas.VerificationStatus
     validation_status: ValidationStatus = ValidationStatus.unchecked
     support_kind: SupportKind = SupportKind.none
@@ -1030,6 +1032,7 @@ class VerificationRecord(BaseModel):
     certificate: str = ""
     counterexample: dict[str, Any] = Field(default_factory=dict)
     stale: bool = False
+    stale_reason: str = ""
     created_at: str = Field(default_factory=utcnow)
 
 

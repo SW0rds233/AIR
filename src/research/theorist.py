@@ -37,6 +37,9 @@ class Plan:
 
 
 def _strategy_for(claim: Claim) -> str:
+    from src.verification.definitions import is_definition_assignment
+    if is_definition_assignment(claim):
+        return "definition_audit"
     if claim.expr and claim.wrt:
         return "monotonicity_differentiation"
     if claim.relation in (Relation.ge, Relation.le, Relation.gt, Relation.lt):
@@ -49,6 +52,10 @@ def _strategy_for(claim: Claim) -> str:
 
 
 def _steps_for(claim: Claim, strategy: str) -> list[ProofStep]:
+    if strategy == "definition_audit":
+        return [ProofStep(index=1, statement="核对定义两端的符号声明与函数元数", rule="definition"),
+                ProofStep(index=2, statement="单独核查定义域、量纲与适用条件；附带推论另建证明目标",
+                          rule="scope_check")]
     if strategy == "monotonicity_differentiation":
         return [
             ProofStep(index=1, statement=f"考察 {claim.expr} 关于 {claim.wrt} 的导数",
@@ -143,10 +150,12 @@ def _check_for(obligation: ProofObligation, claim: Claim, available: dict[str, b
         return PlannedCheck("sympy", "equality_condition",
                             {"lhs": claim.lhs, "rhs": claim.rhs, "variables": claim.variables,
                              "assumptions": assumptions})
-    if obligation.kind == "prove_identity":
+    if obligation.kind in {"prove_identity", "check_definition"}:
         if not _avail("sympy"):
             return None
-        return PlannedCheck("sympy", "prove_identity",
+        from src.verification.definitions import is_definition_assignment
+        operation = "check_definition" if is_definition_assignment(claim) else "prove_identity"
+        return PlannedCheck("sympy", operation,
                             {"lhs": claim.lhs, "rhs": claim.rhs, "variables": claim.variables,
                              "assumptions": assumptions})
     if obligation.kind == "check_implication":

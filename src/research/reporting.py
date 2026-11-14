@@ -102,6 +102,7 @@ def verifications_payload(verifications) -> list[dict]:
             "id": v.id, "claim_id": v.claim_id, "tool": v.tool,
             "status": v.status, "validation_status": v.validation_status.value,
             "scope": v.scope.value, "stale": v.stale,
+            "detail": v.detail, "usable": v.usable, "stale_reason": v.stale_reason,
             "certificate": v.certificate,
             "counterexample": v.counterexample or {},
         }
