@@ -126,7 +126,7 @@ def _review_before_delivery(state, task_order, max_revisions, max_rounds, remain
                 attempts[issue_id] = attempts.get(issue_id, 0) + 1
     issues = [issue for issue in issues if attempts.get(issue.issue_id, 0) < 2]
     if not issues:
-        return None, "审阅未通过；同一问题已尝试两次修复，需要新的依据或人工确认"
+        return None, "审阅未通过；同一问题已尝试两次修复，保留未决，需新的依据后再处理"
     return AgentTask(agent="writing", objective="按最后一轮审阅修订相关章节并重新提交审阅",
         hints={"review_cycle": True, "need_kind": "manuscript_revision", "review_task_id": review_id,
                "review_issue_ids": [i.issue_id for i in issues],
@@ -508,13 +508,34 @@ class TeamRun:
             remaining_budget=self.runtime.run_budget,
             clarifications_asked=state.clarifications, objectives=state.objectives,
             pending_retries=state.pending_retries, dispatched=state.dispatched)
-        if decision.decision == DecisionKind.deliver:
+        # Review is a workflow checkpoint, not a side effect of an empty need queue.
+        # Leave the final five rounds for synthesis -> review -> bounded revision.
+        resumable = any(result.pending_resume for result in state.results.values())
+        closing = (state.rounds >= max(1, self.max_rounds - 4)
+                   or decision.decision == DecisionKind.deliver)
+        closing = closing and any(row.get("agent") == "writing" for row in state.plan.tasks)
+        if not resumable and decision.decision in {
+                DecisionKind.dispatch, DecisionKind.deliver, DecisionKind.stop_with_report}:
             final_review = _final_review_task(state.results, self.outcome.task_order, self._latest_manuscript())
-            if final_review is not None and state.rounds < self.max_rounds:
+            writer_pos, _, _ = _review_positions(state.results, self.outcome.task_order)
+            research_pos = max((i for i, tid in enumerate(self.outcome.task_order)
+                                if tid in state.results and state.results[tid].agent in {
+                                    "reasoning", "modeling", "evidence", "validation"}),
+                               default=-1)
+            synthesis_tried = any((row.get("hints") or {}).get("closing_synthesis")
+                                  for row in state.plan.tasks)
+            if closing and not synthesis_tried and (writer_pos < 0 or research_pos > writer_pos):
+                decision = SupervisorDecision(decision=DecisionKind.dispatch,
+                    tasks=[AgentTask(agent="writing", objective="汇总最终推导、证据边界与可执行实验建议，提交完整稿件供独立审阅",
+                        hints={"closing_synthesis": True},
+                        acceptance_criteria=["区分已核验定理、定义、模型假设和未决问题；不得将待验证建议写成已执行结果"])],
+                    reason="预留收尾轮次，停止扩展研究需求并综合已有成果")
+            elif final_review is not None and state.rounds <= self.max_rounds:
+                planned_review = next((task for task in decision.tasks if task.agent == "review"), None)
                 decision = SupervisorDecision(
-                    decision=DecisionKind.dispatch, tasks=[final_review],
-                    reason="最后一版稿件晚于审阅，先复审再评估交付")
-            elif final_review is None:
+                    decision=DecisionKind.dispatch, tasks=[planned_review or final_review],
+                    reason="新稿件已就绪，先独立审阅再继续研究或交付")
+            elif final_review is None and (closing or decision.decision == DecisionKind.deliver):
                 revision, reason = _review_before_delivery(
                     state, self.outcome.task_order, self.max_review_revisions, self.max_rounds,
                     self.runtime.run_budget)
@@ -523,6 +544,9 @@ class TeamRun:
                                                   reason="审阅未通过且仍有预算，先修订再复审")
                 elif reason:
                     decision = SupervisorDecision(decision=DecisionKind.stop_with_report, reason=reason)
+                elif closing:
+                    decision = SupervisorDecision(decision=DecisionKind.deliver,
+                        reason="完成收尾写作与审阅检查点；按真实证据和未决项评估交付")
         self.outcome.decisions.append(decision)
         self.runtime.emit("supervisor_decision", {
             "round": state.rounds, "decision": decision.decision.value,

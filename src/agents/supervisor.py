@@ -373,10 +373,11 @@ class SupervisorAgent:
     prompt_version = "supervisor/v1"
 
     def __init__(self, *, llm: Any | None = None, max_plan_version: int = 8,
-                 max_tasks_per_round: int = 3) -> None:
+                 max_tasks_per_round: int = 3, enable_figures: bool = False) -> None:
         self.llm = llm
         self.max_plan_version = max_plan_version
         self.max_tasks_per_round = max(1, max_tasks_per_round)
+        self.enable_figures = enable_figures
 
     # ---- 理解任务 ----
     def brief(self, request: str, *, project_id: str = "", problem_id: str = "",
@@ -393,6 +394,8 @@ class SupervisorAgent:
         main_question = _compose_main_question(request, attachment_text)
         attachment_question = _compose_main_question("", attachment_text)
         kinds, deliverables, basis = classify_request(main_question)
+        if not self.enable_figures:
+            deliverables = [item for item in deliverables if item != "figures"]
         quantifier, quantifier_known = _detect_quantifier(main_question)
         brief = ResearchBrief(
             project_id=project_id, problem_id=problem_id,
@@ -438,6 +441,8 @@ class SupervisorAgent:
             brief.success_conditions = list(intent.get("success_conditions") or [])
         if model_proposed:
             for index, item in enumerate(model_proposed):
+                if item["owner"] == "figures" and not self.enable_figures:
+                    continue
                 brief.add_subquestion(
                     statement=item["statement"], kind=item["kind"],
                     owner=item["owner"], priority=index, needs=item["needs"])
@@ -616,7 +621,7 @@ class SupervisorAgent:
         task_by_sub: dict[str, str] = {}
         depends = dict(depends_on or {})
         for sub in sorted(brief.subquestions, key=lambda s: s.priority):
-            if not sub.owner:
+            if not sub.owner or (sub.owner == "figures" and not self.enable_figures):
                 continue
             task = AgentTask(
                 agent=sub.owner,
@@ -686,6 +691,21 @@ class SupervisorAgent:
                              for r in results.values() if r.agent == "evidence")
         evidence_exhausted = evidence_count >= 8 or evidence_calls >= 150
         evidence_slots = max(0, 8 - evidence_count)
+        # A new claim ID is not a new research budget. Keep room for synthesis/review.
+        reasoning_count = sum(r.agent == "reasoning" and not r.payload.get("evidence_support_only")
+                              for r in results.values())
+        reasoning_slots = max(0, 12 - reasoning_count)
+        root_attempts: dict[str, int] = {}
+        for row in plan.tasks:
+            hints = row.get("hints") or {}
+            root = hints.get("root_claim_id") or hints.get("claim_id")
+            if root and row.get("agent") == "reasoning" and row.get("task_id") in results:
+                root_attempts[root] = root_attempts.get(root, 0) + 1
+
+        def reasoning_allowed(hints):
+            root = hints.get("root_claim_id") or hints.get("claim_id")
+            # Initial verification, one encoding repair, then verify the repaired version.
+            return reasoning_slots > 0 and root_attempts.get(root, 0) < 3
         pending_set = {p for p in pending if p}
         running_set = {r for r in running if r}
         done_ids = {task_id for task_id, result in results.items()
@@ -754,6 +774,30 @@ class SupervisorAgent:
             return SupervisorDecision(decision=DecisionKind.deliver,
                                       reason="交付条件已满足")
 
+        # Finished (including blocked) prerequisites release downstream work. In
+        # particular, a ready manuscript/review must not wait for an endless need queue.
+        attempted_keys = {_assignment_key(brief, result.agent, _objective_of(task_id))
+                          for task_id, result in results.items()
+                          if result.agent and _objective_of(task_id)}
+        settled = completed | set(results) | {tid for tid, key in plan_keys.items()
+                                              if key in attempted_keys}
+        settled |= {row["task_id"] for row in plan.tasks
+                    if (row.get("agent") == "evidence" and evidence_exhausted)
+                    or (row.get("agent") == "figures" and not self.enable_figures)
+                    or (row.get("agent") == "reasoning" and not reasoning_allowed(row.get("hints") or {}))}
+        ready_ids = set(plan.ready(settled, running_set))
+        closing = [row["task_id"] for row in plan.tasks
+                   if row.get("agent") in {"writing", "review"}
+                   and row["task_id"] in ready_ids and row["task_id"] not in completed
+                   and plan_keys.get(row["task_id"]) not in attempted_keys | dispatched_keys]
+        closing.sort(key=lambda tid: next(row.get("agent") != "review" for row in plan.tasks
+                                         if row["task_id"] == tid))
+        if closing:
+            tasks, _ = self._tasks_for(plan, closing[:1], remaining_budget)
+            if tasks:
+                return SupervisorDecision(decision=DecisionKind.dispatch, tasks=tasks,
+                    reason="先完成已就绪的写作/审阅检查点，研究缺口继续保留")
+
         # 2. 需求 -> 任务 (只派"计划里还没有的")
         needs = list(open_needs)
         needs.sort(key=lambda need: 0 if need.kind == NeedKind.review else
@@ -765,6 +809,8 @@ class SupervisorAgent:
             if key and row.get("task_id") in results:
                 repair_attempts[key] = repair_attempts.get(key, 0) + 1
         needs = [need for need in needs if not (need.owner == "evidence" and evidence_exhausted)
+                 and (need.owner != "figures" or self.enable_figures)
+                 and (need.owner != "reasoning" or reasoning_allowed(need.hints))
                  and repair_attempts.get(need.hints.get("repair_key", ""), 0) < 2]
         if needs:
             issue_attempts: dict[str, int] = {}
@@ -782,12 +828,24 @@ class SupervisorAgent:
             if tasks:
                 limited = []
                 for task in tasks:
+                    if len(limited) >= self.max_tasks_per_round:
+                        break
+                    if task.agent == "reasoning":
+                        if not reasoning_allowed(task.hints):
+                            continue
+                        reasoning_slots -= 1
+                        root = task.hints.get("root_claim_id") or task.hints.get("claim_id")
+                        if root:
+                            root_attempts[root] = root_attempts.get(root, 0) + 1
                     if task.agent == "evidence":
                         if evidence_slots <= 0:
                             continue
                         evidence_slots -= 1
                     limited.append(task)
                 tasks = limited[: self.max_tasks_per_round]
+                checkpoint = next((task for task in tasks if task.agent in {"writing", "review"}), None)
+                if checkpoint:
+                    tasks = [checkpoint]
             if tasks:
                 return SupervisorDecision(
                     decision=DecisionKind.dispatch,
@@ -814,8 +872,16 @@ class SupervisorAgent:
         if evidence_exhausted:
             # Exhausted research may remain unresolved, but must not starve the manuscript.
             settled |= {row["task_id"] for row in plan.tasks if row.get("agent") == "evidence"}
+        settled |= {row["task_id"] for row in plan.tasks if row.get("agent") == "reasoning"
+                    and not reasoning_allowed(row.get("hints") or {})}
+        settled |= {row["task_id"] for row in plan.tasks
+                    if row.get("agent") == "figures" and not self.enable_figures}
         ready = [t for t in plan.ready(settled, running_set)
                  if t not in completed
+                 and not any(row.get("task_id") == t and row.get("agent") == "figures"
+                             and not self.enable_figures for row in plan.tasks)
+                 and not any(row.get("task_id") == t and row.get("agent") == "reasoning"
+                             and not reasoning_allowed(row.get("hints") or {}) for row in plan.tasks)
                  and not (evidence_exhausted and any(row.get("task_id") == t and
                            row.get("agent") == "evidence" for row in plan.tasks))
                  and (plan_keys.get(str(t), "") not in attempted_keys
@@ -832,6 +898,13 @@ class SupervisorAgent:
             tasks, skipped = self._tasks_for(plan, ready, remaining_budget)
             limited = []
             for task in tasks:
+                if task.agent == "reasoning":
+                    if not reasoning_allowed(task.hints):
+                        continue
+                    reasoning_slots -= 1
+                    root = task.hints.get("root_claim_id") or task.hints.get("claim_id")
+                    if root:
+                        root_attempts[root] = root_attempts.get(root, 0) + 1
                 if task.agent == "evidence":
                     if evidence_slots <= 0:
                         continue
@@ -863,6 +936,8 @@ class SupervisorAgent:
             note = (f"以下角色只交回部分成果: {', '.join(partial)}" if partial else "")
             if evidence_exhausted:
                 note += "; 证据预算达到上限（8 个任务/150 次模型调用），剩余缺口保留，停止重复检索"
+            if reasoning_count >= 12:
+                note += "; 推理达到 12 个任务上限，未证明命题保留为未决，不再派生引理"
             return SupervisorDecision(decision=DecisionKind.deliver,
                                       reason="交付形态所需的角色成果齐备",
                                       note=note)

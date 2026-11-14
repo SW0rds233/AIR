@@ -100,6 +100,10 @@ def theory_validity_gate(
             )
 
     for claim in claims:
+        if checked_definition(claim, in_scope):
+            # A declared notation is not a theorem awaiting proof. Its encoding
+            # certificate never upgrades scientific status to supported.
+            continue
         if claim.status in (ClaimStatus.proposed, ClaimStatus.in_progress):
             unresolved.append(f"结论未定 {claim.id}: {claim.statement}")
             continue
@@ -240,11 +244,31 @@ def _normalize_expr(text: str) -> str:
     return "".join(str(text or "").split()).replace("**", "^")
 
 
+def checked_definition(claim: Claim, records: list[VerificationRecord]) -> bool:
+    from src.verification.definitions import is_definition_assignment
+    if claim.statement_role != "definition" or claim.formal_spec or not is_definition_assignment(claim):
+        return False
+    return any(record.claim_id == claim.id and record.claim_version == claim.version
+               and not record.stale and record.status == "passed" and record.scope.value == "step"
+               and record.tool == "sympy" and ":=" in record.certificate
+               and record.arguments.get("lhs") == claim.lhs and record.arguments.get("rhs") == claim.rhs
+               and record.arguments.get("variables") == claim.variables
+               and record.arguments.get("assumptions", {}) == claim.variable_domains
+               for record in records)
+
+
 def _aligned(record: VerificationRecord, claim: Claim) -> bool:
     """核对验证请求编码的变量域/关系/表达式与原命题是否一致 (防止陈述被偷换)。"""
     if record.scope.value != 'target' or record.usable is False or record.claim_version != claim.version:
         return False
     args = record.arguments or {}
+    if claim.formal_spec:
+        from src.research.theorist import _domain_premises
+        spec = claim.formal_spec
+        expected = spec.premises + [f"{v} {op} 0" for v, op in _domain_premises(claim.variable_domains)]
+        if (args.get("premises") != expected or args.get("conclusion") != spec.conclusion
+                or args.get("variables") != spec.variables):
+            return False
     # 设计/计数类命题: 判定输入 (v,k,λ,b,r) 必须与命题记录的一致, 否则"换一组
     # 参数再引用旧证书"就能伪造结论 (陈述偷换)。**先于**空参数短路检查。
     if claim.design_v is not None or claim.design_k is not None:
@@ -275,7 +299,7 @@ def _aligned(record: VerificationRecord, claim: Claim) -> bool:
         return False
     if args.get("direction") and claim.direction and args["direction"] != claim.direction:
         return False
-    if args.get("variables") and claim.variables and list(args["variables"]) != list(claim.variables):
+    if not claim.formal_spec and args.get("variables") and claim.variables and list(args["variables"]) != list(claim.variables):
         return False
     # 域/量词一致性
     assumptions = args.get("assumptions") or {}

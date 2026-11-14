@@ -31,7 +31,7 @@ def is_definition_assignment(claim) -> bool:
 def check_definition(arguments: dict) -> VerificationResult:
     """Check declaration closure and function arity without eval/sympify.
 
-    Supports scalar arithmetic and an outer Iverson bracket. Quantified sums,
+    Supports scalar arithmetic and nested Iverson factors. Quantified sums,
     set builders, dimensions, domains and empirical validity remain separate.
     """
     def result(status, detail, certificate=''):
@@ -60,16 +60,46 @@ def check_definition(arguments: dict) -> VerificationResult:
         if indicator:
             rhs_text = indicator.group(1)
             rhs_text = re.sub(r'(?<![<>=!])=(?!=)', '==', rhs_text)
+        else:
+            rhs_text = re.sub(r'1\[([^\[\]]+)\]', lambda match:
+                '1[' + re.sub(r'(?<![<>=!])=(?!=)', '==', match.group(1)) + ']', rhs_text)
         rhs = ast.parse(rhs_text.strip(), mode='eval').body
         allowed = (ast.Name, ast.Load, ast.Constant, ast.Call, ast.BinOp, ast.UnaryOp,
             ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod, ast.USub, ast.UAdd,
             ast.Compare, ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
-            ast.BoolOp, ast.And, ast.Or, ast.Not)
-        declared = set(arguments.get('variables') or [])
+            ast.BoolOp, ast.And, ast.Or, ast.Not, ast.Subscript)
+        declared = set()
         arities, scalar_names = {}, set()
+        declarations = arguments.get('variables') or []
+        if len(declarations) > 100:
+            raise ValueError('符号声明超过 100 个')
+        for declaration in declarations:
+            node = ast.parse(str(declaration), mode='eval').body
+            if isinstance(node, ast.Name):
+                declared.add(node.id)
+            elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                  and node.args and not node.keywords
+                  and all(isinstance(arg, ast.Name) for arg in node.args)):
+                if node.func.id in arities and arities[node.func.id] != len(node.args):
+                    raise ValueError('函数声明的参数个数不一致')
+                declared.add(node.func.id)
+                declared.update(arg.id for arg in node.args)
+                arities[node.func.id] = len(node.args)
+            else:
+                raise ValueError('声明须为符号或函数签名')
+        def predicate(node):
+            return isinstance(node, ast.Compare) or (isinstance(node, ast.BoolOp)
+                and all(predicate(value) for value in node.values)) or (
+                isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not) and predicate(node.operand))
         def visit(node, depth=0):
             if depth > 50 or not isinstance(node, allowed):
                 raise ValueError(f'不支持的定义语法: {type(node).__name__}')
+            if isinstance(node, ast.Subscript):
+                if not (isinstance(node.value, ast.Constant) and type(node.value.value) is int
+                        and node.value.value == 1 and predicate(node.slice)):
+                    raise ValueError('仅支持 1[布尔条件] 指示函数，不支持任意索引')
+                visit(node.slice, depth + 1)
+                return
             if isinstance(node, ast.Name):
                 if node.id not in declared:
                     raise ValueError(f'未声明符号: {node.id}')
@@ -97,10 +127,6 @@ def check_definition(arguments: dict) -> VerificationResult:
             raise ValueError('同一符号不能同时用作标量和函数')
         if any(isinstance(node, ast.Name) and node.id == defined for node in ast.walk(rhs)):
             raise ValueError('右端引用被定义对象，需单独给出递归/隐式定义的存在唯一性条件')
-        def predicate(node):
-            return isinstance(node, ast.Compare) or (isinstance(node, ast.BoolOp)
-                and all(predicate(value) for value in node.values)) or (
-                isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not) and predicate(node.operand))
         if indicator and not predicate(rhs):
             raise ValueError('指示函数必须包含布尔条件')
         encoding = ast.unparse(rhs)

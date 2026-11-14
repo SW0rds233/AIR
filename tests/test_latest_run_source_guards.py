@@ -103,10 +103,10 @@ def test_reviewer_flags_published_but_insufficient_citation():
                for issue in findings)
 
 
-def test_empirical_question_does_not_prove_unsourced_model_identity():
+def test_empirical_question_does_not_prove_unsourced_causal_formula():
     claim = Claim(
         id="clm-identity", statement="候选模型中的恒等式",
-        claim_type="descriptive", strategy="identity_simplification",
+        claim_type="causal", strategy="identity_simplification",
         study={"design": "theory"}, lhs="x+x", rhs="2*x", relation="==",
         origin="proposed",
     )

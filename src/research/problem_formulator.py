@@ -227,17 +227,20 @@ def _applied_obligations(claim: Claim, ver: int,
 
 def _obligations_for(claim: Claim, wants_equality: bool, method_available: dict[str, bool]) -> list[ProofObligation]:
     obligations: list[ProofObligation] = []
-    use_sympy = method_available.get("sympy", True)
-    method = "sympy" if use_sympy else "manual"
+    method = "sympy"  # Missing tools stay unsupported; do not create a human-only dependency.
     # 义务绑定到具体命题版本: 命题换代后义务不得沿用
     ver = claim.version
 
     from src.research.classification import is_theoretical_claim
     theoretical = is_theoretical_claim(claim)
+    if theoretical and claim.formal_spec and claim.claim_type in {ClaimType.definitional, ClaimType.descriptive}:
+        return [ProofObligation(statement="核验显式前提下的结论；前提的现实适用性不在证明范围内",
+                    kind="check_implication", acceptance_method="z3",
+                    claim_id=claim.id, claim_version=ver)]
     if theoretical and not (claim.lhs and claim.rhs) and not (claim.expr and claim.wrt):
         return [ProofObligation(
             statement=f"在明确变量域、前提与量词下独立核查论证: {claim.statement}",
-            kind="formal_argument", acceptance_method="informal_review",
+            kind="formal_argument", acceptance_method="formal_encoding",
             claim_id=claim.id, claim_version=ver,
             detail="尚无可核验编码；需补充逐步推导与定理条件，不能以文献数量或自述证明关闭")]
 
@@ -341,9 +344,6 @@ def _obligations_for(claim: Claim, wants_equality: bool, method_available: dict[
         if is_definition_assignment(claim):
             return [ProofObligation(statement="核对定义编码（不证明附带推论）",
                         kind="check_definition", acceptance_method=method,
-                        claim_id=claim.id, claim_version=ver),
-                    ProofObligation(statement="核查定义的域、量纲、适用条件；附带推论须拆成独立证明目标",
-                        kind="definition_scope", acceptance_method="manual",
                         claim_id=claim.id, claim_version=ver)]
         obligations.append(ProofObligation(
             statement=f"核验恒等: {claim.lhs} = {claim.rhs}",

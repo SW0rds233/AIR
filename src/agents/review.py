@@ -54,7 +54,8 @@ _CATEGORY_WEIGHTS = {"science": 30, "fidelity": 15, "citation": 15,
 
 def judge_review(issues: list[ReviewIssueRef], *, threshold: int = 80,
                  semantic_reviewed: bool = True,
-                 category_scores: dict[str, Any] | None = None) -> dict[str, Any]:
+                 category_scores: dict[str, Any] | None = None,
+                 excluded_categories: set[str] | None = None) -> dict[str, Any]:
     """Hard scientific violations cannot be averaged away by presentation scores."""
     if not 0 <= threshold <= 100:
         raise ValueError("review threshold must be between 0 and 100")
@@ -62,11 +63,14 @@ def judge_review(issues: list[ReviewIssueRef], *, threshold: int = 80,
         return {"score": 0, "threshold": threshold, "decision": "unreviewed",
                 "accepted": False, "category_scores": {}, "fatal_issue_ids": [],
                 "semantic_reviewed": False}
+    weights = {key: value for key, value in _CATEGORY_WEIGHTS.items()
+               if key not in (excluded_categories or set()) & {"figure"}}
+    issues = [issue for issue in issues if issue.category in weights]
     fatal = [i for i in issues if i.severity == IssueSeverity.blocking or
              (i.severity == IssueSeverity.major and i.category not in
               {"readability", "figure", "completeness"})]
     scores: dict[str, int] = {}
-    for category, weight in _CATEGORY_WEIGHTS.items():
+    for category, weight in weights.items():
         points = 100 - sum({IssueSeverity.major: 30, IssueSeverity.minor: 10,
                             IssueSeverity.advisory: 3,
                             IssueSeverity.blocking: 100}[issue.severity]
@@ -76,7 +80,7 @@ def judge_review(issues: list[ReviewIssueRef], *, threshold: int = 80,
                 and 0 <= proposed <= 100:
             points = min(points, int(proposed))
         scores[category] = max(0, points)
-    score = round(sum(scores[k] * weight for k, weight in _CATEGORY_WEIGHTS.items()) / 100)
+    score = round(sum(scores[k] * weight for k, weight in weights.items()) / sum(weights.values()))
     decision = ("major_revision" if fatal else
                 "unreviewed" if not semantic_reviewed else
                 "accepted" if score >= threshold else "revision")
@@ -171,6 +175,8 @@ class ReviewAgent(AgentBase):
         # 历史草稿仍可供用户回看，但独立审阅只针对当前版本。把多版正文拼在
         # 同一个提示词里会制造“两个版本并存”的假问题，且可能截断最新稿。
         context = _current_manuscript_context(context)
+        excluded = set() if context.objects.get("figure") else {"figure"}
+        categories = [category for category in REVIEW_CATEGORIES if category not in excluded]
         issues: list[ReviewIssueRef] = []
         parse_note = ""
         unresolved: list[str] = []
@@ -187,6 +193,7 @@ class ReviewAgent(AgentBase):
                 f"# 待审稿件\n{draft or '(没有稿件正文)'}\n"
                 f"# 上下文\n{context_summary(context)}\n"
                 + _review_materials(context)
+                + ("\n当前稿件没有配图；figure 项不适用，不因缺图扣分或要求配图。" if excluded else "")
             )
             try:
                 text, _ = self.tool_loop(task, runtime, tools, usage,
@@ -227,11 +234,11 @@ class ReviewAgent(AgentBase):
                     isinstance(llm_scores.get(category), (int, float))
                     and not isinstance(llm_scores.get(category), bool)
                     and 0 <= llm_scores[category] <= 100
-                    for category in REVIEW_CATEGORIES)
+                    for category in categories)
                 explained_low_scores = complete_scores and all(
                     llm_scores[category] >= int((task.hints or {}).get("review_threshold", 80))
                     or category_notes.get(category)
-                    for category in REVIEW_CATEGORIES)
+                    for category in categories)
                 semantic_reviewed = (isinstance(payload.get("issues"), list)
                                      and complete_scores and explained_low_scores and not grounding_conflicts)
                 date_conflicts = _review_date_conflicts(payload)
@@ -243,13 +250,15 @@ class ReviewAgent(AgentBase):
 
         deterministic = deterministic_issues(context)
         issues = _merge_issues(issues, deterministic)
+        issues = [issue for issue in issues if issue.category not in excluded]
         if parse_note:
             unresolved.append(parse_note)
 
         threshold = int((task.hints or {}).get("review_threshold", 80))
         judgement = judge_review(issues, threshold=threshold,
                                  semantic_reviewed=semantic_reviewed,
-                                 category_scores=llm_scores)
+                                 category_scores=llm_scores, excluded_categories=excluded)
+        judgement["not_applicable_categories"] = sorted(excluded)
         from src.publication.manuscript_state import manuscript_identity
         manuscript = (context.objects.get("manuscript") or [{}])[-1]
         judgement["reviewed_manuscript"] = manuscript_identity(manuscript)
@@ -358,11 +367,12 @@ def deterministic_issues(context: ContextPack) -> list[ReviewIssueRef]:
     for claim in claims:
         support_refs = as_list_of_str(claim.get("support_refs"))
         status = str(claim.get("status", "") or "")
-        verified_identity = (claim.get("claim_type") == "definitional" and claim.get("relation") == "=="
+        verified_identity = (claim.get("claim_type") in {"definitional", "descriptive"}
             and any(v.get("claim_id") == claim.get("id")
                     and v.get("claim_version") == claim.get("version", 1)
                     and v.get("status") == "passed" and not v.get("stale")
                     and v.get("scope", "target") == "target"
+                    and _aligned_math_record(v, claim)
                     for v in context.objects.get("verification") or []))
         if status in ("supported", "verified") and not support_refs and not verified_identity:
             issues.append(_issue(
@@ -450,6 +460,15 @@ def _has_certificate(block: dict[str, Any]) -> bool:
 def _overclaims(text: str) -> bool:
     from src.publication.claims import asserts_completed_proof
     return asserts_completed_proof(text)
+
+
+def _aligned_math_record(record, claim) -> bool:
+    from src.research.acceptance import _aligned
+    from src.research.schemas import Claim, VerificationRecord
+    try:
+        return _aligned(VerificationRecord.model_validate(record), Claim.model_validate(claim))
+    except (ValueError, TypeError):
+        return False
 
 
 def _unit_conflict(caption: str, figure: dict[str, Any]) -> bool:
@@ -641,7 +660,7 @@ def _review_materials(context):
         "review_date": _review_date(),
         "citation_numbers": citations,
         "models": context.objects.get("model") or [],
-        "claims": [{k: c.get(k) for k in ("id", "version", "claim_type", "statement", "status", "assurance",
+        "claims": [{k: c.get(k) for k in ("id", "version", "claim_type", "statement", "statement_role", "formal_spec", "status", "assurance",
                                         "verification_scope", "reasoning", "premises", "mechanism_links")}
                    for c in context.objects.get("claim") or []],
         "verifications": context.objects.get("verification") or [],

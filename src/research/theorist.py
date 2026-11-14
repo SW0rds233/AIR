@@ -37,6 +37,8 @@ class Plan:
 
 
 def _strategy_for(claim: Claim) -> str:
+    if claim.formal_spec:
+        return "conditional_implication"
     from src.verification.definitions import is_definition_assignment
     if is_definition_assignment(claim):
         return "definition_audit"
@@ -52,6 +54,12 @@ def _strategy_for(claim: Claim) -> str:
 
 
 def _steps_for(claim: Claim, strategy: str) -> list[ProofStep]:
+    if strategy == "conditional_implication":
+        spec = claim.formal_spec
+        return [ProofStep(index=1, statement="声明变量域: " + str(spec.variables), rule="declaration"),
+                ProofStep(index=2, statement="假设: " + " 且 ".join(spec.premises), rule="assumption"),
+                ProofStep(index=3, statement="检查前提可满足，再搜索结论的反模型: " + spec.conclusion,
+                          justification="前提一致且前提与结论否定不可满足时，条件蕴含成立", rule="implication")]
     if strategy == "definition_audit":
         return [ProofStep(index=1, statement="核对定义两端的符号声明与函数元数", rule="definition"),
                 ProofStep(index=2, statement="单独核查定义域、量纲与适用条件；附带推论另建证明目标",
@@ -159,7 +167,11 @@ def _check_for(obligation: ProofObligation, claim: Claim, available: dict[str, b
                             {"lhs": claim.lhs, "rhs": claim.rhs, "variables": claim.variables,
                              "assumptions": assumptions})
     if obligation.kind == "check_implication":
-        args = obligation_detail_arguments(obligation)
+        args = (claim.formal_spec.model_dump() if claim.formal_spec
+                else obligation_detail_arguments(obligation))
+        if claim.formal_spec:
+            # Also preserve domain restrictions declared outside the formal fragment.
+            args["premises"] += [f"{v} {op} 0" for v, op in _domain_premises(claim.variable_domains)]
         if not args:
             # 没有可核验编码 → 明确返回 None, 由调用方标为 unsupported, 不假装通过
             return None
@@ -183,7 +195,7 @@ def _domain_premises(domains: dict[str, str]) -> list[tuple[str, str]]:
     ]
     premises: list[tuple[str, str]] = []
     for var, domain in (domains or {}).items():
-        low = str(domain).lower()
+        low = str(domain).strip().lower()
         for names, op in mapping:
             if low in names:
                 premises.append((var, op))

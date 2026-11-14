@@ -908,6 +908,14 @@ class ProofObligation(BaseModel):
         return self.validation_status not in NON_SCIENTIFIC_STATUSES
 
 
+class FormalSpec(BaseModel):
+    """An explicit conditional theorem; premises are assumptions, not empirical facts."""
+
+    premises: list[str] = Field(default_factory=list, max_length=32)
+    conclusion: str = Field(min_length=1, max_length=4000)
+    variables: dict[str, Literal["Real", "Int"]]
+
+
 class Claim(BaseModel):
     id: str = Field(default_factory=lambda: new_id("clm"))
     version: int = 1
@@ -917,6 +925,8 @@ class Claim(BaseModel):
     problem_id: str = ""
     claim_type: ClaimType = ClaimType.definitional
     strategy: str = ""  # 推理方法与命题语义类型是两个维度。
+    statement_role: Literal["assertion", "definition"] = "assertion"
+    formal_spec: FormalSpec | None = None
     claim_type_input: str = ""  # 兼容旧记录时保留原始误填值以便审计。
     premises: list[str] = Field(default_factory=list)
     mechanism_links: list[str] = Field(default_factory=list)
@@ -982,6 +992,24 @@ class Claim(BaseModel):
 
     @model_validator(mode="after")
     def _guard_supported(self) -> Claim:
+        if self.formal_spec:
+            spec = self.formal_spec
+            if self.lhs or self.rhs or self.expr or self.wrt:
+                raise ValueError("formal_spec 是完整条件命题，不能同时携带另一组 lhs/rhs 或单调性目标")
+            if self.claim_type not in {ClaimType.definitional, ClaimType.descriptive}:
+                raise ValueError("formal_spec 只核验条件数学命题，不能证明经验因果效应")
+            if self.variables and set(self.variables) != set(spec.variables):
+                raise ValueError("formal_spec 与命题的变量声明不一致")
+            for name, domain in self.variable_domains.items():
+                low = domain.strip().lower()
+                if name not in spec.variables or low not in {
+                        "real", "reals", "r", "int", "integer", "z", "positive", "pos",
+                        "nonnegative", "nonneg", "r>=0", "nonzero", "non_zero"}:
+                    raise ValueError("formal_spec 的域须明确编码为 Real/Int 及前提约束")
+                if low in {"int", "integer", "z"} and spec.variables[name] != "Int":
+                    raise ValueError("整数域声明与 formal_spec 不一致")
+                if low in {"real", "reals", "r"} and spec.variables[name] != "Real":
+                    raise ValueError("实数域声明与 formal_spec 不一致")
         # 局部式子被验证不得把整体升级为完整验证
         if (self.status == ClaimStatus.supported
                 and self.verification_scope == VerificationScope.step

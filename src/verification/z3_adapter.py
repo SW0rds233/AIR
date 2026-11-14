@@ -177,9 +177,12 @@ def op_check_implication(arguments: dict) -> VerificationResult:
         consistency.set("timeout", timeout_ms)
         for p in premises:
             consistency.add(_eval(_parse(p), env, int_mode, z3))
-        if consistency.check() == z3.unsat:
+        consistent = consistency.check()
+        if consistent == z3.unsat:
             return _result(VerificationStatus.unknown, "premises_unsatisfiable",
                            "前提本身矛盾, 蕴含为空洞, 不作为有意义发现")
+        if consistent != z3.sat:
+            return _result(VerificationStatus.unknown, "前提一致性未能确认，不能作为有效证明")
         goal = _eval(_parse(conclusion), env, int_mode, z3)
         solver.add(z3.Not(goal))
         r = solver.check()
