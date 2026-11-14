@@ -22,13 +22,14 @@ OVERFULL_BLOCKING_PT = 24.0
 def layout_diagnostics(log: str) -> dict:
     boxes = [float(value) for value in re.findall(
         r"Overfull \\[hv]box\s*\(([\d.]+)pt too (?:wide|high)\)", log or "")]
+    missing = list(dict.fromkeys(re.findall(r"Missing character:[^\r\n]+", log or "")))
     return {"overfull_count": len(boxes), "max_overfull_pt": max(boxes, default=0.0),
             "tolerance_pt": OVERFULL_TOLERANCE_PT,
             "blocking_pt": OVERFULL_BLOCKING_PT,
-            "severity": ("error" if max(boxes, default=0.0) > OVERFULL_BLOCKING_PT
+            "severity": ("error" if missing or max(boxes, default=0.0) > OVERFULL_BLOCKING_PT
                          else "warning" if max(boxes, default=0.0) > OVERFULL_TOLERANCE_PT
                          else "ok"),
-            "missing_glyphs": list(dict.fromkeys(re.findall(r"Missing character:[^\r\n]+", log or "")))}
+            "missing_glyphs": missing}
 _RERUN_PATTERNS = (
     r"Rerun to get cross-references right",
     r"There were undefined references",
@@ -48,12 +49,15 @@ def compile_latex(tex_path: str, workdir: str | None = None, engine: str = "xela
     def _run_once():
         try:
             result = subprocess.run(
-                [engine, "-interaction=nonstopmode", "-halt-on-error",
+                [engine, "-interaction=nonstopmode", "-halt-on-error", "-file-line-error",
                  "-output-directory", cwd, str(path)],
                 capture_output=True, text=True, timeout=180,
                 cwd=cwd, encoding="utf-8", errors="replace",
             )
-            log = result.stdout + result.stderr
+            log = (result.stdout or "") + (result.stderr or "")
+            engine_log = output_dir / path.with_suffix(".log").name
+            if engine_log.is_file():
+                log += "\n" + engine_log.read_text(encoding="utf-8", errors="replace")
             # TeX can leave a partial PDF on failure; its presence is not success.
             lines = log.splitlines()
             errors = ['\n'.join(lines[index:index + 5]).strip()
@@ -128,6 +132,8 @@ def compile_latex(tex_path: str, workdir: str | None = None, engine: str = "xela
     if remaining:
         return False, "交叉引用/标签经过多遍编译仍未稳定:\n" + last_log[-2000:]
     diagnostics = layout_diagnostics(last_log)
+    if diagnostics["missing_glyphs"]:
+        return False, "LaTeX 缺失字形，PDF 内容不完整:\n" + "\n".join(diagnostics["missing_glyphs"]) + "\n" + last_log
     if diagnostics["max_overfull_pt"] > OVERFULL_BLOCKING_PT:
         return False, (f"LaTeX 排版溢出 {diagnostics['max_overfull_pt']:.2f}pt "
                        f"(阻断阈值 {OVERFULL_BLOCKING_PT:.1f}pt)，请修正后再交付\n" + last_log)

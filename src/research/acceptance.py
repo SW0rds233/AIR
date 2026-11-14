@@ -100,6 +100,9 @@ def theory_validity_gate(
             )
 
     for claim in claims:
+        from src.verification.definitions import is_notation_definition
+        if is_notation_definition(claim) and claim.status not in (ClaimStatus.supported, ClaimStatus.refuted):
+            continue  # A notation disclosure is not a verified scientific conclusion.
         if checked_definition(claim, in_scope):
             # A declared notation is not a theorem awaiting proof. Its encoding
             # certificate never upgrades scientific status to supported.
@@ -511,15 +514,25 @@ def _cited_numbers(text: str) -> set[int]:
     text = re.sub(r"\\begin\{(equation\*?|align\*?|gather\*?|displaymath|math)\}.*?\\end\{\1\}",
                   "", text, flags=re.S)
     numbers: set[int] = set()
-    for group in re.findall(r"\[(\d+(?:\s*[,\-–]\s*\d+)*)\]", text or ""):
-        for part in re.split(r"[,\-–]", group):
-            part = part.strip()
-            if part.isdigit():
-                numbers.add(int(part))
+    for match in re.finditer(r"\[(\d+(?:\s*[,\-–]\s*\d+)*)\]", text or ""):
+        group = match.group(1)
+        prefix = text[max(0, match.start() - 40):match.start()].rstrip()
+        # Plain-text intervals have not passed through the LaTeX renderer yet.
+        if re.search(r"(?:[∈∉=]|\\(?:in|notin)|区间|范围|\binterval|\brange)\s*[:：]?\s*$", prefix, re.I):
+            continue
+        values = [int(value) for value in re.findall(r"\d+", group)]
+        if not all(value > 0 for value in values):
+            continue
+        for part in group.split(','):
+            bounds = [int(value) for value in re.split(r"[-–]", part)]
+            if len(bounds) == 2 and 0 <= bounds[1] - bounds[0] <= 1000:
+                numbers.update(range(bounds[0], bounds[1] + 1))
+            else:
+                numbers.update(bounds)
     for group in re.findall(r"\\(?:up)?cite\{([^}]*)\}", text or ""):
         for key in re.split(r"[,\s]+", group):
             match = re.fullmatch(r"ref(\d+)", key.strip())
-            if match:
+            if match and int(match.group(1)) > 0:
                 numbers.add(int(match.group(1)))
     return numbers
 

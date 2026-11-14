@@ -233,7 +233,12 @@ def _obligations_for(claim: Claim, wants_equality: bool, method_available: dict[
 
     from src.research.classification import is_theoretical_claim
     theoretical = is_theoretical_claim(claim)
-    from src.verification.definitions import is_definition_assignment
+    from src.verification.definitions import is_definition_assignment, is_notation_definition
+    if is_notation_definition(claim):
+        return [ProofObligation(statement="披露有限求和/乘积记号的定义域与适用条件（非待证结论）",
+            kind="notation_scope", acceptance_method="disclosure", required=False,
+            claim_id=claim.id, claim_version=ver,
+            detail="仅登记记号，未做可执行编码核验；非空有限指标集、变量域、量纲及现实适用性须在正文披露，性质另立 assertion")]
     if claim.statement_role == "definition" and not is_definition_assignment(claim):
         return [ProofObligation(statement="复合等式须保留所依赖的定义，不能把各量当独立自由变量核验",
             kind="formal_argument", acceptance_method="formal_encoding", claim_id=claim.id, claim_version=ver,

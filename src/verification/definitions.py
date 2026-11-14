@@ -28,6 +28,31 @@ def is_definition_assignment(claim) -> bool:
         and all(isinstance(arg, ast.Name) for arg in lhs.args))
 
 
+def is_notation_definition(claim) -> bool:
+    """Recognize a declared finite indexed sum/product, never a proved property.
+
+    Keep this grammar narrow: unknown LaTeX, recursive definitions, undeclared
+    symbols and compound left sides still require an encoding repair.
+    """
+    if (getattr(claim, 'statement_role', '') != 'definition' or claim.formal_spec
+            or not is_definition_assignment(claim) or not re.fullmatch(r'[A-Za-z]\w*', claim.lhs)):
+        return False
+    rhs = claim.rhs
+    indexed = list(re.finditer(r'\\(?:sum|prod)_\{\s*([A-Za-z]\w*)\s*\\in\s*([A-Za-z]\w*)\s*\}', rhs))
+    if not indexed or rhs.count('{') != rhs.count('}') or re.search(r'[=<>≤≥]|\\(?:le|ge|neq)', rhs):
+        return False
+    commands = set(re.findall(r'\\([A-Za-z]+)', rhs))
+    if not commands <= {'sum', 'prod', 'in', 'cdot', 'times'}:
+        return False
+    symbols = set(re.findall(r'[A-Za-z][A-Za-z0-9_]*', re.sub(r'\\[A-Za-z]+', '', rhs)))
+    symbols = {symbol.rstrip('_') for symbol in symbols}
+    declared = set(claim.variables)
+    bound = {match.group(1) for match in indexed}
+    return (claim.lhs in declared and claim.lhs not in symbols
+            and symbols <= declared | bound
+            and bool(re.fullmatch(r'[A-Za-z0-9_{}\\\s+*/().\-]+', rhs)))
+
+
 def check_definition(arguments: dict) -> VerificationResult:
     """Check declaration closure and function arity without eval/sympify.
 
