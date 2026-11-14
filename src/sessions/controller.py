@@ -147,6 +147,9 @@ class Session:
         from src.sessions.runtime import STOP
 
         self.stop_flag.set()
+        stop = getattr(self.app, "request_stop", None)
+        if callable(stop):
+            stop("用户停止")
         try:
             self.responses.put(STOP)
         except Exception:  # noqa: BLE001 - 队列已满/已关闭都不影响停止标志

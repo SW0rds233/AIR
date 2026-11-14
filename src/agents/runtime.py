@@ -844,6 +844,11 @@ class InProcessExecutor:
             result.agent = role
         if network is not None:
             result.payload["model_attempts"] = network.model_attempts
+        if self.runtime.cancel.cancelled:
+            result.outcome = TaskOutcome.cancelled
+            result.failure_reason = self.runtime.cancel.reason or "用户停止"
+            result.followup_needs = []
+            result.payload["pending_resume"] = True
         if network is not None and network.deferred and result.outcome != TaskOutcome.cancelled:
             result.outcome = TaskOutcome.partial
             result.payload["deferred"] = True

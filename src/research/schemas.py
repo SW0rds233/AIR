@@ -994,6 +994,8 @@ class Claim(BaseModel):
     def _guard_supported(self) -> Claim:
         if self.formal_spec:
             spec = self.formal_spec
+            if self.statement_role != "assertion":
+                raise ValueError("formal_spec 条件命题必须使用 statement_role=assertion；命名定义与推论分开")
             if self.lhs or self.rhs or self.expr or self.wrt:
                 raise ValueError("formal_spec 是完整条件命题，不能同时携带另一组 lhs/rhs 或单调性目标")
             if self.claim_type not in {ClaimType.definitional, ClaimType.descriptive}:

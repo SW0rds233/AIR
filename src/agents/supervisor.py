@@ -686,6 +686,7 @@ class SupervisorAgent:
                dispatched: Iterable[str] = ()) -> SupervisorDecision:
         """给出本轮的一种结构化判断。"""
         results = results or {}
+        open_needs = list(open_needs)
         evidence_count = sum(r.agent == "evidence" for r in results.values())
         evidence_calls = sum(int(r.payload.get("model_attempts", r.usage.llm_calls))
                              for r in results.values() if r.agent == "evidence")
@@ -793,6 +794,28 @@ class SupervisorAgent:
         closing.sort(key=lambda tid: next(row.get("agent") != "review" for row in plan.tasks
                                          if row["task_id"] == tid))
         if closing:
+            # One bounded solver batch before the first draft. These are already
+            # encoded goals, not requests to invent more lemmas or seek sources.
+            initial_checks_done = any((row.get("hints") or {}).get("verification_only")
+                                      and row.get("task_id") in results for row in plan.tasks)
+            if not initial_checks_done and not any(r.agent == "writing" and r.payload.get("manuscript") for r in results.values()):
+                checks = [need for need in open_needs if need.hints.get("verification_only")
+                          and need.owner == "reasoning" and reasoning_allowed(need.hints)]
+                candidates = needs_to_tasks(checks, brief=brief, plan_version=plan.version, limit=len(checks))
+                checks_to_run = []
+                for task in candidates:
+                    if (len(checks_to_run) >= self.max_tasks_per_round or not reasoning_allowed(task.hints)
+                            or task.idempotency_key in known_keys or task.hints.get("need_assignment") in known_keys):
+                        continue
+                    checks_to_run.append(task)
+                    reasoning_slots -= 1
+                    root = task.hints.get("root_claim_id") or task.hints.get("claim_id")
+                    if root:
+                        root_attempts[root] = root_attempts.get(root, 0) + 1
+                if checks_to_run:
+                    return SupervisorDecision(decision=DecisionKind.dispatch,
+                        tasks=checks_to_run,
+                        reason="初稿前先核验已编码的核心命题，保留真实证书或反例")
             tasks, _ = self._tasks_for(plan, closing[:1], remaining_budget)
             if tasks:
                 return SupervisorDecision(decision=DecisionKind.dispatch, tasks=tasks,

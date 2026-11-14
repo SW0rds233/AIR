@@ -65,6 +65,7 @@ class WritingAgent(AgentBase):
 论文应围绕少量直接回答研究问题的主结果展开：定义与假设 -> 条件定理 -> 推导 -> 适用边界 -> 实践/实验建议。
 statement_role=definition 只允许呈现 lhs := rhs 及变量解释，不当作已证定理，也不引用其文字中的附带推论。
 formal_spec 的 premises 是条件假设，conclusion 的核验不验证这些假设符合现实；前提和变量域必须随定理给出。
+模型的 formal_encoding 是已有方程结构。不得自行删去路径、换识别目标或变量含义；确需简化须列出新增假设并提出建模修订需求。
 实验建议写明对象、观测变量、对照/基线、采样方案、可证伪预测与判定标准；没有执行记录就只写建议。
 将工具不支持、资料不足等过程诊断集中到局限或附录，主文解释它们对结论的具体限制，避免逐条堆砌日志。
 
@@ -895,7 +896,8 @@ def _section_material(packet: WritingPacket, role: str,
             ensure_ascii=False)[:18000])
     if role in {"method", "result", "discussion", "revision"}:
         pieces.append("模型及适用条件: " + json.dumps([
-            {key: row.get(key) for key in ("id", "name", "mechanism", "variables", "assumptions", "applicability", "open_conditions")}
+            {key: row.get(key) for key in ("id", "version", "name", "mechanism", "formal_encoding",
+                "variables", "variable_domains", "units", "assumptions", "approximations", "boundaries", "applicability", "open_conditions")}
             for row in packet.models[:10]], ensure_ascii=False)[:14000])
         pieces.append("验证与数据计划: " + json.dumps(packet.validations[:5], ensure_ascii=False)[:4500])
     if role in {"result", "revision"}:

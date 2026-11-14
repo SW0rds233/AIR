@@ -759,7 +759,7 @@ def _run_session(session: Session, initial_state: dict | None = None):
         while True:
             interrupted = False
             for event in session.app.stream(inputs, session.config):
-                if session.stop_flag.is_set():
+                if session.stop_flag.is_set() and not getattr(session.app, "handles_stop", False):
                     interrupted = False
                     break
                 if "__interrupt__" in event:
@@ -811,7 +811,11 @@ def _run_session(session: Session, initial_state: dict | None = None):
                             # 研究进度通过团队事件流传给 SSE。
                         })
             if session.stop_flag.is_set():
-                session.emit({"type": "stopped"})
+                try:
+                    session.final_state = session.app.get_state(session.config).values
+                except Exception:
+                    pass
+                session.emit({"type": "stopped", "state": _final_summary(session.final_state or {})})
                 session.status = "stopped"
                 _persist_session(session)
                 return
@@ -1183,7 +1187,11 @@ def resume_session(session_id: str):
     # 已有活跃会话 (内存中仍在跑/等待) → 直接返回, 前端连 SSE 即可
     existing = SESSIONS.get(thread_id)
     if existing is not None:
-        return {"thread_id": thread_id, "session_id": session_id, "status": existing.status}
+        worker = existing.worker_thread
+        if (worker is not None and worker.is_alive()) or existing.status not in {
+                "stopped", "interrupted", "partial", "error", "completed", "done"}:
+            return {"thread_id": thread_id, "session_id": session_id, "status": existing.status}
+        existing.shutdown(timeout=0)
 
     checkpointer, conn = _make_checkpointer(session_id)
     stored_request = dict(record.get("request") or {})
