@@ -92,7 +92,7 @@ def test_definition_encoding_pass_cannot_close_a_theorem_or_support_the_claim():
     checked = service.check(claim, definition)
     assert checked.closed and checked.record.usable and not checked.record.stale
     assert checked.obligation_updates['coverage'].value == 'step'
-    assert any(o.acceptance_method == 'manual' and o.required for o in obligations)
+    assert not any(o.acceptance_method == 'manual' and o.required for o in obligations)
 
 
 @pytest.mark.parametrize(('lhs', 'rhs', 'variables'), [

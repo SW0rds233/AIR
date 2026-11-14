@@ -110,7 +110,7 @@ class ReasoningAgent(AgentBase):
   情景命题的 study.scenario_parameters 应记录参数、范围和取值依据；
   study.design_feasibility 只表示因果研究设计在现有数据上的可行性。
   数学等价、概率公式和矩阵恒等式不是实证因果/关联命题；研究建议不是数学命题。
-  每次只提交解决当前子问题所必需的少量命题（建议最多8条），复用已有命题 id，
+  每次只提交解决当前子问题所必需的少量命题（最多3条），复用已有命题 id，
   修正旧命题时提供其 id 和修正条件，避免重新生成整套文献摘要命题。
   可编码的结论必须给 lhs/rhs/relation/variables/variable_domains；不能编码时给逐步论证和缺口。
   不得把综述、检索进度或写作建议注册成需要证明的科学命题。
@@ -124,6 +124,14 @@ class ReasoningAgent(AgentBase):
   原子引理及归纳/集合论论证。工具 unsupported 时按 detail 修复编码，不重复提交原输入。
   机制命题用 mechanism_links 显式登记链环；公式命题用 evidence_requirements 登记
   具体参数取值或经验假设的来源需求，不要求文献支持自拟公式。代数推导与经验前提分开核验。
+  优先推导直接回答原研究问题的核心命题，不以增殖命名、定义、零因子引理作为进展。
+  定义只设 statement_role="definition"，陈述仅包含命名；附带性质另用 assertion。
+  条件命题的编码示例：formal_spec={"premises":["x >= 0","y > x"],
+  "conclusion":"y > 0","variables":{"x":"Real","y":"Real"}}；示例不是应生成的研究结果。
+  所有约束必须显式编码，variables 支持 Real/Int，等号写 ==，使用 and/or/not 表示逻辑。
+  formal_spec 是完整的条件命题；使用时清空 lhs/rhs/expr/wrt，不保留另一组目标编码。
+  此格式的证明仅在所列前提下成立，不能证明前提符合现实；不能把目标本身放进前提。
+  编码修复必须修改当前命题 id，不能用新 id 回避失败；不得再次展开一整套子引理。
 
 最终输出 JSON:
 {"strategy": "derivation|synthesis|counterexample|quantitative",
@@ -131,6 +139,7 @@ class ReasoningAgent(AgentBase):
              "study": {"design": "theory|observational|simulation|none"},
              "lhs": "", "rhs": "", "relation": "==|>=|<=|>|<|custom",
              "variables": [""], "variable_domains": {}, "id": "",
+             "statement_role": "assertion|definition", "formal_spec": null,
              "mechanism_links": [], "evidence_requirements": [],
              "reasoning": [""], "premises": [""], "informal": true}],
  "counterexamples": [{"statement": "", "witness": ""}],
@@ -264,7 +273,10 @@ class ReasoningAgent(AgentBase):
         fidelity_issues: list[str] = []
         seen_statements: set[str] = set()
         known = {str(row.get("id")): row for row in context.objects.get("claim", [])}
-        for candidate in claims:
+        target_id = str(task.hints.get("claim_id") or "")
+        root_id = str(task.hints.get("root_claim_id") or target_id)
+        depth = int(task.hints.get("derivation_depth") or 0)
+        for candidate in claims[:3]:
             claim = dict(candidate)
             statement = str(claim.get("statement") or "").strip()
             if not statement or statement in seen_statements:
@@ -290,6 +302,9 @@ class ReasoningAgent(AgentBase):
                     claim["classification_basis"] = "数学题面且无实证设计/样本；语义纠偏不构成核验"
                 claim["study"] = {**dict(claim.get("study") or {}), "design": "theory"}
             requested_id = str(claim.get("id") or "")
+            if repair_encoding and requested_id != target_id:
+                limitations.append("编码修复只接受当前命题的修订；未登记旁支新命题: " + statement[:120])
+                continue
             existing = known.get(requested_id) or next((row for row in known.values()
                 if str(row.get("statement") or "").strip() == statement), None)
             object_id = str(existing["id"]) if existing else stable_id("clm", {
@@ -297,7 +312,7 @@ class ReasoningAgent(AgentBase):
             claim["id"] = object_id
             version = int(existing.get("version") or 1) if existing else 1
             encoding_changed = existing and any(claim.get(key) and claim.get(key) != existing.get(key)
-                for key in ("lhs", "rhs", "expr", "wrt", "relation", "variables", "variable_domains", "study"))
+                for key in ("lhs", "rhs", "expr", "wrt", "relation", "variables", "variable_domains", "study", "formal_spec", "statement_role"))
             if existing and str(existing.get("statement") or "").strip() == statement and not encoding_changed:
                 # Repeated prose is not new scientific progress and must not reset proof state.
                 continue
@@ -308,14 +323,16 @@ class ReasoningAgent(AgentBase):
                          "informal": bool(claim.get("informal", True))},
                 rationale=clip("; ".join(as_list_of_str(claim.get("reasoning"))[:3]), 400),
                 input_versions={object_id: version} if existing else {}))
-            if claim.get("study", {}).get("design") == "theory" or (
-                    claim.get('claim_type') == 'definitional' and claim.get('lhs') and claim.get('rhs')):
+            if (depth < 2 or object_id == target_id) and (claim.get("study", {}).get("design") == "theory" or (
+                    claim.get('claim_type') == 'definitional' and claim.get('lhs') and claim.get('rhs'))):
                 needs.append(ResearchNeed(kind=NeedKind.derivation,
                     statement="独立核验数学候选: " + statement[:500],
                     why="推理产出尚非核验证据，需要回到具体命题执行证明义务",
                     blocked_refs=[ObjectRef(id=object_id, version=int(claim.get("version") or 1))],
                     acceptance=["核对编码与原命题等价、前提与定理条件，并提交实际核验；不能编码时明确未决"],
-                    hints={"claim_id": object_id, "trigger_id": "reasoning-proof:" + object_id},
+                    hints={"claim_id": object_id, "root_claim_id": root_id or object_id,
+                           "derivation_depth": depth + int(object_id != target_id),
+                           "trigger_id": f"reasoning-proof:{object_id}:v{claim.get('version', 1)}"},
                     blocking=True))
         changes.extend(build_proposal(
             "gap",
@@ -387,7 +404,8 @@ class ReasoningAgent(AgentBase):
                              "obligation_id": obligation.id},
                     rationale="证据义务复核记录",
                     input_versions=dict(outcome.record.verification_closure or {})))
-        return self.completed(task, f"证据复核关闭 {closed} 条义务", changes=changes, usage=usage)
+        return self.completed(task, f"证据复核关闭 {closed} 条义务", changes=changes, usage=usage,
+                              payload={"evidence_support_only": True})
 
     def formal_closure(self, task: AgentTask, context: ContextPack,
                        runtime: AgentRuntime,
@@ -435,7 +453,7 @@ class ReasoningAgent(AgentBase):
                 and not is_formal_question(question)
                 and claim.study.design.value == "theory"
                 and claim.origin.value == "proposed"
-                and not (claim.claim_type.value == "definitional" and claim.relation.value == "==")
+                and claim.claim_type.value not in {"definitional", "descriptive"}
                 and (claim.lhs and claim.rhs or claim.strategy in {"derivation", "proof", "identity_simplification"})
                 and not related_support):
             return self.blocked(
@@ -491,6 +509,17 @@ class ReasoningAgent(AgentBase):
         unresolved: list[str] = []
         needs: list[ResearchNeed] = []
         for obligation in pending:
+            if obligation.kind == "definition_scope" and obligation.acceptance_method == "manual":
+                # Retire the legacy human-only requirement, preserving it as a disclosure.
+                changes.append(build_proposal("obligation", object_id=obligation.id,
+                    payload={**obligation.model_dump(mode="json"), "required": False,
+                             "detail": "定义的量纲与适用条件须在正文披露；不以人工确认阻塞自动流程，附带推论仍需独立证明"},
+                    rationale="移除旧版自动生成的人工定义门槛", input_versions={claim.id: claim.version}))
+                continue
+            if obligation.status == "closed":
+                continue
+            if obligation.kind == "formal_argument":
+                obligation = obligation.model_copy(update={"acceptance_method": "formal_encoding"})
             outcome = runtime.run_verification(task, claim, obligation,
                                                evidence=evidence)
             usage.tool_calls += 1 if outcome.evaluated else 0
@@ -514,11 +543,18 @@ class ReasoningAgent(AgentBase):
                     object_id=outcome.record.id,
                     rationale=f"核验记录 {outcome.tool}: {outcome.record.status}",
                     input_versions=dict(outcome.record.verification_closure or {})))
+            if outcome.obligation_updates.get("status") == "refuted":
+                continue  # A valid counterexample resolves this goal; do not "repair" it away.
             if not outcome.closed:
                 reason = str(outcome.obligation_updates.get("detail", "")
                              or obligation.statement)
                 unresolved.append(f"{obligation.statement[:120]}: {reason[:200]}")
-                encoding_failed = outcome.result is not None and outcome.result.status.value == 'unsupported'
+                verification_status = (outcome.result.status.value if outcome.result else
+                    str(getattr(outcome.obligation_updates.get("validation_status"), "value",
+                                outcome.obligation_updates.get("validation_status", ""))))
+                encoding_failed = verification_status == 'unsupported'
+                if not obligation.required:
+                    continue
                 needs.append(ResearchNeed(
                     kind=(NeedKind.derivation if encoding_failed else
                           NeedKind.model_condition if obligation.kind == "formal_argument" else NeedKind.clause),
@@ -526,8 +562,10 @@ class ReasoningAgent(AgentBase):
                     why=reason[:300],
                     blocked_refs=[ObjectRef(id=claim.id, version=claim.version)],
                     hints={"claim_id": claim.id, "obligation_id": obligation.id,
+                           "root_claim_id": task.hints.get("root_claim_id") or claim.id,
+                           "derivation_depth": int(task.hints.get("derivation_depth") or 0),
                            "trigger_id": "obligation:" + obligation.id,
-                           "verification_status": outcome.result.status.value if outcome.result else '',
+                           "verification_status": verification_status,
                            "verification_detail": reason,
                            "failed_arguments": outcome.record.arguments if encoding_failed and outcome.record else {}},
                     acceptance=(["按具体诊断修复符号声明或拆解不支持的表达式；不得原样重试或宣称命题已被反驳"]
@@ -663,7 +701,7 @@ def _formalisable_subject(context: ContextPack, task: AgentTask | None = None):
         rows = [row for row in rows if row.get("id") in requested_ids]
     else:
         # General exploration must not repeatedly pick an unencoded background claim.
-        rows = [row for row in rows if (row.get("lhs") and row.get("rhs"))
+        rows = [row for row in rows if row.get("formal_spec") or (row.get("lhs") and row.get("rhs"))
                 or (row.get("expr") and row.get("wrt")) or row.get("design_v")]
     claim: Claim | None = None
     for row in rows:

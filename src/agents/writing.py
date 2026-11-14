@@ -61,6 +61,12 @@ class WritingAgent(AgentBase):
     kinds = ("manuscript", "block")
 
     SYSTEM = """你是"写作"智能体。
+当前自动流程不要求配图或人工确认。用文字、公式和表格形成完整科研稿件，不为缺图创建阻断。
+论文应围绕少量直接回答研究问题的主结果展开：定义与假设 -> 条件定理 -> 推导 -> 适用边界 -> 实践/实验建议。
+statement_role=definition 只允许呈现 lhs := rhs 及变量解释，不当作已证定理，也不引用其文字中的附带推论。
+formal_spec 的 premises 是条件假设，conclusion 的核验不验证这些假设符合现实；前提和变量域必须随定理给出。
+实验建议写明对象、观测变量、对照/基线、采样方案、可证伪预测与判定标准；没有执行记录就只写建议。
+将工具不支持、资料不足等过程诊断集中到局限或附录，主文解释它们对结论的具体限制，避免逐条堆砌日志。
 
 你的任务: 把已经确定的研究结果写成**连贯的学术正文**, 并让每一段都能回到它的依据。
 
@@ -730,6 +736,8 @@ class WritingAgent(AgentBase):
         pending_claims = {ref.id for block in manuscript.all_blocks() if block.role == BlockRole.claim
                           for kind, ref in zip(block.ref_kinds, block.refs) if kind == RefKind.claim.value}
         for claim in packet.claims:
+            if claim.get("statement_role") == "definition":
+                continue  # Encoding checks are separate; notation is never a proof claim.
             if str(claim.get("id")) in pending_claims and claim.get("status") not in {"supported", "refuted"}:
                 needs.append(ResearchNeed(kind=NeedKind.derivation,
                     statement="核验正文中的候选命题: " + str(claim.get("statement") or "")[:500],
@@ -751,8 +759,8 @@ class WritingAgent(AgentBase):
                 acceptance=["摘要与正文不出现上一版、本版或审阅意见处理过程；保留实质性研究内容"],
                 blocking=True))
         if any("未登记图" in problem for problem in problems):
-            needs.append(ResearchNeed(kind=NeedKind.figure_data,
-                owner="figures", statement="补齐正文引用的图或删除无图号引用",
+            needs.append(ResearchNeed(kind=NeedKind.manuscript_revision,
+                owner="writing", statement="删除未登记的图号引用，用文字或表格解释已有结果",
                 why="未落盘的图不能在论文中当作已有图形引用",
                 acceptance=["图号对应已登记并导出的真实图，正文和图注一致；否则删除图号"],
                 blocking=True))
@@ -881,8 +889,10 @@ def _section_material(packet: WritingPacket, role: str,
     pieces = ["来源: " + json.dumps(source_rows, ensure_ascii=False)]
     if role in {"method", "result", "discussion", "conclusion", "revision"}:
         pieces.append("命题及其状态: " + json.dumps([
-            {key: row.get(key) for key in ("id", "status", "statement", "premises", "reasoning", "support_refs")}
-            for row in packet.claims[:20]], ensure_ascii=False)[:15000])
+            {key: row.get(key) for key in ("id", "status", "statement", "statement_role", "premises",
+                "formal_spec", "lhs", "rhs", "variables", "variable_domains", "reasoning", "support_refs")}
+            for row in sorted(packet.claims, key=lambda c: c.get("status") not in {"supported", "refuted"})[:20]],
+            ensure_ascii=False)[:18000])
     if role in {"method", "result", "discussion", "revision"}:
         pieces.append("模型及适用条件: " + json.dumps([
             {key: row.get(key) for key in ("id", "name", "mechanism", "variables", "assumptions", "applicability", "open_conditions")}

@@ -51,12 +51,17 @@ def test_valid_bibliography_does_not_create_false_missing_number_gap():
 
 def test_verified_identity_needs_certificate_not_empirical_citation():
     claim = {'id': 'identity', 'version': 2, 'claim_type': 'definitional', 'relation': '==',
-             'status': 'supported', 'support_refs': []}
+             'statement': 'x+x=2*x', 'lhs': 'x+x', 'rhs': '2*x', 'variables': ['x'],
+             'status': 'supported', 'support_refs': [], 'coverage': 'target',
+             'verification_scope': 'target', 'validation_status': 'verified',
+             'support_kind': 'symbolic_check', 'assurance': 'symbolic_checked'}
     verification = {'claim_id': 'identity', 'claim_version': 2, 'status': 'passed',
-                    'id': 'certificate', 'method': 'sympy'}
+                    'id': 'certificate', 'tool': 'sympy', 'usable': True,
+                    'arguments': {'lhs': 'x+x', 'rhs': '2*x', 'variables': ['x']}}
     context = ContextPack(objects={'claim': [claim], 'verification': [verification]})
     assert not deterministic_issues(context)
-    for modification in ({'claim_version': 1}, {'status': 'unsupported'}):
+    for modification in ({'claim_version': 1}, {'status': 'unsupported'}, {'usable': False},
+                         {'arguments': {'lhs':'x+1', 'rhs':'2*x'}}):
         context.objects['verification'] = [{**verification, **modification}]
         assert any(i.blocking for i in deterministic_issues(context))
     context.objects['verification'] = [verification]
