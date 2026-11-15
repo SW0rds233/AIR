@@ -22,6 +22,10 @@ class TaskDeadlineExceeded(TimeoutError):
     pass
 
 
+class ModelCallTimeout(TaskDeadlineExceeded):
+    """One model call exceeded its limit; the shared network is still usable."""
+
+
 class ModelBudgetExceeded(RuntimeError):
     pass
 
@@ -52,6 +56,7 @@ class NetworkBudget:
     role: str = ""
     model_attempts: int = 0
     stop_reason: str = ""
+    deferred_reason: str = ""
 
     def defer(self, phase: str, *, cooldown: bool = False) -> None:
         self.deferred = True
@@ -76,7 +81,10 @@ class NetworkBudget:
         if self.stop_reason:
             raise ModelBudgetExceeded(self.stop_reason)
         if self.remaining() <= 0:
-            self.defer("task_deadline")
+            if not self.deferred:
+                self.event("task_deadline", phase="task", action="resume_unfinished")
+            self.deferred = True
+            self.deferred_reason = "任务墙钟预算耗尽，保留已有成果，待恢复后补做"
             raise TaskDeadlineExceeded("任务墙钟预算耗尽，保留已有成果，待恢复后补做")
         if self.failures >= self.max_failures or self.state.unavailable_until > time.monotonic():
             self.defer("budget_check", cooldown=self.failures >= self.max_failures)
@@ -138,6 +146,8 @@ def model_call(fn: Callable[[], Any], *, timeout: float, phase: str) -> Any:
 
 
 def network_error(error: BaseException) -> bool:
+    if isinstance(error, TaskDeadlineExceeded):
+        return False
     return isinstance(error, (ConnectionError, TimeoutError, OSError)) or any(
         name in type(error).__name__.lower() for name in ("connection", "connect", "timeout", "readerror"))
 
@@ -171,13 +181,16 @@ def network_call(fn: Callable[[], Any], *, timeout: float = 120, phase: str = "n
             budget.check()
             remaining = min(deadline - time.monotonic(), budget.remaining())
             if remaining <= 0:
-                raise TaskDeadlineExceeded(f"{phase} 等待超过时间预算，迟到结果不再采用")
+                error_type = ModelCallTimeout if _in_model_call.get() else TaskDeadlineExceeded
+                raise error_type(f"{phase} 单次调用超过时间预算，迟到结果不再采用")
             try:
                 ok, value = result.get(timeout=min(remaining, 1., budget.heartbeat_seconds))
                 if not ok:
                     raise value
-                if budget.remaining() <= 0 or time.monotonic() >= deadline:
-                    raise TaskDeadlineExceeded("任务墙钟预算耗尽，迟到结果不再采用")
+                budget.check()
+                if time.monotonic() >= deadline:
+                    error_type = ModelCallTimeout if _in_model_call.get() else TaskDeadlineExceeded
+                    raise error_type(f"{phase} 单次调用超过时间预算，迟到结果不再采用")
                 if not failure_scope and budget.state.unavailable_until:
                     budget.event("network_recovered", phase=phase)
                 if not failure_scope:
@@ -191,6 +204,15 @@ def network_call(fn: Callable[[], Any], *, timeout: float = 120, phase: str = "n
                                  remaining_seconds=round(budget.remaining(), 1))
                     heartbeat = time.monotonic() + budget.heartbeat_seconds
     except Exception as error:
+        if (_in_model_call.get() and not isinstance(error, TaskDeadlineExceeded)
+                and (isinstance(error, TimeoutError) or "timeout" in type(error).__name__.lower())):
+            raise ModelCallTimeout("模型单次调用超时，未判定为网络中断") from error
+        if isinstance(error, TaskDeadlineExceeded):
+            if not isinstance(error, ModelCallTimeout) and not budget.deferred:
+                budget.deferred = True
+                budget.deferred_reason = str(error)
+                budget.event("task_deadline", phase=phase, action="resume_unfinished")
+            raise
         if network_error(error):
             if failure_scope and budget.remaining() > 0:
                 budget.event("network_error", phase=phase, host=failure_scope,
@@ -200,7 +222,7 @@ def network_call(fn: Callable[[], Any], *, timeout: float = 120, phase: str = "n
             budget.state.failures += 1
             budget.event("network_error", phase=phase, error_type=type(error).__name__,
                          failures=budget.failures)
-            if budget.state.failures >= budget.max_failures or isinstance(error, TaskDeadlineExceeded):
+            if budget.state.failures >= budget.max_failures:
                 budget.defer(phase, cooldown=True)
         raise
 

@@ -240,11 +240,13 @@ class BudgetedLLM:
                                       timeout=LLM_TIMEOUT, phase="llm")
         except Exception as exc:
             if self._on_event:
-                from src.utils.network_budget import NetworkUnavailable, TaskDeadlineExceeded, ModelBudgetExceeded
+                from src.utils.network_budget import NetworkUnavailable, TaskDeadlineExceeded, ModelBudgetExceeded, ModelCallTimeout
                 deferred = isinstance(exc, (NetworkUnavailable, TaskDeadlineExceeded, ModelBudgetExceeded))
-                if not deferred and (isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower()):
+                if isinstance(exc, ModelCallTimeout) or (not deferred and
+                        (isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower())):
                     self._on_event("llm_timeout", {"task_id": self._task_id,
-                        "agent": self._stage, "error": "模型调用超时，已耗尽客户端重试"})
+                        "agent": self._stage, "error": "模型单次调用超时，迟到结果不再采用"})
+                    deferred = False
                 self._on_event("llm_deferred" if deferred else "llm_error", {"task_id": self._task_id,
                                               "agent": self._stage,
                                               "error": f"{type(exc).__name__}: {exc}"[:300]})
@@ -853,8 +855,8 @@ class InProcessExecutor:
             result.outcome = TaskOutcome.partial
             result.payload["deferred"] = True
             result.payload["pending_resume"] = not bool(network.stop_reason)
-            result.payload["deferred_reason"] = network.stop_reason or "网络或任务等待预算受限"
-            result.unresolved.append(network.stop_reason or "网络或墙钟预算耗尽，已保留完成部分；恢复后补做未完成步骤")
+            result.payload["deferred_reason"] = network.stop_reason or network.deferred_reason or "网络暂不可用"
+            result.unresolved.append(result.payload["deferred_reason"])
         result = self.runtime.finalize(task, result, grant)
         return result
 

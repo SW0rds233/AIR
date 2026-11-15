@@ -29,11 +29,13 @@ def is_definition_assignment(claim) -> bool:
 
 
 def is_notation_definition(claim) -> bool:
-    """Recognize a declared finite indexed sum/product, never a proved property.
+    """Recognize bounded naming grammars, never a proved property.
 
     Keep this grammar narrow: unknown LaTeX, recursive definitions, undeclared
     symbols and compound left sides still require an encoding repair.
     """
+    if _is_expectation_naming(claim):
+        return True
     if (getattr(claim, 'statement_role', '') != 'definition' or claim.formal_spec
             or not is_definition_assignment(claim) or not re.fullmatch(r'[A-Za-z]\w*', claim.lhs)):
         return False
@@ -51,6 +53,31 @@ def is_notation_definition(claim) -> bool:
     return (claim.lhs in declared and claim.lhs not in symbols
             and symbols <= declared | bound
             and bool(re.fullmatch(r'[A-Za-z0-9_{}\\\s+*/().\-]+', rhs)))
+
+
+def _is_expectation_naming(claim) -> bool:
+    """A prose expectation assignment is notation, not a claim about its value.
+
+    No expression evaluation or automatic proof. Restrict the accepted tail to
+    domain annotations and naming another mapping; consequences remain assertions.
+    """
+    if (getattr(claim, 'statement_role', '') != 'definition' or claim.formal_spec
+            or claim.claim_type.value != 'definitional' or claim.lhs or claim.rhs or claim.expr):
+        return False
+    statement = claim.statement.strip()
+    if re.search(r'因此|从而|蕴含|显著|增加|减少|证明|必然|成立|恒[正负]|递[增减]|单调', statement):
+        return False
+    symbol = r'[A-Za-z\u0370-\u03ff][A-Za-z0-9_\u0370-\u03ff]*'
+    match = re.fullmatch(r'定义[：:]\s*[^。；;]*?(?:命名为|定义为|记为)[^。；;:=]*?'
+        + rf'({symbol})\s*(?::=|≔)\s*E\[([A-Za-z0-9_\u0370-\u03ff() +*/.−\-]+)\]'
+        + r'(?:（[^（）=<>≤≥]*）)?(?:[，,]\s*并命名[^。；;=<>≤≥]+)?[。.]?', statement)
+    if not match:
+        return False
+    lhs, expression = match.groups()
+    names = set(re.findall(symbol, expression))
+    declared = {re.split(r'\(', value)[0] for value in claim.variables}
+    return (lhs in declared and lhs not in names and names <= declared
+            and expression.count('(') == expression.count(')'))
 
 
 def check_definition(arguments: dict) -> VerificationResult:
