@@ -123,7 +123,7 @@ LATEX_PREAMBLE = r"""\documentclass[UTF8,a4paper,12pt]{ctexart}
 \usepackage{booktabs}
 \usepackage{array}
 \usepackage{tabularx}
-\usepackage[sort&compress]{cite}
+\usepackage{cite}
 \usepackage{hyperref}
 \hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
 % 可自动换行的 X 列 (左对齐), 用于宽表格撑满 \textwidth 而不越界
