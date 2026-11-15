@@ -137,6 +137,9 @@ LATEX_PREAMBLE = r"""\documentclass[UTF8,a4paper,12pt]{ctexart}
 \date{__DATE__}
 
 \begin{document}
+% ctexart defaults to chapter-name headers; long titles overflow at shipout.
+% Keep full, naturally wrapped section titles in the body and page numbers below.
+\pagestyle{plain}
 \maketitle
 """
 

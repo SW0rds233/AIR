@@ -89,7 +89,8 @@ def test_waiting_network_emits_heartbeat_and_discards_late_response():
     with task_network_budget(budget), pytest.raises(TimeoutError):
         network_call(lambda: time.sleep(.15), timeout=.08, phase='download')
     assert any(kind == 'task_heartbeat' and data['phase'] == 'download' for kind, data in events)
-    assert any(kind == 'network_unavailable' for kind, _ in events)
+    assert any(kind == 'task_deadline' for kind, _ in events)
+    assert not any(kind == 'network_unavailable' for kind, _ in events)
 
 
 def test_mechanism_support_is_scoped_and_cannot_close_parent_claim():

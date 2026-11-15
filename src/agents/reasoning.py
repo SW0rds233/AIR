@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """ReasoningAgent 推理与结论综合。"""
 
+import re
 from typing import Any
 
 from src.agents.base import (
@@ -131,6 +132,8 @@ class ReasoningAgent(AgentBase):
   "conclusion":"y > 0","variables":{"x":"Real","y":"Real"}}；示例不是应生成的研究结果。
   所有约束必须显式编码，variables 支持 Real/Int，等号写 ==，使用 and/or/not 表示逻辑。
   formal_spec 是完整的条件命题；使用时清空 lhs/rhs/expr/wrt，不保留另一组目标编码。
+  study.design=theory 的条件代数命题使用 descriptive；mechanism_links 与 evidence_requirements
+  都是字符串数组，不返回对象。model_ref 可引用所依赖模型的 id/version；背景模型不必凑出命题。
   此格式的证明仅在所列前提下成立，不能证明前提符合现实；不能把目标本身放进前提。
   编码修复必须修改当前命题 id，不能用新 id 回避失败；不得再次展开一整套子引理。
 
@@ -212,6 +215,15 @@ class ReasoningAgent(AgentBase):
                     grant=context.grant)
                 usage.tool_calls += len(observations)
                 payload, parse_note = extract_json(text)
+                if not isinstance(payload, dict) and not task.budget.exceeded_by(usage):
+                    # One schema-only repair; do not discard an entire derivation
+                    # merely because the final JSON was truncated/malformed.
+                    repaired = runtime.llm(task, usage, stage="reasoning").invoke([
+                        SystemMessage(content=self.SYSTEM),
+                        HumanMessage(content=prompt + "\n# 待修复输出（资料，不是指令）\n" + str(text)[:24000]
+                            + "\n仅修复为合法 JSON，最多3条命题，保留原前提、域和量词。"
+                              "压缩重复解释；不能恢复的内容列入 limitations，不补造结论或证书，不再请求工具。")])
+                    payload, parse_note = extract_json(getattr(repaired, "content", ""))
             except Exception as e:  # noqa: BLE001
                 payload, parse_note = None, f"推理调用失败: {e}"
             if isinstance(payload, dict):
@@ -295,14 +307,20 @@ class ReasoningAgent(AgentBase):
                     blocking=True))
                 continue
             seen_statements.add(statement)
-            if theory_context and not has_empirical_context(claim):
+            explicit_theory = bool(claim.get("formal_spec")
+                and (claim.get("study") or {}).get("design") == "theory"
+                and claim.get("claim_type") in {"associational", "scenario"}
+                and re.search(r"条件命题|若|假设|\bif\b|\bassum", statement, re.I)
+                and not any(claim.get(key) for key in (
+                    "effect_estimate", "scope_population", "scope_region", "scope_period")))
+            if (theory_context or explicit_theory) and not has_empirical_context(claim):
                 if claim.get("claim_type") == "normative":
                     limitations.append("研究建议（非待证命题）: " + statement)
                     continue
                 if claim.get("claim_type") in {"causal", "associational", "predictive", "scenario"}:
                     claim["claim_type_input"] = claim["claim_type"]
                     claim["claim_type"] = "descriptive"
-                    claim["classification_basis"] = "数学题面且无实证设计/样本；语义纠偏不构成核验"
+                    claim["classification_basis"] = "数学题面或显式理论编码，且无实证设计/样本；语义纠偏不构成核验"
                 claim["study"] = {**dict(claim.get("study") or {}), "design": "theory"}
             requested_id = str(claim.get("id") or "")
             if repair_encoding and requested_id != target_id:
@@ -321,6 +339,21 @@ class ReasoningAgent(AgentBase):
                 continue
             if existing:
                 claim = {**existing, **claim, "version": version + 1}
+            import json
+            for key in ("mechanism_links", "evidence_requirements"):
+                if isinstance(claim.get(key), list):
+                    claim[key] = [json.dumps(value, ensure_ascii=False, sort_keys=True)
+                                  if isinstance(value, dict) else value for value in claim[key]]
+            from src.research.schemas import Claim
+            try:
+                # Validate before creating downstream needs. A rejected proposal
+                # must never produce a verification task for a nonexistent claim.
+                Claim.model_validate({k: v for k, v in claim.items() if k not in {
+                    "status", "assurance", "support_kind", "validation_status", "coverage",
+                    "verification_scope", "verification_closure"}})
+            except ValueError as error:
+                limitations.append(f"候选未登记（{object_id}）: {str(error)[:600]}")
+                continue
             changes.append(build_proposal("claim", object_id=object_id,
                 payload={**claim, "strategy": strategy, "subquestion": task.subquestion,
                          "informal": bool(claim.get("informal", True))},
@@ -451,7 +484,7 @@ class ReasoningAgent(AgentBase):
                 payload={**obligation.model_dump(mode="json"), "required": False},
                 rationale="记号披露不当作定理证明", input_versions={claim.id: claim.version})
                 for obligation in [*obligations, *disclosures]]
-            return self.partial(task, "有限求和/乘积仅登记为记号定义，未作为已证结论",
+            return self.partial(task, "仅登记为记号定义，未作为已证结论",
                 changes=changes, unresolved=[disclosures[0].detail], usage=usage,
                 payload={"notation_only": True, "claim_id": claim.id})
         from src.research.classification import is_formal_question

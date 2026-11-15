@@ -59,6 +59,10 @@ def _review_positions(results, task_order):
 
 def _review_matches_manuscript(results, task_order, manuscript=None, *, semantic=True):
     writer, reviewer, written = _review_positions(results, task_order)
+    if semantic:
+        reviewer = next((i for i in range(len(task_order) - 1, -1, -1)
+                         if task_order[i] in results and results[task_order[i]].agent == "review"
+                         and results[task_order[i]].payload.get("semantic_reviewed")), -1)
     if reviewer < 0:
         return False
     verdict = results[task_order[reviewer]].payload
@@ -653,7 +657,8 @@ class TeamRun:
                     self.runtime.emit("run_stopped", {"reason": state.stop_reason})
                     return False
                 if result.pending_resume:
-                    self._finish(state, "网络或等待预算受限，研究未完成（可恢复）",
+                    self._finish(state, str(result.payload.get("deferred_reason") or
+                                            "任务未完成，保留已有成果（可恢复）"),
                                  status=TaskStatus.partial.value)
                     return False
                 if task.agent == "review" and result.payload.get("recovery_required"):
@@ -801,14 +806,22 @@ class TeamRun:
                                      and self.loop.results[self.outcome.task_order[index]].agent == "review")), -1)
             reviewed = (self.loop.results[self.outcome.task_order[review_index]]
                         if review_index >= 0 else None)
+            latest_attempt = dict(reviewed.payload or {}) if reviewed else {}
+            if not latest_attempt.get("semantic_reviewed"):
+                reviewed = next((self.loop.results[tid] for tid in reversed(self.outcome.task_order)
+                                 if tid in self.loop.results and self.loop.results[tid].agent == "review"
+                                 and self.loop.results[tid].payload.get("semantic_reviewed")), reviewed)
             judgement = dict(reviewed.payload or {}) if reviewed else {}
             review = {
                 "score": judgement.get("score"), "threshold": self.review_threshold,
                 "decision": judgement.get("decision", "unreviewed"),
                 "accepted": bool(judgement.get("accepted")),
-                "recovery_required": str(judgement.get("recovery_required") or ""),
+                "recovery_required": str(latest_attempt.get("recovery_required") or judgement.get("recovery_required") or ""),
                 "semantic_reviewed": bool(judgement.get("semantic_reviewed")),
                 "reviewed_manuscript": judgement.get("reviewed_manuscript"),
+                "issues": judgement.get("issues", []),
+                "latest_attempt": latest_attempt,
+                "latest_attempt_incomplete": bool(latest_attempt and not latest_attempt.get("semantic_reviewed")),
                 "current": _review_matches_manuscript(self.loop.results, self.outcome.task_order,
                                                        self._latest_manuscript())}
             self.outcome.delivery = apply_review_gate(self.outcome.delivery, review)

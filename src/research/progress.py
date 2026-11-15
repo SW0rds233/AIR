@@ -107,11 +107,19 @@ def write_run_progress(store: Any, *, project_id: str, problem_id: str,
         "note": "过程快照；科研对象以 ResearchStore 为准，稿件尚未完成最终审阅",
     }
     if task.agent == "review":
-        _atomic_text(root / "review-report.json",
+        _atomic_text(root / "review-attempt.json",
                      json.dumps(dict(result.payload or {}), ensure_ascii=False, indent=2))
-    elif (root / "review-report.json").is_file():
+        if result.payload.get("semantic_reviewed"):
+            _atomic_text(root / "review-report.json",
+                         json.dumps(dict(result.payload), ensure_ascii=False, indent=2))
+    if (root / "review-report.json").is_file():
         try:
             report["review"] = json.loads((root / "review-report.json").read_text("utf-8"))
+        except (OSError, ValueError):
+            pass
+    if (root / "review-attempt.json").is_file():
+        try:
+            report["latest_review_attempt"] = json.loads((root / "review-attempt.json").read_text("utf-8"))
         except (OSError, ValueError):
             pass
     _atomic_text(root / "progress.json", json.dumps(report, ensure_ascii=False, indent=2))
