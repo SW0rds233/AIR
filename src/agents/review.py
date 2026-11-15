@@ -151,6 +151,10 @@ class ReviewAgent(AgentBase):
 - citation 问题按具体动作给 repair_action：verify_source（核验元数据/原文）、
   replace_source（确需新来源）、revise_citation（撤引、改用途、补限定）。前两者交 evidence，
   后者交 writing。验收须可在当前正文逐项判断，不能要求每章重复同一公式与局限。
+  fidelity/completeness 中的参数、分析单位或来源缺口同样遵循此路由。
+  来源 publication_status 未核准或没有直接摘录时，不能要求作者把参数写成事实，应先 verify_source。
+  背景/综述引用只审其实际原句，不用针对另一命题的 insufficient 要求每处重复免责声明。
+  来源机构、地址被误录为作者时要求核对作者原页，不靠缩写或重排猜姓名。
 
 最终输出 JSON:
 {"issues": [{"severity": "blocking|major|minor|advisory", "category": "science|fidelity|citation|readability|figure|completeness",
@@ -279,6 +283,7 @@ class ReviewAgent(AgentBase):
 
         deterministic = deterministic_issues(context)
         issues = _reuse_review_ids(_merge_issues(issues, deterministic), context)
+        issues = _route_unverified_source_repairs(issues, context)
         issues = [issue for issue in issues if issue.category not in excluded]
         if parse_note:
             unresolved.append(parse_note)
@@ -370,24 +375,38 @@ def deterministic_issues(context: ContextPack) -> list[ReviewIssueRef]:
     claims = context.objects.get("claim") or []
     figures = context.objects.get("figure") or []
     brief = (context.objects.get("brief") or [{}])[0]
-    cited_ids = {str(ref.get("id") or "") for block in _manuscript_blocks(manuscript_rows)
+    manuscript_blocks = _manuscript_blocks(manuscript_rows)
+    cited_ids = {str(ref.get("id") or "") for block in manuscript_blocks
                  for kind, ref in zip(block.get("ref_kinds") or [], block.get("refs") or [])
                  if kind == "source" and isinstance(ref, dict)}
 
     # 1. 引用不可定位
-    for source in evidence:
-        if str(source.get("source_id") or source.get("id") or "") not in cited_ids:
+    for source_id in sorted(cited_ids):
+        rows = [row for row in evidence if str(row.get('source_id') or row.get('id') or '') == source_id]
+        if not rows:
             continue
-        from src.publication.references import citation_eligible, research_citation_eligible
-        if not citation_eligible(source):
+        from src.publication.references import citation_eligible, research_citation_eligible, author_metadata_problems
+        published = [row for row in rows if citation_eligible(row)]
+        source = max(published or rows, key=lambda row: (bool(row.get('locator')), len(str(row.get('excerpt') or ''))))
+        unsupported_blocks = []
+        for block in manuscript_blocks:
+            refs = list(zip(block.get('ref_kinds') or [], block.get('refs') or []))
+            if not any(kind == 'source' and ref.get('id') == source_id for kind, ref in refs):
+                continue
+            claims_in_block = {ref.get('id') for kind, ref in refs if kind == 'claim'}
+            scoped = [row for row in published if row.get('claim_id') in claims_in_block]
+            if published and not any(research_citation_eligible(row) for row in (scoped or published)):
+                unsupported_blocks.append(str(block.get('block_id') or ''))
+        if not published:
+            metadata_problems = author_metadata_problems(source)
             issues.append(_issue(category="citation", severity="major",
-                summary=f"正式引用尚未核查出版版本: {clip(str(source.get('title', '')), 100)}",
-                affected=[str(source.get("source_id") or source.get("id") or "")],
-                owner="evidence", acceptance=["核查已出版版本并补齐正式书目信息，或撤除引用"]))
-        elif not research_citation_eligible(source):
+                summary=f"{'作者元数据含疑似机构或脚注' if metadata_problems else '正式引用尚未核查出版版本'}: {clip(str(source.get('title', '')), 100)}",
+                affected=[source_id], owner="evidence",
+                acceptance=metadata_problems or ["核查已出版版本并补齐正式书目信息，或撤除引用"]))
+        elif unsupported_blocks:
             issues.append(_issue(category="citation", severity="major",
                 summary=f"引用来源与当前论断的支持关系不足: {clip(str(source.get('title', '')), 100)}",
-                affected=[str(source.get("source_id") or source.get("id") or "")],
+                affected=[source_id, *filter(None, unsupported_blocks)],
                 owner="writing", acceptance=["撤除该引用，或登记可定位且确有相关性的证据片段"]))
         if source.get("locator"):
             continue
@@ -843,11 +862,27 @@ def _review_date_conflicts(payload: dict) -> list[str]:
     return conflicts
 
 
+def _route_unverified_source_repairs(issues, context):
+    """Adding numerical facts from an unverified source requires evidence work."""
+    from src.publication.references import citation_eligible
+    sources = {str(s.get('source_id') or s.get('id')):s for s in context.objects.get('evidence') or []}
+    routed = []
+    for issue in issues:
+        material = issue.summary + ' ' + ' '.join(issue.acceptance)
+        needs_source = (issue.repair_action == 'revise_text' and issue.category in {'fidelity','citation','completeness'}
+            and re.search(r'参数|数值|元数据|作者|出版|数据缺失', material)
+            and any(ref.id in sources and not citation_eligible(sources[ref.id]) for ref in issue.affected_refs))
+        if needs_source:
+            issue = issue.model_copy(update={'repair_action':'verify_source','suggested_owner':'evidence'})
+        routed.append(issue)
+    return routed
+
+
 def repair_owner(issue: ReviewIssueRef) -> str:
     """Route the repair action, not every citation label, to the right role."""
+    if issue.repair_action in {"verify_source", "replace_source"}:
+        return "evidence"
     if issue.category == "citation":
-        if issue.repair_action in {"verify_source", "replace_source"}:
-            return "evidence"
         if issue.repair_action == "revise_citation":
             return "writing"
         if re.search(r"出版|年份|元数据|DOI|书目|缺少.*定位", issue.summary, re.I):
@@ -871,6 +906,8 @@ def _needs_from(issues: list[ReviewIssueRef]) -> list[ResearchNeed]:
         owner = repair_owner(issue)
         if owner == "writing":
             kind = NeedKind.manuscript_revision
+        elif owner == "evidence":
+            kind = NeedKind.more_sources
         doi = re.search(r"10\.\d{4,9}/[^\s。\"<>]+", issue.locator)
         needs.append(ResearchNeed(
             kind=kind,

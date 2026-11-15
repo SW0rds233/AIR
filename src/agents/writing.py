@@ -86,7 +86,8 @@ formal_spec 的 premises 是条件假设，conclusion 的核验不验证这些�
    正文里不要手写 `[1]` 或来源内部 id; 用 `ref_ids` 关联来源, 编号由渲染器分配;
    来源清单为空时, 正文一个引用标记都不要写 (没有来源就不可能有引用);
    正式参考文献只允许已核查出版的条目；预印本及出版状态未知的资料不得引用。
-   文献表由系统按 GB/T 7714 顺序编码生成，不自行编写。引用应嵌入所支持的论述，
+   文献表由系统按 GB/T 7714-2015 顺序编码生成，不自行编写。同处引用按编号升序去重。
+   引用应嵌入所支持的论述，
    不写“依据: [n]”，不笼统堆砌多篇引用。公式中的长度、阶数、维度、下标必须逐步一致。
    精确存在性问题可接受完整对象或能无歧义重建对象的紧凑构造；不能把“必须列出全部元素”
    写成唯一证书格式。数值式的机器核验只支持被编码的原子断言，不能自动证明同段的其他断言。
@@ -100,6 +101,8 @@ formal_spec 的 premises 是条件假设，conclusion 的核验不验证这些�
    各节只保留影响本节论证的限定；结论回答研究问题，不逐章重讲机制链。
    后续研究写成建议，不编造作者分工、完成日期、预注册平台或已承诺的执行计划。
    核验 scope=step 只支持局部编码检查；unsupported 是工具不受理，不是反例，
+   counterexample_found 是已找到反例，必须给出对应命题与反例赋值，不得降格为待核验或工具不支持。
+   refuted 只否决其编码和前提下的断言，不证明现实效应方向。摘要、结果和结论须使用同一状态。
    也不是“定义尚未成立”。仅在影响读者判断时说明科学边界，具体错误留在研究记录。
 
 不得: 编造数值/引用/定理; 把非形式化论证写成"已证明"; 把案例类比写成普适结论。
@@ -223,12 +226,43 @@ formal_spec 的 premises 是条件假设，conclusion 的核验不验证这些�
 
     def _patch_with_llm(self, task: AgentTask, runtime: AgentRuntime,
                         usage: UsageRecord, packet: WritingPacket) -> tuple[Manuscript | None, str]:
+        """Cover all located blocks in bounded batches, preserving partial work."""
+        prior = Manuscript.model_validate(packet.prior_manuscript)
+        targets = revision_targets(prior, packet.review_issues, task.hints, limit=None)
+        if not targets:
+            return self._patch_batch_with_llm(task, runtime, usage, packet)
+        current, notes, changed = prior, [], []
+        for offset in range(0, len(targets), 12):
+            if task.budget.exceeded_by(usage):
+                notes.append('修订预算耗尽，保留已完成批次')
+                break
+            next_packet = packet.model_copy(update={'prior_manuscript':current.to_dict()})
+            patched, note = self._patch_batch_with_llm(task, runtime, usage, next_packet,
+                target_ids=[b.block_id for b in targets[offset:offset+12]])
+            if note:
+                notes.append(note)
+            if patched is None:
+                break
+            changed.extend(patched.revision_log[-1].get('changed_blocks', []))
+            current = patched
+        if not changed:
+            return None, '; '.join(notes) or '未产生有效修订'
+        pending = [b.block_id for b in targets if b.block_id not in changed]
+        current.revision_log[-1]['unaddressed_blocks'] = pending
+        if pending:
+            current.gaps.append({'kind':'revision_pending', 'block_ids':pending,
+                                 'detail':'这些定位块尚未修改；其他修改也仍须独立复审', 'blocking':False})
+        return current, '; '.join(notes)
+
+    def _patch_batch_with_llm(self, task: AgentTask, runtime: AgentRuntime,
+                        usage: UsageRecord, packet: WritingPacket, *, target_ids=None) -> tuple[Manuscript | None, str]:
         """Patch located blocks using registered sources; preserve scientific object identities."""
         import json
         from langchain_core.messages import HumanMessage, SystemMessage
 
         prior = Manuscript.model_validate(packet.prior_manuscript)
-        targets = revision_targets(prior, packet.review_issues, task.hints)
+        targets = ([b for b in prior.all_blocks() if b.block_id in target_ids] if target_ids is not None
+                   else revision_targets(prior, packet.review_issues, task.hints))
         fallback_note = ""
         if not targets:
             targets = revision_section_targets(prior, packet.review_issues, task.objective)
@@ -237,8 +271,10 @@ formal_spec 的 premises 是条件假设，conclusion 的核验不验证这些�
             return None, "稿件无可修订正文章节"
         if not runtime.llm_available("writing") or task.budget.exceeded_by(usage):
             return None, "写作模型不可用或预算已耗尽"
-        sources = rank_sources(packet.sources, priority_ids={ref.id for block in targets
-            for kind, ref in zip(block.ref_kinds, block.refs) if kind == "source"})[:12]
+        priority_ids = {str(ref.get('id') or '') for issue in packet.review_issues
+                        for ref in issue.get('affected_refs') or [] if isinstance(ref, dict)}
+        priority_ids.update(ref.id for block in targets for kind, ref in zip(block.ref_kinds, block.refs) if kind == 'source')
+        sources = rank_sources(packet.sources, limit=12, priority_ids=priority_ids)
         source_ids = {str(s.get("source_id") or s.get("id")) for s in sources
                       if research_citation_eligible(s)}
         material = _section_material(packet, "revision", sources)
@@ -256,6 +292,7 @@ formal_spec 的 premises 是条件假设，conclusion 的核验不验证这些�
                     + "\n可替换或删除引用，只能使用这些 source_ids: " + json.dumps(sorted(source_ids))
                     + '\n返回 JSON: {"blocks":[{"block_id":"原 id","text":"完整修订文字","math":"公式体，无 $ 分隔符",'
                       '"source_ids":["该块保留或新增的来源 id"]}]}。source_ids 省略则保留原引用，空列表表示撤引。'
+                      '表格块可同时修订 heading 与 data={"header":[],"rows":[]}；不得为普通段落改变结构。'
                       f'只返回 blocks 列表内有修改的块，最多 {len(targets)} 块；section_context 只读。'
                       '不能解决的问题保留原文。'),
             ]
@@ -351,7 +388,8 @@ formal_spec 的 premises 是条件假设，conclusion 的核验不验证这些�
                 "与审阅问题有关的段落在 review_issue_ids 写入真实问题 id；"
                 "若缺少研究依据导致无法解决，把具体缺口写入 unresolved，不编造补丁。"
                 "只返回 JSON: {\"blocks\":[{\"role\":\"background|evidence|method|"
-                "claim|reasoning|limitation|transition\",\"text\":\"\",\"ref_ids\":[],"
+                "claim|reasoning|limitation|transition|table\",\"text\":\"\",\"ref_ids\":[],"
+                "\"heading\":\"表题，不手写编号\",\"data\":{\"header\":[],\"rows\":[]},"
                 "\"review_issue_ids\":[],\"math\":\"\",\"needs_check\":false}],"
                 "\"unresolved\":[]}。"
             )
@@ -883,6 +921,9 @@ def _section_material(packet: WritingPacket, role: str,
             "support_scope": row.get("support_scope", "claim"),
             "supported_link": row.get("supported_link"), "condition_notes": row.get("condition_notes"),
             "supported_target": row.get("supported_target"),
+            "claim_id": row.get("claim_id"), "support_reason": row.get("support_reason"),
+            "support_assessments": row.get("_support_assessments", []),
+            "citation_boundary": "关系评价只针对对应 claim_id/scope；引用当前句须由摘录直接支持，背景或类比不等于经验效应",
             "publication_status": row.get("publication_status"),
             "publication_verified_by": row.get("publication_verified_by"),
             "locator": row.get("locator"), "relevance": row.get("relevance_reason"),
@@ -901,15 +942,21 @@ def _section_material(packet: WritingPacket, role: str,
                 "variables", "variable_domains", "units", "assumptions", "approximations", "boundaries", "applicability", "open_conditions")}
             for row in packet.models[:10]], ensure_ascii=False)[:14000])
         pieces.append("验证与数据计划: " + json.dumps(packet.validations[:5], ensure_ascii=False)[:4500])
-    if role in {"result", "revision"}:
+    if role in {"result", "discussion", "conclusion", "revision"}:
         pieces.append("已通过的核验记录（scope=step 仅覆盖局部）: " + json.dumps([
             row for row in packet.verifications
             if row.get("validation_status") == "verified" and not row.get("stale")
         ][:12], ensure_ascii=False)[:8500])
+        pieces.append("已发现的反例（否决所列命题，不得写成待核验；不外推现实效应）: " + json.dumps([
+            {key: row.get(key) for key in ('id', 'claim_id', 'claim_version', 'validation_status',
+                'status', 'detail', 'scope', 'arguments', 'counterexample')}
+            for row in packet.verifications
+            if row.get('validation_status') == 'counterexample_found' and not row.get('stale')
+        ][:12], ensure_ascii=False))
         pieces.append("未完成的核验及原因（用于修复，不当作反例）: " + json.dumps([
             {key: row.get(key) for key in ('id', 'claim_id', 'status', 'detail', 'scope', 'stale', 'stale_reason')}
             for row in packet.verifications
-            if row.get('validation_status') != 'verified' or row.get('stale')
+            if row.get('validation_status') not in {'verified', 'counterexample_found'} or row.get('stale')
         ][:8], ensure_ascii=False)[:3500])
     if role in {"result", "discussion"}:
         pieces.append("已登记图: " + json.dumps([
@@ -994,6 +1041,8 @@ def finalise_manuscript(manuscript: Manuscript, packet: WritingPacket,
     """
     from src.publication.math_content import normalize_manuscript_math
     normalize_manuscript_math(manuscript)
+    from src.publication.tables import normalize_tables
+    normalize_tables(manuscript, inplace=True)
     notes: list[str] = []
     if not (manuscript.abstract or "").strip():
         manuscript.abstract = _abstract_of(packet)
@@ -1018,7 +1067,7 @@ def finalise_manuscript(manuscript: Manuscript, packet: WritingPacket,
             if kind == RefKind.source.value and ref.id not in eligible:
                 block.needs_check = True
                 manuscript.gaps.append({"kind": "ineligible_reference",
-                                        "detail": f"来源 {ref.id} 未确认正式出版，已撤除正文引用，相关论述须复核",
+                                        "detail": f"来源 {ref.id} 的出版信息、作者元数据或引用用途未通过核查，已撤除正文引用，相关论述须复核",
                                         "blocking": True})
             else:
                 pairs.append((kind, ref))
@@ -1217,6 +1266,7 @@ def _manuscript_from_payload(payload: dict[str, Any],
                           heading=str(block_payload.get("heading") or ""),
                           text=str(block_payload.get("text") or ""),
                           math=str(block_payload.get("math") or ""),
+                          data=dict(block_payload.get('data') or {}) if isinstance(block_payload.get('data'), dict) else {},
                           needs_check=bool(block_payload.get("needs_check", False)),
                           review_issue_ids=[issue_id for issue_id in as_list_of_str(
                               block_payload.get("review_issue_ids")) if issue_id in known_review_issues],
@@ -1244,7 +1294,7 @@ def _manuscript_from_payload(payload: dict[str, Any],
 
 
 def revision_targets(manuscript: Manuscript, issues: list[dict[str, Any]],
-                     hints: dict[str, Any]) -> list[Block]:
+                     hints: dict[str, Any], *, limit: int | None = 12) -> list[Block]:
     refs = set(hints.get("focus_blocks") or [])
     locators = [str(hints.get("locator") or "")]
     for issue in issues:
@@ -1259,7 +1309,7 @@ def revision_targets(manuscript: Manuscript, issues: list[dict[str, Any]],
                 (section.heading and section.heading in locator)) for locator in locators)
             if ids & refs or located:
                 targets.append(block)
-    return targets[:12]
+    return targets if limit is None else targets[:limit]
 
 
 def revision_section_targets(manuscript: Manuscript, issues: list[dict[str, Any]], objective: str) -> list[Block]:
@@ -1297,13 +1347,20 @@ def apply_block_patch(manuscript: Manuscript, patches: Any, allowed: set[str], *
         if len(changed_blocks) >= 12:
             dropped.append({"block_id": block_id, "reason": "超过单次 12 块修订上限"})
             continue
-        extra = sorted(set(patch) - {"block_id", "text", "math", "source_ids"})
+        extra = sorted(set(patch) - {"block_id", "text", "math", "source_ids", "heading", "data"})
         if extra:
             ignored.append({"block_id": block_id, "fields": extra})
         # Validate the whole block before applying any part of it.
         if any(field in patch and not isinstance(patch[field], str) for field in ("text", "math")):
             dropped.append({"block_id": block_id, "reason": "正文与公式必须为字符串"})
             continue
+        if 'data' in patch or 'heading' in patch:
+            from src.publication.tables import valid_table
+            if (blocks[block_id].role != BlockRole.table
+                    or ('data' in patch and not valid_table(patch['data']))
+                    or ('heading' in patch and not isinstance(patch['heading'], str))):
+                dropped.append({'block_id':block_id, 'reason':'只允许修订已有表格的表题与等宽行列数据'})
+                continue
         if "source_ids" in patch:
             requested = patch["source_ids"]
             if (source_ids is None or not isinstance(requested, list)
@@ -1319,7 +1376,7 @@ def apply_block_patch(manuscript: Manuscript, patches: Any, allowed: set[str], *
             block.refs = [ref for _, ref in kept]
             for source_id in dict.fromkeys(requested):
                 block.add_ref("source", ObjectRef(id=source_id))
-        for field in ("text", "math"):
+        for field in ("text", "math", "heading", "data"):
             if field in patch:
                 setattr(block, field, patch[field])
         if before != block.to_dict():
@@ -1390,6 +1447,8 @@ def render_markdown(manuscript: Manuscript, *,
     """把稿件渲染为 Markdown (保守: 不执行任何来源文本, 编号在渲染时分配)。"""
     from src.publication.schemas import assign_render_numbers
 
+    from src.publication.tables import normalize_tables, markdown_table
+    manuscript = normalize_tables(manuscript)
     numbers = assign_render_numbers(manuscript)
     lines: list[str] = [f"# {manuscript.title}", ""]
     if manuscript.abstract:
@@ -1401,10 +1460,8 @@ def render_markdown(manuscript: Manuscript, *,
         lines.append("")
         for block in section.blocks:
             text = block.text
-            marks = [f"[{numbers['citations'][ref.id]}]"
-                     for kind, ref in zip(block.ref_kinds, block.refs)
-                     if kind == RefKind.source.value and ref.id in numbers["citations"]]
-            text = citation_suffix(text, "".join(marks))
+            from src.publication.references import citation_numbers, citation_group
+            text = citation_suffix(text, citation_group(citation_numbers(block, numbers['citations'])))
             if block.math:
                 from src.publication.math_content import math_parts
                 for is_math, content in math_parts(block.math):
@@ -1412,6 +1469,8 @@ def render_markdown(manuscript: Manuscript, *,
             if text:
                 lines.append(text)
                 lines.append("")
+            if block.role == BlockRole.table:
+                lines.extend(markdown_table(block, numbers['tables'].get(block.block_id, '')))
             # Formula/table-only blocks need the same trace anchors as paragraphs.
             lines.append(f"<!-- block:{block.block_id} -->")
             lines.append("")

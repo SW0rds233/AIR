@@ -123,6 +123,7 @@ LATEX_PREAMBLE = r"""\documentclass[UTF8,a4paper,12pt]{ctexart}
 \usepackage{booktabs}
 \usepackage{array}
 \usepackage{tabularx}
+\usepackage{cite}
 \usepackage{hyperref}
 \hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
 % 可自动换行的 X 列 (左对齐), 用于宽表格撑满 \textwidth 而不越界
@@ -696,6 +697,8 @@ def render_latex(manuscript: Manuscript, *, author: str = "AI Research Team",
     首次引用顺序分配, 这个映射只提供条目的**文字**; 缺条目时退回对象 id, 不编造作者
     与年份。
     """
+    from src.publication.tables import normalize_tables
+    manuscript = normalize_tables(manuscript)
     numbers = assign_render_numbers(manuscript)
     citations: dict[str, int] = numbers["citations"]
     labels = dict(references or {})
@@ -767,15 +770,16 @@ def _render_block(block: Block, citations: dict[str, int],
                         for part in tagged]
             else:
                 out += ["", f"\\begin{{equation}}{_display_math(content)}\\end{{equation}}", ""]
-    marks = [f"\\cite{{ref{citations[ref.id]}}}"
-             for kind, ref in zip(block.ref_kinds, block.refs)
-             if kind == RefKind.source.value and ref.id in citations]
-    from src.publication.references import citation_suffix
+    from src.publication.references import citation_suffix, citation_numbers
+    ordered = citation_numbers(block, citations)
+    marks = "\\cite{" + ",".join(f"ref{n}" for n in ordered) + "}" if ordered else ""
     if text:
-        out.append(citation_suffix(text, "".join(marks)))
+        out.append(citation_suffix(text, marks))
         out.append("")
+    elif marks:
+        out.append(marks)
     if block.role.value == "table" and block.data:
-        out.extend(_render_table(block.data))
+        out.extend(_render_table(block.data, block.heading, block.block_id))
     for kind, ref in zip(block.ref_kinds, block.refs):
         if kind == RefKind.figure.value and ref.id:
             path = figures.get(ref.id, "")
@@ -790,17 +794,21 @@ def _render_block(block: Block, citations: dict[str, int],
     return out
 
 
-def _render_table(data: dict[str, Any]) -> list[str]:
+def _render_table(data: dict[str, Any], heading: str = '', block_id: str = '') -> list[str]:
     """结构化的表格块 → `tabular` (列数由表头决定, 不猜)。"""
     header = [str(h) for h in (data.get("header") or [])]
     rows = data.get("rows") or []
     if not header:
         return []
     columns = " ".join("L" if i == 0 else "L" for i in range(len(header)))
-    out = [r"\begin{table}[htbp]", r"\centering",
+    from src.publication.tables import table_title
+    out = [r"\begin{table}[htbp]", r"\centering", r"\small",
+           f"\\caption{{{escape_latex(table_title(heading) or '数据表')}}}",
+           f"\\label{{table:{re.sub(r'[^A-Za-z0-9_-]', '', block_id)}}}",
+           r"\renewcommand{\arraystretch}{1.2}",
            f"\\begin{{tabularx}}{{\\textwidth}}{{{columns}}}", r"\toprule",
            " & ".join(escape_latex(h) for h in header) + r" \\", r"\midrule"]
-    for row in rows[:50]:
+    for row in rows:
         cells = [escape_latex(str(c)) for c in (row or [])][: len(header)]
         cells += [""] * (len(header) - len(cells))
         out.append(" & ".join(cells) + r" \\")

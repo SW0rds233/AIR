@@ -94,7 +94,17 @@ def rank_sources(rows: list[dict[str, Any]], limit: int = 20,
             cited = 0
         return linked + readable + relation + relevance + recency + cited
 
-    return sorted(eligible, key=lambda row: (-score(row), str(row.get("source_id") or row.get("id"))))[:limit]
+    ranked = sorted(eligible, key=lambda row: (-score(row), -len(str(row.get('excerpt') or '')),
+                                             str(row.get("source_id") or row.get("id"))))
+    unique = {}
+    for row in ranked:
+        key = str(row.get('source_id') or row.get('id') or '')
+        if key and key not in unique:
+            unique[key] = dict(row)
+            unique[key]['_support_assessments'] = [{field: other.get(field) for field in (
+                'claim_id','claim_version','relation','support_scope','supported_target','support_reason')}
+                for other in rows if str(other.get('source_id') or other.get('id') or '') == key]
+    return list(unique.values())[:limit]
 
 
 def revision_section(packet: WritingPacket, plan: dict[str, str | int]) -> tuple[dict[str, Any], list[dict[str, Any]]]:

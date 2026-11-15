@@ -233,6 +233,15 @@ def _obligations_for(claim: Claim, wants_equality: bool, method_available: dict[
 
     from src.research.classification import is_theoretical_claim
     theoretical = is_theoretical_claim(claim)
+    if (claim.claim_type == ClaimType.causal and claim.mechanism_links
+            and not claim.formal_spec and not (claim.lhs and claim.rhs) and not claim.expr
+            and claim.study.design.value in {"theory", "simulation", "none"}
+            and not (claim.study.rows or claim.study.data_ref or claim.study.data_table)):
+        # A proposed mechanism is an empirical hypothesis even when labelled
+        # "theory". Its support/transfer scope cannot be established by algebra.
+        return _applied_obligations(claim, ver, method_available) + [
+            _rule_obligation(claim, ver, "说明中介条件及尚未排除的混淆或替代解释",
+                             "control_confound", "候选机制不得升级为已识别的因果效应")]
     from src.verification.definitions import is_definition_assignment, is_notation_definition
     if is_notation_definition(claim):
         return [ProofObligation(statement="披露记号定义的变量域与适用条件（非待证结论）",
