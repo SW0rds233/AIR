@@ -1,4 +1,5 @@
 """Resolve publication versions and rank retrieval candidates before ingestion."""
+import json
 import re
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -76,9 +77,13 @@ def _matches(paper, candidate):
 
 def _crossref(row):
     dates = (row.get("published") or row.get("issued") or {}).get("date-parts") or [[]]
-    authors = ", ".join(" ".join(str(a.get(k) or "") for k in ("given", "family")).strip()
-                        or str(a.get("name") or "") for a in row.get("author") or [])
+    def author_name(author):
+        family, given = str(author.get('family') or ''), str(author.get('given') or '')
+        return ((family + given) if re.search(r'[\u4e00-\u9fff]', family + given)
+                else ' '.join(v for v in (given, family) if v)) or str(author.get('name') or '')
+    authors = ", ".join(author_name(a) for a in row.get("author") or [])
     return {"title": (row.get("title") or [""])[0], "authors": authors,
+            "author_metadata": json.dumps(row.get('author') or [], ensure_ascii=False),
             "venue": (row.get("container-title") or [""])[0], "year": str(dates[0][0]) if dates[0] else "",
             "doi": normalize_doi(row.get("DOI")), "url": row.get("URL") or "",
             "publication_type": row.get("type", ""), "publisher": row.get("publisher", ""),

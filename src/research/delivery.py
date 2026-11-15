@@ -29,6 +29,8 @@ def apply_review_gate(delivery: dict[str, Any], review: dict[str, Any]) -> dict[
     accepted = review.get("accepted", review.get("decision") == "accepted")
     if not accepted or not review.get("current"):
         result["accepted"] = False
+        if result.get('level') == '完整论文':
+            result['level'] = '完整论文（待复审）' if not review.get('current') else '论文草稿（待修订）'
         reason = ("最后一版未审阅：独立语义审阅未完成或审阅早于最新稿件"
                   if not review.get("current") else "独立审阅尚未达到通过门槛")
         result["blocking"] = list(result.get("blocking") or [])

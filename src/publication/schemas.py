@@ -244,7 +244,11 @@ def assign_render_numbers(manuscript: Manuscript) -> dict[str, Any]:
     citations: dict[str, int] = {}
     figures: dict[str, str] = {}
     equations: dict[str, str] = {}
-    for block in manuscript.all_blocks():
+    tables: dict[str, str] = {}
+    body = [block for section in manuscript.sections if section.role != 'references'
+            and '参考文献' not in section.heading and section.heading.strip().lower() != 'references'
+            for block in section.blocks]
+    for block in body:
         for kind, ref in zip(block.ref_kinds, block.refs):
             if kind == RefKind.source.value and ref.id not in citations:
                 citations[ref.id] = len(citations) + 1
@@ -252,4 +256,6 @@ def assign_render_numbers(manuscript: Manuscript) -> dict[str, Any]:
                 figures[ref.id] = str(len(figures) + 1)
         if block.math and block.block_id not in equations:
             equations[block.block_id] = str(len(equations) + 1)
-    return {"citations": citations, "figures": figures, "equations": equations}
+        if block.role == BlockRole.table and block.data.get('header'):
+            tables[block.block_id] = str(len(tables) + 1)
+    return {"citations": citations, "figures": figures, "equations": equations, "tables": tables}
