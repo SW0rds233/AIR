@@ -23,10 +23,12 @@ def layout_diagnostics(log: str) -> dict:
     boxes = [float(value) for value in re.findall(
         r"Overfull \\[hv]box\s*\(([\d.]+)pt too (?:wide|high)\)", log or "")]
     missing = list(dict.fromkeys(re.findall(r"Missing character:[^\r\n]+", log or "")))
+    floats = [float(value) for value in re.findall(r'Float too large for page by ([\d.]+)pt', log or '')]
     return {"overfull_count": len(boxes), "max_overfull_pt": max(boxes, default=0.0),
             "tolerance_pt": OVERFULL_TOLERANCE_PT,
             "blocking_pt": OVERFULL_BLOCKING_PT,
-            "severity": ("error" if missing or max(boxes, default=0.0) > OVERFULL_BLOCKING_PT
+            "oversized_float_count": len(floats), "max_float_overflow_pt": max(floats, default=0.0),
+            "severity": ("error" if missing or floats or max(boxes, default=0.0) > OVERFULL_BLOCKING_PT
                          else "warning" if max(boxes, default=0.0) > OVERFULL_TOLERANCE_PT
                          else "ok"),
             "missing_glyphs": missing}
@@ -35,6 +37,7 @@ _RERUN_PATTERNS = (
     r"There were undefined references",
     r"Citation\s+`[^']+'\s+.*undefined",
     r"Label\s+[`']?[^`']+[`']?\s+multiply defined",
+    r"(?:Table|Column) widths have changed",
 )
 
 
@@ -59,11 +62,9 @@ def compile_latex(tex_path: str, workdir: str | None = None, engine: str = "xela
             if engine_log.is_file():
                 log += "\n" + engine_log.read_text(encoding="utf-8", errors="replace")
             # TeX can leave a partial PDF on failure; its presence is not success.
-            lines = log.splitlines()
-            errors = ['\n'.join(lines[index:index + 5]).strip()
-                      for index, line in enumerate(lines) if line.startswith('!')]
+            errors = extract_latex_errors(log)
             if errors:
-                return False, "LaTeX 编译报错, 输出可能被截断:\n" + "\n".join(errors[:10])
+                return False, "LaTeX 编译报错, 输出可能被截断:\n" + "\n".join(errors[:10]) + '\n' + log
             if result.returncode != 0:
                 if result.returncode & 0xFFFFFFFF == 0xC0000135:
                     return False, (f"{engine} 无法启动：Windows 缺少运行库 DLL (0xC0000135)。"
@@ -125,13 +126,16 @@ def compile_latex(tex_path: str, workdir: str | None = None, engine: str = "xela
     # 编译报错时**不能**再用"PDF 存在且非空"兜底: LaTeX 遇错仍会写出截断的 PDF
     #, 旧逻辑据此返回成功, 于是半篇论文被当成正常交付。
     if not last_ok:
-        return False, last_log[-2000:]
+        # Preserve the first fatal diagnostic, even if later warnings fill the tail.
+        return False, last_log
 
     remaining = [pattern for pattern in _RERUN_PATTERNS
                  if re.search(pattern, last_log, re.IGNORECASE)]
     if remaining:
         return False, "交叉引用/标签经过多遍编译仍未稳定:\n" + last_log[-2000:]
     diagnostics = layout_diagnostics(last_log)
+    if diagnostics['oversized_float_count']:
+        return False, 'LaTeX 表格或图片浮体超过页高，内容可能被裁切:\n' + last_log
     if diagnostics["missing_glyphs"]:
         return False, "LaTeX 缺失字形，PDF 内容不完整:\n" + "\n".join(diagnostics["missing_glyphs"]) + "\n" + last_log
     if diagnostics["max_overfull_pt"] > OVERFULL_BLOCKING_PT:
@@ -154,15 +158,18 @@ def compile_latex(tex_path: str, workdir: str | None = None, engine: str = "xela
 
 
 def extract_latex_errors(log: str) -> list[str]:
-    """从编译日志提取可读错误列表（供 LLM 修复参考）"""
-    errors = []
-    for m in re.finditer(r"^!(.*?)$", log, re.MULTILINE):
-        msg = m.group(1).strip()
-        # 跳过 Undefined control sequence 里含 endless loop 检测的噪音
-        if "Undefined control sequence" in msg:
-            errors.append(msg[:200])
-        elif len(msg) > 5:
-            errors.append(msg[:200])
+    """Handle both TeX ! errors and wrapped -file-line-error diagnostics."""
+    lines, errors = (log or '').splitlines(), []
+    for index, line in enumerate(lines):
+        if not (line.startswith('!') or re.match(r'^.+\.(?:tex|sty|cls):\d+:', line)):
+            continue
+        message = line.lstrip('!').strip()
+        for continuation in lines[index + 1:index + 4]:
+            if not continuation or continuation.startswith(('<', 'l.', '!', ' ')):
+                break
+            message += continuation.strip()  # TeX wraps even in the middle of "Missing".
+        if message and message not in errors:
+            errors.append(message[:400])
     return errors[:10]
 
 

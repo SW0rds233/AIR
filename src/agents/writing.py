@@ -108,6 +108,7 @@ formal_spec 的 premises 是条件假设，conclusion 的核验不验证这些�
 不得: 编造数值/引用/定理; 把非形式化论证写成"已证明"; 把案例类比写成普适结论。
 密集代数式使用完整的 LaTeX 数学表达式，不要混成文本模式的 ASCII 运算串。
 长公式分成有语义的推导行（aligned/split）；正文解释每行的条件与结论。
+展示公式放入 math 字段；aligned 等环境内不再嵌套 $，text 字段只保留正文与行内公式。
 公式内不要用 text 罗列超过三个中文路径名；索引取短符号，中文释义放正文或表格。
 同一模型只在方法节完整定义一次；结果节推演其含义，讨论节比较替代解释，结论直接回答问题。
 不要在每节重抄同一公式、来源摘要和资料缺口。缺口在局限集中说明，其他章节只写相关影响。
@@ -773,6 +774,21 @@ formal_spec 的 premises 是条件假设，conclusion 的核验不验证这些�
     def _needs_from(self, manuscript: Manuscript, packet: WritingPacket,
                     problems: list[str]) -> list[ResearchNeed]:
         needs: list[ResearchNeed] = []
+        from src.publication.references import author_metadata_problems
+        withdrawn = {gap.get('source_id') for gap in manuscript.gaps
+                     if gap.get('kind') == 'ineligible_reference' and gap.get('source_id')}
+        sources = {str(row.get('source_id') or row.get('id')):row for row in packet.sources}
+        for source_id in sorted(withdrawn):
+            if author_metadata_problems(sources.get(source_id, {})):
+                needs.append(ResearchNeed(kind=NeedKind.more_sources, owner='evidence',
+                    statement='核查撤引来源的作者元数据和完整署名',
+                    why='作者异常导致撤引，须核查具体记录，不能依靠写作猜测姓名',
+                    blocked_refs=[ObjectRef(id=source_id)], blocking=True,
+                    acceptance=['按出版原页核对完整署名并记录出处；不可读时保持未核准'],
+                    hints={'root_cause_kind':'citation','repair_action':'verify_source',
+                           'focus_blocks':[source_id, *dict.fromkeys(gap['block_id'] for gap in manuscript.gaps
+                               if gap.get('source_id') == source_id and gap.get('block_id'))],
+                           'trigger_id':'author-metadata:' + source_id}))
         pending_claims = {ref.id for block in manuscript.all_blocks() if block.role == BlockRole.claim
                           for kind, ref in zip(block.ref_kinds, block.refs) if kind == RefKind.claim.value}
         for claim in packet.claims:
@@ -1061,12 +1077,17 @@ def finalise_manuscript(manuscript: Manuscript, packet: WritingPacket,
                            and (s.heading or "").strip().lower() != "references"]
     eligible = {str(s.get("source_id") or s.get("id")) for s in packet.sources
                 if research_citation_eligible(s)}
+    restored = {(block.block_id, ref.id) for block in manuscript.all_blocks()
+                for kind, ref in zip(block.ref_kinds, block.refs) if kind == 'source' and ref.id in eligible}
+    manuscript.gaps = [gap for gap in manuscript.gaps if not (gap.get('kind') == 'ineligible_reference'
+                       and (gap.get('block_id'), gap.get('source_id')) in restored)]
     for block in manuscript.all_blocks():
         pairs = []
         for kind, ref in zip(block.ref_kinds, block.refs):
             if kind == RefKind.source.value and ref.id not in eligible:
                 block.needs_check = True
-                manuscript.gaps.append({"kind": "ineligible_reference",
+                manuscript.gaps.append({"kind": "ineligible_reference", "source_id": ref.id,
+                                        "block_id": block.block_id,
                                         "detail": f"来源 {ref.id} 的出版信息、作者元数据或引用用途未通过核查，已撤除正文引用，相关论述须复核",
                                         "blocking": True})
             else:

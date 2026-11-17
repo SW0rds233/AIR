@@ -26,6 +26,9 @@ class PublicationMetadata(BaseModel):
     medium: str = ""
     accessed_date: str = ""
     updated_date: str = ""
+    author_verified_by: str = ""
+    author_source_url: str = ""
+    author_note: str = ""
 
 
 BIBLIO_FIELDS = tuple(PublicationMetadata.model_fields)
@@ -64,12 +67,28 @@ def _author_rows(source):
 
 def author_metadata_problems(source: dict) -> list[str]:
     """Reject obvious affiliation/footnote contamination, never guess the author."""
+    if source.get('author_verified_by') == 'unresolved':
+        return [source.get('author_note') or '作者原始署名尚未核准']
     value = _author_rows(source)
     names = value if isinstance(value, list) else re.split(r'\s*[,;；]\s*', str(value or ''))
+    if not isinstance(value, list) and re.search(r'[\u4e00-\u9fff]\s+[\u4e00-\u9fff]', str(value or '')):
+        return ['中文作者姓名含分隔空格，姓/名顺序和完整署名须回出版原页核对']
+    personal = [name for name in names if isinstance(name, dict) and name.get('family')]
+    if (any(re.search(r'[\u4e00-\u9fff]', str(name.get('family'))) for name in personal)
+            and any(re.search(r'[A-Za-z]', str(name.get('family'))) for name in personal)
+            and sum(name.get('sequence') == 'first' for name in personal) > 1):
+        return ['中英文署名中出现重复第一作者，须按出版原页区分作者与译名']
+    if (len(personal) >= 2 and all(str(name.get('given') or '').isupper()
+            and len(str(name.get('given') or '')) > 1 and str(name.get('family') or '').istitle()
+            for name in personal)):
+        return ['作者 given/family 字段疑似整体倒置，须核对原始署名，不能直接缩写']
     for name in names:
+        text = (str(name.get('name') or '') or ' '.join(str(name.get(k) or '') for k in ('family','given'))
+                ) if isinstance(name, dict) else str(name)
+        if re.search(r'\b\d{5,6}\b|@', text) or (len(text) > 140 and re.search(r'[;；]', text)):
+            return ['作者字段含地址或多个机构串，须回出版原页核对完整作者列表']
         if isinstance(name, dict) and name.get('name') and not name.get('family'):
-            continue  # An explicitly recorded corporate author is legitimate.
-        text = ' '.join(str(name.get(k) or '') for k in ('family','given')) if isinstance(name, dict) else str(name)
+            continue  # A corporate author is legitimate; an address is not.
         if (re.search(r'(^|\s)\d+[.)]?\s|@', text) or (len(names) > 1 and re.search(
                 r'\b(?:university|department|laboratory|research cent(?:er|re))\b|大学|实验室', text, re.I))):
             return ['作者字段含疑似机构、地址或脚注，须回出版原页核对，不能当作姓名缩写']

@@ -81,7 +81,7 @@ def test_markdown_table_becomes_numbered_table_in_both_formats():
     manuscript = Manuscript(title='论文', sections=[Section(heading='结果', blocks=[Block(
         text='表1 分析边界\n\n| 条件 | 用途 |\n| --- | --- |\n| 未决 | 进一步检验 |\n\n表后说明。')])])
     tex, md = render_latex(manuscript), render_markdown(manuscript)
-    assert r'\caption{分析边界}' in tex and r'\begin{tabularx}' in tex
+    assert r'\caption{分析边界}' in tex and r'\begin{longtable}' in tex
     assert '| --- |' not in tex and '表后说明。' in tex
     assert '**表 1 分析边界**' in md and '| 条件 | 用途 |' in md
 

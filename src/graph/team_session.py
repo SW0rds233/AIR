@@ -539,9 +539,9 @@ class TeamSession:
             return "unavailable", log
         if ok and not has_pdf:
             return "failed: 编译器报告成功但未生成 PDF", log
-        first_error = next((line.strip() for line in (log or '').splitlines()
-                            if line.lstrip().startswith('!')), '')
-        detail = first_error or ((log or '').splitlines()[0] if log else '无编译诊断')
+        from src.publication.compiler import extract_latex_errors
+        errors = extract_latex_errors(log)
+        detail = errors[0] if errors else ((log or '').splitlines()[0] if log else '无编译诊断')
         return f"failed: {detail[:400]}", log
 
 

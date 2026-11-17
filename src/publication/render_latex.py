@@ -123,6 +123,7 @@ LATEX_PREAMBLE = r"""\documentclass[UTF8,a4paper,12pt]{ctexart}
 \usepackage{booktabs}
 \usepackage{array}
 \usepackage{tabularx}
+\usepackage{longtable}
 \usepackage{cite}
 \usepackage{hyperref}
 \hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
@@ -445,8 +446,17 @@ def escape_latex(text: str) -> str:
     text = re.sub(r"\$\$(.*?)\$\$", _protect_display, text or "", flags=re.DOTALL)
     text = re.sub(r"\\\[(.*?)\\\]", _protect_display, text, flags=re.DOTALL)
     text = re.sub(r"\\\((.*?)\\\)", _protect_inline_delimited, text, flags=re.DOTALL)
-    # 原有的 $...$ 先摘出来, 下面所有替换都不碰数学模式内部
-    text = re.sub(r"(?<!\\)\$(?!\$)(?:\\.|[^$\\])*(?<!\\)\$", _protect, text or "")
+    # Bare display environments can arrive in prose after a writer patch. Protect
+    # the whole environment before inline commands/subscripts are auto-wrapped.
+    from src.publication.math_content import MATH_ENVIRONMENT, normalize_environment
+    def _protect_environment(match):
+        math_blocks.append(r'\begin{equation}' + _display_math(normalize_environment(match.group(0)))
+                           + r'\end{equation}')
+        return f"\x00MATH{len(math_blocks) - 1}\x00"
+    # Whichever starts first owns its contents: inline $...cases...$ must not
+    # acquire a nested display, and a bare aligned must not be split by inner $.
+    math_tokens = re.compile(MATH_ENVIRONMENT.pattern + r"|(?<!\\)\$(?!\$)(?:\\.|[^$\\])*(?<!\\)\$", re.S)
+    text = math_tokens.sub(lambda match: _protect_environment(match) if match.group('env') else _protect(match), text)
     def _store_math(value: str) -> str:
         math_blocks.append(value)
         return f"\x00MATH{len(math_blocks) - 1}\x00"
@@ -560,7 +570,8 @@ def escape_math(text: str) -> str:
 
 def _display_math(value: str) -> str:
     """Split long top-level formula groups; never split an existing TeX environment."""
-    body = escape_math(value)
+    from src.publication.math_content import normalize_environment
+    body = escape_math(normalize_environment(value))
     # Pure text-label sets need real row breaks: allowbreak is ineffective in
     # an aligned math cell. Keep each text command and the set semantics intact.
     def wrap_labels(match):
@@ -795,24 +806,30 @@ def _render_block(block: Block, citations: dict[str, int],
 
 
 def _render_table(data: dict[str, Any], heading: str = '', block_id: str = '') -> list[str]:
-    """结构化的表格块 → `tabular` (列数由表头决定, 不猜)。"""
+    """Page-breakable table with fixed total width and repeated column headings."""
     header = [str(h) for h in (data.get("header") or [])]
     rows = data.get("rows") or []
     if not header:
         return []
-    columns = " ".join("L" if i == 0 else "L" for i in range(len(header)))
+    # p columns wrap like X, but longtable can break between rows. Account for
+    # both tabcolsep margins of every column, keeping the table at textwidth.
+    width = rf'\dimexpr(\textwidth-{2*len(header)}\tabcolsep)/{len(header)}\relax'
+    columns = ' '.join(r'>{\raggedright\arraybackslash}p{' + width + '}' for _ in header)
     from src.publication.tables import table_title
-    out = [r"\begin{table}[htbp]", r"\centering", r"\small",
-           f"\\caption{{{escape_latex(table_title(heading) or '数据表')}}}",
-           f"\\label{{table:{re.sub(r'[^A-Za-z0-9_-]', '', block_id)}}}",
+    header_row = " & ".join(escape_latex(h) for h in header) + r" \\"
+    out = [r"\begingroup", r"\small",
            r"\renewcommand{\arraystretch}{1.2}",
-           f"\\begin{{tabularx}}{{\\textwidth}}{{{columns}}}", r"\toprule",
-           " & ".join(escape_latex(h) for h in header) + r" \\", r"\midrule"]
+           f"\\begin{{longtable}}{{{columns}}}",
+           f"\\caption{{{escape_latex(table_title(heading) or '数据表')}}}"
+           f"\\label{{table:{re.sub(r'[^A-Za-z0-9_-]', '', block_id)}}}" + r"\\",
+           r"\toprule", header_row, r"\midrule", r"\endfirsthead",
+           r"\toprule", header_row, r"\midrule", r"\endhead",
+           r"\midrule", r"\endfoot", r"\bottomrule", r"\endlastfoot"]
     for row in rows:
         cells = [escape_latex(str(c)) for c in (row or [])][: len(header)]
         cells += [""] * (len(header) - len(cells))
         out.append(" & ".join(cells) + r" \\")
-    out += [r"\bottomrule", r"\end{tabularx}", r"\end{table}", ""]
+    out += [r"\end{longtable}", r"\endgroup", ""]
     return out
 
 
