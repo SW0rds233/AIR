@@ -400,7 +400,7 @@ def deterministic_issues(context: ContextPack) -> list[ReviewIssueRef]:
         if not published:
             metadata_problems = author_metadata_problems(source)
             issues.append(_issue(category="citation", severity="major",
-                summary=f"{'作者元数据含疑似机构或脚注' if metadata_problems else '正式引用尚未核查出版版本'}: {clip(str(source.get('title', '')), 100)}",
+                summary=f"{'作者元数据尚未核准' if metadata_problems else '正式引用尚未核查出版版本'}: {clip(str(source.get('title', '')), 100)}",
                 affected=[source_id], owner="evidence",
                 acceptance=metadata_problems or ["核查已出版版本并补齐正式书目信息，或撤除引用"]))
         elif unsupported_blocks:
@@ -808,7 +808,8 @@ def _review_materials(context, *, compact=False):
         source = by_source.get(key, (0, {"source_id": key, "missing": True}))[1]
         row = {k: source.get(k) for k in ("id", "source_id", "title", "authors", "year", "venue",
             "doi", "excerpt", "locator", "content_level", "publication_status", "publication_type",
-            "publication_verified_by", "publication_note", "claim_id", "support_scope", "supported_link",
+            "publication_verified_by", "publication_note", "author_verified_by", "author_source_url",
+            "author_note", "claim_id", "support_scope", "supported_link",
             "condition_notes", "supported_target", "relevance_reason", "relation", "support_reason", "missing")}
         excerpt = str(row.get("excerpt") or "")
         row["excerpt"] = excerpt[:900 if compact else 1800]

@@ -1,13 +1,59 @@
 """Normalize model-supplied math without putting prose inside math mode."""
 import re
 
-_DELIMITED = re.compile(r'\$\$(.*?)\$\$|\\\[(.*?)\\\]|(?<!\\)\$([^$]*?)(?<!\\)\$|\\\((.*?)\\\)', re.S)
+MATH_ENVIRONMENT = re.compile(
+    r'\\begin\{(?P<env>aligned|alignedat|gathered|split|cases|[pbBvV]?matrix|'
+    r'equation\*?|align\*?|gather\*?|multline\*?)\}.*?\\end\{(?P=env)\}', re.S)
+_DELIMITED = re.compile(MATH_ENVIRONMENT.pattern +
+    r'|\$\$(?P<display>.*?)\$\$|\\\[(?P<bracket>.*?)\\\]|'
+    r'(?<!\\)\$(?P<inline>[^$]*?)(?<!\\)\$|\\\((?P<paren>.*?)\\\)', re.S)
+
+
+def normalize_environment(value: str) -> str:
+    """Keep an environment atomic, removing redundant math-mode switches only.
+
+    Dollar-delimited math inside a text group is legitimate and stays intact.
+    Outer display environments become bodies suitable for an equation wrapper.
+    """
+    out, i = [], 0
+    while i < len(value):
+        group = re.match(r'\\(?:text|textrm|textnormal|textbf|textit|mbox)\s*\{', value[i:])
+        if group:
+            end, depth = i + group.end(), 1
+            while end < len(value) and depth:
+                if value[end] == '\\':
+                    end += 2
+                    continue
+                depth += (value[end] == '{') - (value[end] == '}')
+                end += 1
+            out.append(value[i:end]); i = end
+        elif value[i] == '\\' and i + 1 < len(value):
+            out.append(value[i:i+2]); i += 2
+        elif value[i] == '$':
+            i += 1
+        else:
+            out.append(value[i]); i += 1
+    body = ''.join(out)
+    match = MATH_ENVIRONMENT.fullmatch(body)
+    if match:
+        env = match.group('env')
+        inner = body[len('\\begin{' + env + '}'):-len('\\end{' + env + '}')]
+        if env.rstrip('*') == 'equation':
+            return inner.strip()
+        replacement = {'align':'aligned', 'gather':'gathered', 'multline':'gathered'}.get(env.rstrip('*'))
+        if replacement:
+            return '\\begin{' + replacement + '}' + inner + '\\end{' + replacement + '}'
+    return body
 
 
 def math_parts(value: str) -> list[tuple[bool, str]]:
     text = (value or '').strip()
     if not text:
         return []
+    environment = MATH_ENVIRONMENT.match(text)
+    if environment and (environment.end() == len(text)
+                        or text[environment.end():].lstrip().startswith((r'\qquad', r'\quad'))):
+        return [(True, normalize_environment(text))]
     matches = list(_DELIMITED.finditer(text))
     if not matches:
         return [(True, text)]
@@ -17,9 +63,13 @@ def math_parts(value: str) -> list[tuple[bool, str]]:
         prose = text[cursor:match.start()].strip()
         if prose:
             parts.append((False, prose))
-        body = next(group for group in match.groups() if group is not None).strip()
-        if body:
-            parts.extend(math_parts(body))
+        if match.group('env'):
+            parts.append((True, normalize_environment(match.group(0))))
+        else:
+            body = next(match.group(key) for key in ('display','bracket','inline','paren')
+                        if match.group(key) is not None).strip()
+            if body:
+                parts.extend(math_parts(body))
         cursor = match.end()
     if text[cursor:].strip():
         parts.append((False, text[cursor:].strip()))

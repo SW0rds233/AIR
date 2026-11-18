@@ -174,6 +174,9 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
     # ---- 主流程 ----
     def _run(self, task: AgentTask, context: ContextPack, runtime: AgentRuntime,
              usage: UsageRecord, tools: list[ToolSpec]) -> AgentResult:
+        repaired = self._repair_author_metadata(task, context, usage)
+        if repaired is not None:
+            return repaired
         query = _query_of(task, context)
         policy = task.source_policy or "user_kb"
         retrieval_plan = self.plan_retrieval(task, context, runtime, usage)
@@ -353,6 +356,40 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
         return self.partial(task, summary + " | 本轮查询没有返回来源，不代表文献不存在",
                             changes=changes, needs=needs, unresolved=unresolved,
                             usage=usage, payload=payload)
+
+    def _repair_author_metadata(self, task, context, usage):
+        """Recheck the cited record itself instead of retrieving the same bad cache."""
+        if (task.source_policy not in {'both', 'autonomous'}
+                or task.hints.get('root_cause_kind') != 'citation'
+                or task.hints.get('repair_action') not in {'verify_source', '', None}
+                or not re.search(r'作者|署名|元数据|书目', task.objective)):
+            return None
+        targets = {ref.id for ref in task.input_refs} | set(task.hints.get('focus_blocks') or [])
+        rows = {str(row.get('source_id') or row.get('id')): row for row in context.objects.get('evidence') or []
+                if str(row.get('source_id') or row.get('id')) in targets}
+        if not rows:
+            return None
+        from src.kb.publication import verify_publication
+        from src.publication.references import author_metadata_problems
+        changes, unresolved = [], []
+        for index, (source_id, row) in enumerate(rows.items()):
+            if index >= 3 or task.budget.exceeded_by(usage):
+                unresolved.append(f'{source_id}: 本次核查预算已用尽，保留待核查状态')
+                continue
+            clean = {key:value for key, value in row.items() if not key.startswith('_')}
+            refreshed = verify_publication(clean, force=True)
+            usage.tool_calls += 1
+            unresolved.extend(f'{source_id}: {note}' for note in author_metadata_problems(refreshed))
+            changes.append(build_proposal('evidence', object_id=source_id, payload=refreshed,
+                rationale='按审阅定位刷新作者元数据；保留摘录、支持范围与命题归属',
+                expected_revision=row.get('_storage_revision')))
+        need = ResearchNeed(kind=NeedKind.manuscript_revision, owner='writing',
+            statement='按核查结果修订稿件并更新参考文献；未核准的作者条目撤引并复核相关论述',
+            why='书目更新不能自动证明原文论断，修改后仍须独立审阅',
+            blocked_refs=list(task.input_refs), hints={**task.hints, 'repair_action':'revise_citation'},
+            acceptance=['使用核准的完整署名；保留来源身份与适用范围，不自行猜测姓名'])
+        return self.partial(task, '已核查审阅指定的作者元数据，仍须修订并复审',
+                            changes=changes, needs=[need], unresolved=unresolved, usage=usage)
 
     # ---- 确定性检索 ----
     def assess_sources(self, task, context, runtime, usage, rows):

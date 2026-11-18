@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from math import isfinite, log1p
 from urllib.parse import quote
-from src.publication.references import normalize_doi, citation_eligible
+from src.publication.references import normalize_doi, citation_eligible, author_metadata_problems
 
 PUBLISHED_TYPES = {"journal-article", "proceedings-article", "book", "monograph", "book-chapter"}
 _STOP = set("the a an of for and in on to with by from using use study research result solution certificate existence construction order length size distance matrix matrices binary code codes current original source theorem bound".split())
@@ -109,9 +109,10 @@ def _openalex(row):
             "pdf_url": loc.get("pdf_url") or ""}
 
 
-def verify_publication(paper, fetch=None):
+def verify_publication(paper, fetch=None, *, force=False, author_fetch=None):
     """Title+author identity is required; a DOI or arXiv journal-ref alone is not proof."""
-    if citation_eligible(paper):
+    author_issues = author_metadata_problems(paper)
+    if citation_eligible(paper) and not force:
         return dict(paper)
     fetch = fetch or _fetch
     out, candidates, errors = dict(paper), [], []
@@ -129,14 +130,19 @@ def verify_publication(paper, fetch=None):
                         candidates.append(_crossref(version))
         except Exception as exc:
             errors.append(_failure("Crossref DOI核查", exc))
-    if not any(_matches(paper, row) for row in candidates):
+    def matches(row):
+        # Exact DOI + exact title also permits correcting a corrupted author field.
+        return _matches(paper, row) or bool(doi and normalize_doi(row.get('doi')).lower() == doi.lower()
+            and re.sub(r'\W', '', str(paper.get('title') or '').casefold())
+            == re.sub(r'\W', '', str(row.get('title') or '').casefold()))
+    if not any(matches(row) for row in candidates):
         try:
             data = fetch("https://api.crossref.org/works", {"query.title": paper.get("title", ""), "rows": 5})
             candidates.extend(_crossref(row) for row in (data.get("message") or {}).get("items") or []
                               if row.get("type") in PUBLISHED_TYPES and not row.get("update-to"))
         except Exception as exc:
             errors.append(_failure("Crossref题名核查", exc))
-    match = next((row for row in candidates if _matches(paper, row)), None)
+    match = next((row for row in candidates if matches(row)), None)
     if match is None:
         try:
             from src.tools.search_tools import OPENALEX_API_KEY
@@ -147,7 +153,7 @@ def verify_publication(paper, fetch=None):
             match = next((candidate for row in data.get("results") or []
                           if (candidate := _openalex(row))["publication_status"] == "published"
                           and candidate["publication_type"] in PUBLISHED_TYPES
-                          and _matches(paper, candidate)), None)
+                          and matches(candidate)), None)
         except Exception as exc:
             errors.append(_failure("OpenAlex出版核查", exc))
     if match:
@@ -160,4 +166,19 @@ def verify_publication(paper, fetch=None):
         out["publication_status"] = "preprint" if "arxiv" in str(paper.get("url", "")) else "unknown"
         out["publication_verified_by"] = ""
         out["publication_note"] = "; ".join(errors) or "未找到可确认的正式出版版本（不等于未出版）"
+    if doi and (author_issues or author_metadata_problems(out) or force):
+        from src.kb.publisher_metadata import fetch_publisher_authors
+        try:
+            correction = (author_fetch or fetch_publisher_authors)(doi)
+        except Exception as exc:
+            correction = {}
+            errors.append(_failure('出版原页作者核查', exc))
+        if correction:
+            # Change only author metadata. Publication dates, excerpt versions and
+            # support relations must not be replaced by a site's upload date.
+            out.update(correction)
+        elif author_issues or author_metadata_problems(out) or force:
+            out.update(author_verified_by='unresolved', author_note='作者原始署名仍待核查；'
+                       + '; '.join(errors or author_issues or author_metadata_problems(out)
+                                   or ['未取得 DOI 匹配的出版原页作者列表']))
     return out
