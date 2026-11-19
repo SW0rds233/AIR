@@ -13,7 +13,7 @@ def normalize_scripts(value: str) -> str:
     """Normalize shorthand indices, keeping literal TeX text and labels intact."""
     literals = re.compile(r'(\\(?:text|textrm|textnormal|textbf|textit|mbox|operatorname|label|ref|cite|url)\{[^{}]*\})')
     def fix(part):
-        part = re.sub(r'(?<!\\)_([A-Za-z][A-Za-z0-9]+)', r'_{\1}', part)
+        part = re.sub(r'(?<!\\)_([A-Za-z][A-Za-z0-9]+)(?=\^)', r'_{\1}', part)
         return re.sub(r'(?<!\\)\^(\([^()]*\))', r'^{\1}', part)
     return ''.join(part if index % 2 else fix(part)
                    for index, part in enumerate(literals.split(value)))
