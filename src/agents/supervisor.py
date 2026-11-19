@@ -712,7 +712,8 @@ class SupervisorAgent:
         def reasoning_allowed(hints):
             root = hints.get("root_claim_id") or hints.get("claim_id")
             # Initial verification, one encoding repair, then verify the repaired version.
-            return reasoning_slots > 0 and (hints.get("verification_only") or root_attempts.get(root, 0) < 3)
+            return reasoning_slots > 0 and (hints.get("verification_only") or hints.get('repair_claim')
+                                            or root_attempts.get(root, 0) < 3)
         pending_set = {p for p in pending if p}
         running_set = {r for r in running if r}
         done_ids = {task_id for task_id, result in results.items()
@@ -819,8 +820,8 @@ class SupervisorAgent:
                 return SupervisorDecision(decision=DecisionKind.dispatch,
                     tasks=checks_to_run,
                     reason="核验尚未执行的已编码命题版本，保留真实证书或反例")
-        if closing and not any(need.owner == 'evidence' and metadata_repair(need.hints)
-                               and metadata_slots > 0 for need in open_needs):
+        if closing and not any((need.owner == 'evidence' and metadata_repair(need.hints)
+                               and metadata_slots > 0) or need.hints.get('repair_claim') for need in open_needs):
             tasks, _ = self._tasks_for(plan, closing[:1], remaining_budget)
             if tasks:
                 return SupervisorDecision(decision=DecisionKind.dispatch, tasks=tasks,
@@ -836,7 +837,7 @@ class SupervisorAgent:
                          'repair_key':'citation-budget-closure:' + need.hints.get('repair_key', need.need_id)}
             }) if need.owner == 'evidence' and need.hints.get('repair_action') == 'replace_source'
                 else need for need in needs]
-        needs.sort(key=lambda need: 0 if metadata_repair(need.hints) else
+        needs.sort(key=lambda need: 0 if metadata_repair(need.hints) or need.hints.get('repair_claim') else
                    1 if need.kind == NeedKind.review else
                    2 if need.owner == "evidence" and need.hints.get("root_cause_kind") == "citation" else
                    3 if need.kind == NeedKind.manuscript_revision and need.hints.get("review_cycle") else 4)
@@ -887,9 +888,12 @@ class SupervisorAgent:
                     limited.append(task)
                 tasks = limited[: self.max_tasks_per_round]
                 metadata_tasks = [task for task in tasks if metadata_repair(task.hints)]
+                claim_repairs = [task for task in tasks if task.hints.get('repair_claim')]
                 checkpoint = next((task for task in tasks if task.agent in {"writing", "review"}), None)
                 if metadata_tasks:
                     tasks = metadata_tasks  # Writer/reviewer must observe committed repairs.
+                elif claim_repairs:
+                    tasks = claim_repairs  # Prose cannot repair an unchanged scientific object.
                 elif checkpoint:
                     tasks = [checkpoint]
             if tasks:

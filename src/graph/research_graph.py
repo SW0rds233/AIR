@@ -576,6 +576,10 @@ class TeamRun:
                   and all(task.hints.get("verification_only") for task in decision.tasks)
                   and state.rounds <= self.max_rounds - 2):
                 pass  # Complete bounded solver work before final synthesis, leaving room for review.
+            elif (final_review is None and decision.tasks
+                  and all(task.hints.get("repair_claim") for task in decision.tasks)
+                  and state.rounds <= self.max_rounds - 3):
+                pass  # Repair the reviewed claim before verification, synthesis and review.
             elif closing and not synthesis_tried and (writer_pos < 0 or research_pos > writer_pos):
                 decision = SupervisorDecision(decision=DecisionKind.dispatch,
                     tasks=[AgentTask(agent="writing", objective="汇总最终推导、证据边界与可执行实验建议，提交完整稿件供独立审阅",

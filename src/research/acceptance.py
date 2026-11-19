@@ -550,7 +550,7 @@ def _cited_numbers(text: str) -> set[int]:
         group = match.group(1)
         prefix = text[max(0, match.start() - 40):match.start()].rstrip()
         # Plain-text intervals have not passed through the LaTeX renderer yet.
-        if re.search(r"(?:[∈∉=]|\\(?:in|notin)|区间|范围|\binterval|\brange)\s*[:：]?\s*$", prefix, re.I):
+        if re.search(r"(?:[∈∉=]|\\(?:in|notin)|区间|取值范围|数值范围|\binterval|\brange)\s*[:：]?\s*$|范围\s*[:：]\s*$", prefix, re.I):
             continue
         values = [int(value) for value in re.findall(r"\d+", group)]
         if not all(value > 0 for value in values):

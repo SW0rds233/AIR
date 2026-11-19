@@ -164,9 +164,13 @@ class ReviewAgent(AgentBase):
   原文为中文不强制翻译题名，采用来源实际完整署名，不凭拼音猜中文名。
   分析单位、入排标准、模型参数改变交 modeling/research；纯表述歧义才交 writing。
   恒等式与计数一致性证书只核验编码，不自动构成科学贡献；以是否回答研究问题评价贡献。
+  对上一轮每条问题逐项核对 acceptance：已解决的给出当前块与理由，未解决的沿用 issue_id。
+  不把已经写明的限定反复要求再写一遍；区分原有问题未修复与新发现的问题。
+  同一参数同时用于两个组已表达共同参数假设；不能仅因没有另写两组参数相等就断言求解器漏了该假设。
+  仍须核查正文是否把共同参数前提当成已证经验事实。只涉及证书解释的修改交写作，命题语义与编码冲突交推理。
 
 最终输出 JSON:
-{"issues": [{"severity": "blocking|major|minor|advisory", "category": "science|fidelity|citation|readability|figure|completeness",
+{"issues": [{"issue_id": "", "severity": "blocking|major|minor|advisory", "category": "science|fidelity|citation|readability|figure|completeness",
              "summary": "", "detail": "", "locator": "", "affected_ids": [""],
              "block_id": "", "quoted_text": "",
              "metadata_checks": [{"source_id":"", "field":"", "observed":"", "expected":"", "source_url":""}],
@@ -177,6 +181,7 @@ class ReviewAgent(AgentBase):
    "readability": 0, "figure": 0, "completeness": 0},
  "category_notes": {"science": "给出扣分依据及可核验改进建议"},
  "resolved": [""], "unresolved": [""],
+ "previous_issue_checks": [{"issue_id":"", "status":"resolved|unresolved|superseded", "block_ids":[], "reason":""}],
  "needs": [{"kind": "more_sources|derivation|model_condition|manuscript_revision", "statement": "", "why": ""}]}
 """
 
@@ -204,6 +209,7 @@ class ReviewAgent(AgentBase):
         grounding_conflicts: dict[int, str] = {}
         validation_details: dict[str, Any] = {}
         timeout_exhausted = False
+        payload = None
 
         if runtime.llm_available("review") and not task.budget.exceeded_by(usage):
             from langchain_core.messages import HumanMessage, SystemMessage
@@ -311,6 +317,7 @@ class ReviewAgent(AgentBase):
         judgement["reported_category_scores"] = llm_scores
         judgement["grounding_conflicts"] = list(grounding_conflicts.values())
         judgement["validation_details"] = validation_details
+        judgement['previous_issue_checks'] = (payload.get('previous_issue_checks') or []) if isinstance(payload, dict) else []
         if grounding_conflicts and judgement["accepted"]:
             judgement.update(accepted=False, decision="incomplete")
         from src.publication.manuscript_state import manuscript_identity
@@ -593,10 +600,35 @@ def _review_source_conflicts(payload: dict, context: ContextPack) -> dict[int, s
     sources = {str(row.get('source_id') or row.get('id')): row
                for row in context.objects.get('evidence') or []}
     conflicts = {}
+    manuscript = (context.objects.get('manuscript') or [{}])[-1]
+    manuscript = manuscript.get('manuscript', manuscript)
+    cited = {}
+    for section in manuscript.get('sections') or []:
+        if section.get('role') == 'references' or '参考文献' in str(section.get('heading') or ''):
+            continue
+        for block in section.get('blocks') or []:
+            for kind, ref in zip(block.get('ref_kinds') or [], block.get('refs') or []):
+                if kind == 'source':
+                    cited.setdefault(ref.get('id'), []).append(block.get('block_id'))
     for index, issue in enumerate(payload.get('issues') or []):
         if not isinstance(issue, dict) or issue.get('category') != 'citation':
             continue
         text = str(issue.get('summary') or '') + ' ' + str(issue.get('detail') or '')
+        if re.search(r'正文.{0,12}(?:未|没有)(?:被)?引用|未被正文引用', text):
+            targets = set(issue.get('affected_ids') or [])
+            targets.update(key for key in cited if key and key in text)
+            # Reviewers sometimes anchor only body blocks and refer to sources by number.
+            from src.publication.schemas import Manuscript, assign_render_numbers
+            try:
+                numbers = assign_render_numbers(Manuscript.model_validate(manuscript))['citations']
+                mentioned = set(re.findall(r'\[(\d+)\]', str(issue.get('summary') or '')))
+                targets.update(key for key, number in numbers.items() if str(number) in mentioned)
+            except ValueError:
+                pass  # Legacy/incomplete IR still has the explicit source IDs above.
+            used = {key:cited[key] for key in targets if key in cited}
+            if used:
+                conflicts[index] = '未引用指控与当前结构化引用矛盾: ' + str(used) + '；核对真实引用句，适用性问题另述。'
+                continue
         identity_accusation = re.search(
             r'DOI.{0,25}(?:不匹配|异常|错误)|前缀.{0,20}(?:不符|异常|不一致)|'
             r'(?:缺少|无|没有|未提供).{0,15}ISSN|(?:非正式|不满足正式|未正式)'
@@ -675,8 +707,8 @@ def _issue_from(item: Any) -> ReviewIssueRef | None:
         return None
     try:
         return ReviewIssueRef(
-            issue_id=_issue_id(str(item.get("category") or ""),
-                               str(item.get("summary") or "")),
+            issue_id=str(item.get('issue_id') or _issue_id(str(item.get("category") or ""),
+                                                         str(item.get("summary") or ""))),
             severity=str(item.get("severity") or "minor"),
             category=str(item.get("category") or ""),
             summary=str(item.get("summary") or ""),
@@ -696,10 +728,13 @@ def _issue_from(item: Any) -> ReviewIssueRef | None:
 def _reuse_review_ids(issues: list[ReviewIssueRef], context: ContextPack) -> list[ReviewIssueRef]:
     """Keep an anchored, substantially unchanged finding in the same issue history."""
     from difflib import SequenceMatcher
-    previous = context.objects.get('review_issue') or []
+    from src.agents.review_state import latest_review_issues
+    previous = latest_review_issues(context.objects.get('review_issue') or [])
     used = set()
     for issue in issues:
         targets = {ref.id for ref in issue.affected_refs}
+        reported_id = issue.issue_id
+        issue.issue_id = _issue_id(issue.category, issue.summary)
         for old in previous:
             old_id = old.get('issue_id')
             old_targets = {ref.get('id') for ref in old.get('affected_refs') or [] if isinstance(ref, dict)}
@@ -708,7 +743,8 @@ def _reuse_review_ids(issues: list[ReviewIssueRef], context: ContextPack) -> lis
             same = ' '.join(str(old.get('summary') or '').split()) == ' '.join(issue.summary.split())
             similar = bool(targets & old_targets) and SequenceMatcher(
                 None, str(old.get('summary') or ''), issue.summary).ratio() >= .8
-            if same or similar:
+            explicitly_same = reported_id == old_id and bool(targets & old_targets)
+            if same or similar or explicitly_same:
                 issue.issue_id = old_id
                 used.add(old_id)
                 break
@@ -819,6 +855,7 @@ def _review_prompt(context, *, compact=False):
 
 def _review_materials(context, *, compact=False):
     import json
+    from src.agents.review_state import latest_review_issues
     from src.publication.schemas import Manuscript, assign_render_numbers
     manuscript = (context.objects.get("manuscript") or [{}])[-1]
     manuscript = manuscript.get("manuscript", manuscript)
@@ -893,8 +930,8 @@ def _review_materials(context, *, compact=False):
                    if b.get("role") == "table"],
         "omitted_uncited_sources": max(0, len(by_source) - len(source_keys)),
         "revision_log": manuscript.get("revision_log", [])[-3:],
-        "previous_issues": [{k: issue.get(k) for k in ("issue_id", "summary", "acceptance", "locator")}
-                            for issue in (context.objects.get("review_issue") or [])[-24:]],
+        "previous_issues": [{k: issue.get(k) for k in ("issue_id", "summary", "acceptance", "locator", "affected_refs", "repair_action")}
+                            for issue in latest_review_issues(context.objects.get("review_issue") or [])[:24]],
     }, ensure_ascii=False)
 
 
@@ -934,6 +971,8 @@ def _route_unverified_source_repairs(issues, context):
 
 def repair_owner(issue: ReviewIssueRef) -> str:
     """Route the repair action, not every citation label, to the right role."""
+    if _claim_repair_target(issue):
+        return 'reasoning'  # Only this role may revise registered claims.
     if issue.repair_action in {"verify_source", "replace_source"}:
         return "evidence"
     if issue.category == "citation":
@@ -944,6 +983,16 @@ def repair_owner(issue: ReviewIssueRef) -> str:
         return "writing" if issue.suggested_owner == "writing" else "evidence"
     return issue.suggested_owner or {"readability": "writing", "completeness": "writing",
         "science": "reasoning", "fidelity": "modeling", "figure": "figures"}.get(issue.category, "")
+
+
+def _claim_repair_target(issue):
+    targets = [ref.id for ref in issue.affected_refs if ref.id.startswith('clm-')]
+    text = ' '.join([issue.summary, issue.detail, *issue.acceptance])
+    if (targets and issue.category in {'science', 'fidelity'}
+            and (issue.suggested_owner in {'reasoning', 'modeling'} or re.search(
+                r'formal_spec|mechanism_links|编码前提|命题.{0,25}(?:歧义|混淆|前提|定义)', text))):
+        return targets[0]
+    return ''
 
 
 def _needs_from(issues: list[ReviewIssueRef]) -> list[ResearchNeed]:
@@ -958,10 +1007,13 @@ def _needs_from(issues: list[ReviewIssueRef]) -> list[ResearchNeed]:
         if kind is None or not (issue.blocking or issue.severity == IssueSeverity.major):
             continue
         owner = repair_owner(issue)
+        target = _claim_repair_target(issue)
         if owner == "writing":
             kind = NeedKind.manuscript_revision
         elif owner == "evidence":
             kind = NeedKind.more_sources
+        elif target:
+            kind = NeedKind.derivation
         doi = re.search(r"10\.\d{4,9}/[^\s。\"<>]+", issue.locator)
         needs.append(ResearchNeed(
             kind=kind,
@@ -975,6 +1027,9 @@ def _needs_from(issues: list[ReviewIssueRef]) -> list[ResearchNeed]:
                    "locator": issue.locator, "root_cause_kind": issue.category,
                    "review_issue_ids": [issue.issue_id],
                    "repair_action": issue.repair_action,
+                   **({'claim_id':target, 'root_claim_id':target, 'repair_claim':True,
+                       'repair_key':'claim-review:' + target,
+                       'review_diagnostic':issue.detail} if target else {}),
                    **({'metadata_urls':re.findall(r'https?://[^\s<>\"）)]+', issue.locator + ' ' + issue.detail)[:2]}
                        if issue.repair_action == 'verify_source' else {}),
                    **({'metadata_only':True} if issue.category == 'citation'
