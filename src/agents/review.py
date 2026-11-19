@@ -155,11 +155,21 @@ class ReviewAgent(AgentBase):
   来源 publication_status 未核准或没有直接摘录时，不能要求作者把参数写成事实，应先 verify_source。
   背景/综述引用只审其实际原句，不用针对另一命题的 insufficient 要求每处重复免责声明。
   来源机构、地址被误录为作者时要求核对作者原页，不靠缩写或重排猜姓名。
+  出版身份与科学适用性分开核查：Crossref/出版原页匹配仅确认书目，不保证同行评审质量或论据成立。
+  已给出的出版社、ISSN、日期、卷期、DOI 和 metadata_provenance 是核查依据；不能凭前缀、
+  期刊名印象或缺少 JCR/CiteScore 推断伪刊、DOI 错误或未正式出版，也不能用“常见卷号”否定实际记录。
+  质疑已有书目记录时给 metadata_checks（source_id, field, observed, expected, source_url），
+  observed 必须是材料中该字段的实际值，expected 是所要求的值；另述支持要求值的原始依据。
+  质量/适用性问题须定位正文引用句与来源摘录的实际错位；不能要求在参考文献条目写用途或免责声明。
+  原文为中文不强制翻译题名，采用来源实际完整署名，不凭拼音猜中文名。
+  分析单位、入排标准、模型参数改变交 modeling/research；纯表述歧义才交 writing。
+  恒等式与计数一致性证书只核验编码，不自动构成科学贡献；以是否回答研究问题评价贡献。
 
 最终输出 JSON:
 {"issues": [{"severity": "blocking|major|minor|advisory", "category": "science|fidelity|citation|readability|figure|completeness",
              "summary": "", "detail": "", "locator": "", "affected_ids": [""],
              "block_id": "", "quoted_text": "",
+             "metadata_checks": [{"source_id":"", "field":"", "observed":"", "expected":"", "source_url":""}],
              "repair_action": "verify_source|replace_source|revise_citation|revise_text|research",
              "suggested_owner": "evidence|modeling|reasoning|validation|writing|figures",
              "acceptance": [""]}],
@@ -223,9 +233,10 @@ class ReviewAgent(AgentBase):
                 payload = _normalize_review_anchors(payload, context)
                 date_conflicts = _review_date_conflicts(payload)
                 anchor_conflicts = _review_grounding_conflicts(payload, context)
-                contradictions = date_conflicts + list(anchor_conflicts.values())
+                source_conflicts = _review_source_conflicts(payload, context)
+                contradictions = date_conflicts + list(anchor_conflicts.values()) + list(source_conflicts.values())
                 all_unanchored = bool(anchor_conflicts) and len(anchor_conflicts) == len(payload.get('issues') or [])
-                if (date_conflicts or all_unanchored) and not task.budget.exceeded_by(usage):
+                if (date_conflicts or all_unanchored or source_conflicts) and not task.budget.exceeded_by(usage):
                     # One factual correction, not a second vote or a score booster.
                     import json
                     try:
@@ -240,6 +251,8 @@ class ReviewAgent(AgentBase):
                     except Exception as error:
                         unresolved.append(f"审阅一致性复核未完成: {type(error).__name__}")
                 grounding_conflicts = _review_grounding_conflicts(payload, context)
+                source_conflicts = _review_source_conflicts(payload, context)
+                grounding_conflicts.update(source_conflicts)
                 issues = _issues_from_payload([item for index, item in enumerate(payload.get('issues') or [])
                                               if index not in grounding_conflicts])
                 unresolved.extend(grounding_conflicts.values())
@@ -272,9 +285,11 @@ class ReviewAgent(AgentBase):
                 }
                 semantic_reviewed = (isinstance(payload.get("issues"), list)
                                      and complete_scores and explained_low_scores
-                                     and (not grounding_conflicts or bool(issues)))
+                                     and (not grounding_conflicts or bool(issues))
+                                     and not source_conflicts)
                 date_conflicts = _review_date_conflicts(payload)
                 validation_details["date_conflicts"] = date_conflicts
+                validation_details["source_conflicts"] = source_conflicts
                 if date_conflicts:
                     semantic_reviewed = False
                     unresolved.extend(date_conflicts)
@@ -573,6 +588,43 @@ def _normalize_review_anchors(payload: dict, context: ContextPack) -> dict:
     return {**payload, 'issues': items}
 
 
+def _review_source_conflicts(payload: dict, context: ContextPack) -> dict[int, str]:
+    """Challenge unsupported bibliographic accusations, without passing the review."""
+    sources = {str(row.get('source_id') or row.get('id')): row
+               for row in context.objects.get('evidence') or []}
+    conflicts = {}
+    for index, issue in enumerate(payload.get('issues') or []):
+        if not isinstance(issue, dict) or issue.get('category') != 'citation':
+            continue
+        text = str(issue.get('summary') or '') + ' ' + str(issue.get('detail') or '')
+        identity_accusation = re.search(
+            r'DOI.{0,25}(?:不匹配|异常|错误)|前缀.{0,20}(?:不符|异常|不一致)|'
+            r'(?:缺少|无|没有|未提供).{0,15}ISSN|(?:非正式|不满足正式|未正式)'
+            r'|(?:JCR|CiteScore|伪刊|掠夺性)', text, re.I)
+        targets = [sources[key] for key in issue.get('affected_ids') or [] if key in sources
+                   and sources[key].get('publication_source_url')]
+        if not identity_accusation or not targets:
+            continue
+        checks = issue.get('metadata_checks') or []
+        valid = set()
+        for check in checks:
+            if not isinstance(check, dict):
+                continue
+            source = sources.get(check.get('source_id')) or {}
+            field = check.get('field')
+            if (field in {'doi','venue','publisher','issn','published_date','volume','issue','pages','authors'}
+                    and str(check.get('observed') or '') == str(source.get(field) or '')
+                    and check.get('expected') and check['expected'] != check.get('observed')
+                    and check.get('source_url') == source.get('publication_source_url')):
+                valid.add(check['source_id'])
+        missing = [str(row.get('source_id') or row.get('id')) for row in targets
+                   if str(row.get('source_id') or row.get('id')) not in valid]
+        if missing:
+            conflicts[index] = ('审阅意见缺少与已核准书目对应的逐字段差异依据: ' + ', '.join(missing)
+                + '；先核对 publication_source_url。索引/影响因子未知不等于出版身份无效。')
+    return conflicts
+
+
 def _review_grounding_conflicts(payload: dict, context: ContextPack) -> dict[int, str]:
     """Unanchored accusations trigger review repair, never manuscript rewriting."""
     if not isinstance(payload.get('issues'), list):
@@ -809,7 +861,8 @@ def _review_materials(context, *, compact=False):
         row = {k: source.get(k) for k in ("id", "source_id", "title", "authors", "year", "venue",
             "doi", "excerpt", "locator", "content_level", "publication_status", "publication_type",
             "publication_verified_by", "publication_note", "author_verified_by", "author_source_url",
-            "author_note", "claim_id", "support_scope", "supported_link",
+            "author_note", "publisher", "issn", "published_date", "volume", "issue", "pages",
+            "publication_source_url", "publisher_url", "metadata_provenance", "claim_id", "support_scope", "supported_link",
             "condition_notes", "supported_target", "relevance_reason", "relation", "support_reason", "missing")}
         excerpt = str(row.get("excerpt") or "")
         row["excerpt"] = excerpt[:900 if compact else 1800]
@@ -884,7 +937,7 @@ def repair_owner(issue: ReviewIssueRef) -> str:
     if issue.repair_action in {"verify_source", "replace_source"}:
         return "evidence"
     if issue.category == "citation":
-        if issue.repair_action == "revise_citation":
+        if issue.repair_action in {"revise_citation", "withdraw_citation"}:
             return "writing"
         if re.search(r"出版|年份|元数据|DOI|书目|缺少.*定位", issue.summary, re.I):
             return "evidence"
@@ -922,6 +975,11 @@ def _needs_from(issues: list[ReviewIssueRef]) -> list[ResearchNeed]:
                    "locator": issue.locator, "root_cause_kind": issue.category,
                    "review_issue_ids": [issue.issue_id],
                    "repair_action": issue.repair_action,
+                   **({'metadata_urls':re.findall(r'https?://[^\s<>\"）)]+', issue.locator + ' ' + issue.detail)[:2]}
+                       if issue.repair_action == 'verify_source' else {}),
+                   **({'metadata_only':True} if issue.category == 'citation'
+                       and issue.repair_action == 'verify_source'
+                       and re.search(r'DOI|ISSN|作者|署名|出版|期刊|卷期|元数据|书目', issue.summary, re.I) else {}),
                    **({"query": doi.group(0).rstrip(".,;)")} if doi and owner == "evidence" else {}),
                    "focus_blocks": [ref.id for ref in issue.affected_refs]},
             owner=owner,

@@ -692,6 +692,12 @@ class SupervisorAgent:
                              for r in results.values() if r.agent == "evidence")
         evidence_exhausted = evidence_count >= 8 or evidence_calls >= 150
         evidence_slots = max(0, 8 - evidence_count)
+        from src.agents.citation_repair import metadata_repair
+        # This lane has no LLM calls and a separate small run cap. It never
+        # reopens bulk retrieval after the evidence model budget is exhausted.
+        metadata_slots = max(0, 4 - sum(
+            metadata_repair(row.get('hints') or {}) and row.get('task_id') in results
+            for row in plan.tasks))
         # A new claim ID is not a new research budget. Keep room for synthesis/review.
         reasoning_count = sum(r.agent == "reasoning" and not r.payload.get("evidence_support_only")
                               for r in results.values())
@@ -813,7 +819,8 @@ class SupervisorAgent:
                 return SupervisorDecision(decision=DecisionKind.dispatch,
                     tasks=checks_to_run,
                     reason="核验尚未执行的已编码命题版本，保留真实证书或反例")
-        if closing:
+        if closing and not any(need.owner == 'evidence' and metadata_repair(need.hints)
+                               and metadata_slots > 0 for need in open_needs):
             tasks, _ = self._tasks_for(plan, closing[:1], remaining_budget)
             if tasks:
                 return SupervisorDecision(decision=DecisionKind.dispatch, tasks=tasks,
@@ -821,15 +828,25 @@ class SupervisorAgent:
 
         # 2. 需求 -> 任务 (只派"计划里还没有的")
         needs = list(open_needs)
-        needs.sort(key=lambda need: 0 if need.kind == NeedKind.review else
-                   1 if need.owner == "evidence" and need.hints.get("root_cause_kind") == "citation" else
-                   2 if need.kind == NeedKind.manuscript_revision and need.hints.get("review_cycle") else 3)
+        if evidence_exhausted:
+            needs = [need.model_copy(update={
+                'kind':NeedKind.manuscript_revision, 'owner':'writing',
+                'statement':'来源替换预算已耗尽；核对当前引用句，无直接适用替代时撤引并降为待验证论述：' + need.statement,
+                'hints':{**need.hints, 'repair_action':'revise_citation',
+                         'repair_key':'citation-budget-closure:' + need.hints.get('repair_key', need.need_id)}
+            }) if need.owner == 'evidence' and need.hints.get('repair_action') == 'replace_source'
+                else need for need in needs]
+        needs.sort(key=lambda need: 0 if metadata_repair(need.hints) else
+                   1 if need.kind == NeedKind.review else
+                   2 if need.owner == "evidence" and need.hints.get("root_cause_kind") == "citation" else
+                   3 if need.kind == NeedKind.manuscript_revision and need.hints.get("review_cycle") else 4)
         repair_attempts: dict[str, int] = {}
         for row in plan.tasks:
             key = (row.get("hints") or {}).get("repair_key")
             if key and row.get("task_id") in results:
                 repair_attempts[key] = repair_attempts.get(key, 0) + 1
-        needs = [need for need in needs if not (need.owner == "evidence" and evidence_exhausted)
+        needs = [need for need in needs if not (need.owner == "evidence" and evidence_exhausted
+                 and not (metadata_repair(need.hints) and metadata_slots > 0))
                  and (need.owner != "figures" or self.enable_figures)
                  and (need.owner != "reasoning" or reasoning_allowed(need.hints))
                  and repair_attempts.get(need.hints.get("repair_key", ""), 0) < 2]
@@ -859,13 +876,21 @@ class SupervisorAgent:
                         if root:
                             root_attempts[root] = root_attempts.get(root, 0) + 1
                     if task.agent == "evidence":
-                        if evidence_slots <= 0:
+                        if metadata_repair(task.hints):
+                            if metadata_slots <= 0:
+                                continue
+                            metadata_slots -= 1
+                        elif evidence_slots <= 0:
                             continue
-                        evidence_slots -= 1
+                        else:
+                            evidence_slots -= 1
                     limited.append(task)
                 tasks = limited[: self.max_tasks_per_round]
+                metadata_tasks = [task for task in tasks if metadata_repair(task.hints)]
                 checkpoint = next((task for task in tasks if task.agent in {"writing", "review"}), None)
-                if checkpoint:
+                if metadata_tasks:
+                    tasks = metadata_tasks  # Writer/reviewer must observe committed repairs.
+                elif checkpoint:
                     tasks = [checkpoint]
             if tasks:
                 return SupervisorDecision(

@@ -177,6 +177,19 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
         repaired = self._repair_author_metadata(task, context, usage)
         if repaired is not None:
             return repaired
+        result = self._research(task, context, runtime, usage, tools)
+        if task.hints.get('repair_action') == 'replace_source':
+            # A failed replacement still requires a prose decision; never feed the
+            # same source back into an unlimited search/rewrite cycle.
+            result.followup_needs.append(ResearchNeed(kind=NeedKind.manuscript_revision, owner='writing',
+                statement='核对本轮替代来源与原引用句；无直接适用的合格替代时撤去该处引用，并删除或降为待验证论述',
+                why='检索结果本身不等于原句获得支持；不得用不相关背景替换缺失证据',
+                blocked_refs=list(task.input_refs),
+                hints={**task.hints, 'repair_action':'revise_citation'},
+                acceptance=['保留来源适用范围和未决项；更换或撤引后重新独立审阅']))
+        return result
+
+    def _research(self, task, context, runtime, usage, tools):
         query = _query_of(task, context)
         policy = task.source_policy or "user_kb"
         retrieval_plan = self.plan_retrieval(task, context, runtime, usage)
@@ -359,36 +372,47 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
 
     def _repair_author_metadata(self, task, context, usage):
         """Recheck the cited record itself instead of retrieving the same bad cache."""
+        from src.agents.citation_repair import metadata_repair
+        metadata_only = metadata_repair(task.hints)
+        if metadata_only and task.source_policy not in {'both', 'autonomous'}:
+            return self.partial(task, '当前资料策略不允许在线书目核查',
+                                unresolved=['保留已有资料；未执行外部元数据请求'], usage=usage)
         if (task.source_policy not in {'both', 'autonomous'}
                 or task.hints.get('root_cause_kind') != 'citation'
                 or task.hints.get('repair_action') not in {'verify_source', '', None}
-                or not re.search(r'作者|署名|元数据|书目', task.objective)):
+                or not (metadata_only or re.search(r'作者|署名|元数据|书目', task.objective))):
             return None
         targets = {ref.id for ref in task.input_refs} | set(task.hints.get('focus_blocks') or [])
         rows = {str(row.get('source_id') or row.get('id')): row for row in context.objects.get('evidence') or []
                 if str(row.get('source_id') or row.get('id')) in targets}
         if not rows:
-            return None
+            if not metadata_only:
+                return None
+            return self.partial(task, '定向元数据核查缺少对应来源记录',
+                                unresolved=['未定位到指定来源；不能扩大为主题检索'], usage=usage)
         from src.kb.publication import verify_publication
         from src.publication.references import author_metadata_problems
         changes, unresolved = [], []
         for index, (source_id, row) in enumerate(rows.items()):
-            if index >= 3 or task.budget.exceeded_by(usage):
+            if index >= 4 or task.budget.exceeded_by(usage):
                 unresolved.append(f'{source_id}: 本次核查预算已用尽，保留待核查状态')
                 continue
             clean = {key:value for key, value in row.items() if not key.startswith('_')}
-            refreshed = verify_publication(clean, force=True)
+            options = {'metadata_only':True} if metadata_only and not re.search(r'作者|署名', task.objective) else {}
+            if task.hints.get('metadata_urls'):
+                options['metadata_urls'] = task.hints['metadata_urls'][:2]
+            refreshed = verify_publication(clean, force=True, **options)
             usage.tool_calls += 1
             unresolved.extend(f'{source_id}: {note}' for note in author_metadata_problems(refreshed))
             changes.append(build_proposal('evidence', object_id=source_id, payload=refreshed,
-                rationale='按审阅定位刷新作者元数据；保留摘录、支持范围与命题归属',
+                rationale='按审阅定位刷新出版元数据；保留摘录、支持范围与命题归属',
                 expected_revision=row.get('_storage_revision')))
         need = ResearchNeed(kind=NeedKind.manuscript_revision, owner='writing',
-            statement='按核查结果修订稿件并更新参考文献；未核准的作者条目撤引并复核相关论述',
+            statement='按出版核查记录修订引用；核验成功不代表支持原句，未核准条目撤引并复核相关论述',
             why='书目更新不能自动证明原文论断，修改后仍须独立审阅',
             blocked_refs=list(task.input_refs), hints={**task.hints, 'repair_action':'revise_citation'},
             acceptance=['使用核准的完整署名；保留来源身份与适用范围，不自行猜测姓名'])
-        return self.partial(task, '已核查审阅指定的作者元数据，仍须修订并复审',
+        return self.partial(task, '已定向核查出版元数据，仍须修订并复审',
                             changes=changes, needs=[need], unresolved=unresolved, usage=usage)
 
     # ---- 确定性检索 ----

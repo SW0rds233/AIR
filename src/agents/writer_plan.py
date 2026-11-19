@@ -23,11 +23,11 @@ def build_paper_outline(packet: WritingPacket) -> list[dict[str, str | int]]:
         {"heading": "相关研究与研究缺口", "level": 1, "role": "literature",
          "purpose": "按主题比较文献的方法、适用域和局限；以引用支持具体陈述。"},
         {"heading": "研究设计与资料基础", "level": 1, "role": "method",
-         "purpose": "说明研究对象、资料选择、变量、证据等级和研究设计。"},
+         "purpose": "明确研究对象入排标准、分析单位、地区/行业/时期、变量和资料；全篇口径须与模型前提一致。"},
         {"heading": "模型、假设与识别方法", "level": 2, "role": "method",
          "purpose": "解释已登记模型、条件、公式和识别边界；不填造未知参数。"},
         {"heading": finding, "level": 1, "role": "result",
-         "purpose": ("只呈现已确定结论及其证书，并区分反例与支持。" if settled else
+         "purpose": ("呈现回答研究问题的已确定结论、条件与证据；恒等式、定义和计数一致性放方法说明，不充作原创贡献。" if settled else
                      "提出待核验机制、可证伪含义和现有证据边界，不宣称已测得效应。"
                      if packet.claims or packet.models else
                      "如实汇总已登记证据及当前未决问题；没有模型或命题时不编造机制。")},
