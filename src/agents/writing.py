@@ -1444,6 +1444,9 @@ def build_packet_from_context(task: AgentTask, context: ContextPack) -> WritingP
     if selected or (task.hints or {}).get("review_cycle"):
         review_issues = [issue for issue in review_issues
                          if str(issue.get("issue_id") or issue.get("id") or "") in selected]
+    else:
+        from src.agents.review_state import latest_review_issues
+        review_issues = latest_review_issues(review_issues)
     prior = (context.objects.get("manuscript") or [{}])[-1]
     prior = prior.get("manuscript", prior)
     return WritingPacket(

@@ -34,7 +34,7 @@ def is_notation_definition(claim) -> bool:
     Keep this grammar narrow: unknown LaTeX, recursive definitions, undeclared
     symbols and compound left sides still require an encoding repair.
     """
-    if _is_expectation_naming(claim):
+    if _is_expectation_naming(claim) or _is_grouping_disclosure(claim):
         return True
     if (getattr(claim, 'statement_role', '') != 'definition' or claim.formal_spec
             or not is_definition_assignment(claim) or not re.fullmatch(r'[A-Za-z]\w*', claim.lhs)):
@@ -53,6 +53,19 @@ def is_notation_definition(claim) -> bool:
     return (claim.lhs in declared and claim.lhs not in symbols
             and symbols <= declared | bound
             and bool(re.fullmatch(r'[A-Za-z0-9_{}\\\s+*/().\-]+', rhs)))
+
+
+def _is_grouping_disclosure(claim) -> bool:
+    """Explicitly named axes/measurement labels, without a property assertion."""
+    if (claim.statement_role != 'definition' or claim.claim_type.value != 'definitional'
+            or claim.formal_spec or claim.lhs or claim.rhs or claim.expr or claim.effect_estimate):
+        return False
+    text = claim.statement.strip()
+    if not re.match(r'(?:分组|分层|分类|统计|测量)口径定义|(?:符号|变量|分组轴)命名', text):
+        return False
+    if not re.search(r'仅命名|仅作.{0,6}(?:定义|披露)|不含任何经验断言', text):
+        return False
+    return not re.search(r'因此|从而|证明|显著|必然|单调|恒[正负]|推出|导致|[<>≤≥]', text)
 
 
 def _is_expectation_naming(claim) -> bool:

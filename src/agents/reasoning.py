@@ -171,7 +171,8 @@ class ReasoningAgent(AgentBase):
         # "候选/义务 → 工具核验 → 结构化记录 → 状态归并"整条链接进同一任务协议 ——
         # 义务与核验记录作为候选提交, 命题状态由唯一提交口按内核判据重算。
         repair_encoding = task.hints.get('verification_status') == 'unsupported'
-        if strategy == "derivation" and not repair_encoding:
+        repair_claim = bool(task.hints.get('repair_claim'))
+        if strategy == "derivation" and not (repair_encoding or repair_claim):
             formal = self.formal_closure(task, context, runtime, usage)
             if formal is not None:
                 return formal
@@ -208,6 +209,19 @@ class ReasoningAgent(AgentBase):
                     'failed_arguments': task.hints.get('failed_arguments')}, ensure_ascii=False)
                 prompt += ('\n保留原命题 id、科学含义、域和量词；只修复或明确拆解编码。'
                            '补全全部函数及形参声明；无法等价编码时说明缺口，不伪造证书。')
+            if repair_claim:
+                import json
+                target = next((row for row in context.objects.get('claim') or []
+                               if row.get('id') == task.hints.get('claim_id')), {})
+                prompt += '\n# 定向科学修订（旧证书不能回答新的审阅问题）\n' + json.dumps({
+                    'claim':target, 'diagnostic':task.hints.get('review_diagnostic'),
+                    'acceptance':task.acceptance_criteria}, ensure_ascii=False)
+                prompt += ('\n仅修订这个 claim id；对照陈述、变量含义、mechanism_links、formal_spec 与适用条件。'
+                           '共享参数已经表达同值约束时不机械添加重复前提；审阅可能有误，须说明依据。'
+                           '现实同质性/制度条件放 scope_conditions 字符串，不把中文说明塞进求解器。'
+                           '区分水平与变化量，不能靠改写措辞掩盖编码和经验解释的冲突。'
+                           '输出完整修订字段；如削弱结论须在 reasoning 解释原因。'
+                           '不改研究目标，不另造旁支命题，不返回 supported 或证书；修改后另行核验。')
             try:
                 text, observations = self.tool_loop(
                     task, runtime, tools, usage,
@@ -323,7 +337,7 @@ class ReasoningAgent(AgentBase):
                     claim["classification_basis"] = "数学题面或显式理论编码，且无实证设计/样本；语义纠偏不构成核验"
                 claim["study"] = {**dict(claim.get("study") or {}), "design": "theory"}
             requested_id = str(claim.get("id") or "")
-            if repair_encoding and requested_id != target_id:
+            if (repair_encoding or repair_claim) and requested_id != target_id:
                 limitations.append("编码修复只接受当前命题的修订；未登记旁支新命题: " + statement[:120])
                 continue
             existing = known.get(requested_id) or next((row for row in known.values()
@@ -332,13 +346,18 @@ class ReasoningAgent(AgentBase):
                 "project": task.project_id, "problem": task.problem_id, "statement": statement})
             claim["id"] = object_id
             version = int(existing.get("version") or 1) if existing else 1
-            encoding_changed = existing and any(claim.get(key) and claim.get(key) != existing.get(key)
-                for key in ("lhs", "rhs", "expr", "wrt", "relation", "variables", "variable_domains", "study", "formal_spec", "statement_role"))
+            encoding_changed = existing and any(key in claim and claim[key] != existing.get(key)
+                for key in ("lhs", "rhs", "expr", "wrt", "relation", "variables", "variable_domains", "study", "formal_spec", "statement_role",
+                            "mechanism_links", "premises", "scope_conditions", "scope_population", "scope_region", "scope_period"))
             if existing and str(existing.get("statement") or "").strip() == statement and not encoding_changed:
                 # Repeated prose is not new scientific progress and must not reset proof state.
                 continue
             if existing:
                 claim = {**existing, **claim, "version": version + 1}
+            if repair_claim:
+                for key in ('status','assurance','support_kind','validation_status','coverage',
+                            'verification_scope','verification_closure'):
+                    claim.pop(key, None)
             import json
             for key in ("mechanism_links", "evidence_requirements"):
                 if isinstance(claim.get(key), list):
@@ -359,7 +378,7 @@ class ReasoningAgent(AgentBase):
                          "informal": bool(claim.get("informal", True))},
                 rationale=clip("; ".join(as_list_of_str(claim.get("reasoning"))[:3]), 400),
                 input_versions={object_id: version} if existing else {}))
-            if (depth < 2 or object_id == target_id) and (claim.get("study", {}).get("design") == "theory" or (
+            if (depth < 2 or object_id == target_id) and (claim.get("formal_spec") or claim.get("study", {}).get("design") == "theory" or (
                     claim.get('claim_type') == 'definitional' and claim.get('lhs') and claim.get('rhs'))):
                 needs.append(ResearchNeed(kind=NeedKind.derivation,
                     statement="独立核验数学候选: " + statement[:500],
@@ -396,6 +415,18 @@ class ReasoningAgent(AgentBase):
             "limitations": limitations,
             "fidelity_issues": fidelity_issues,
         }
+        if repair_claim:
+            changed = any(change.kind == 'claim' for change in changes)
+            if not changed:
+                return self.blocked(task, '定向命题修订未产生有效改动，不能用旧核验记录宣称已修复',
+                    usage=usage, payload=payload_out)
+            needs.append(ResearchNeed(kind=NeedKind.manuscript_revision, owner='writing',
+                statement='将定向修订命题及新核验状态同步到受影响正文，再独立复审',
+                why='旧稿的变量解释和证书可能失效；未核验的新版本须明确标为候选',
+                blocked_refs=list(task.input_refs), acceptance=list(task.acceptance_criteria),
+                hints={'review_cycle':True, 'review_issue_ids':task.hints.get('review_issue_ids', []),
+                       'focus_blocks':task.hints.get('focus_blocks', []),
+                       'trigger_id':'claim-revision-writing:' + task.task_id}))
         if fidelity_issues and not changes and not counterexamples:
             return self.partial(
                 task, "候选命题与题面参数冲突，未提交研究结论",

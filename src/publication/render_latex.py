@@ -317,8 +317,23 @@ def _math_body(chunk: str) -> str:
     形状会被切碎)。不在片段内部再转一次, `{+1,−1}^{668}` 的 `−`(U+2212) 就会带着
     Unicode 落进数学模式, 日志报 `Missing character: There is no − in font cmmi12`。
     """
-    chunk = _normalize_unicode_math(chunk)
+    from src.publication.math_content import normalize_scripts
+    chunk = normalize_scripts(_normalize_unicode_math(chunk))
     return _separate_glued_commands(chunk)
+
+
+def _inline_math(value: str) -> str:
+    """Permit line breaks at formula separators, never inside TeX text groups."""
+    body = escape_math(value)
+    out, depth = [], 0
+    for index, char in enumerate(body):
+        escaped = index > 0 and body[index - 1] == '\\'
+        if not escaped:
+            depth += (char == '{') - (char == '}')
+        out.append(char)
+        if depth == 0 and char in ',=' and not escaped:
+            out.append(r'\allowbreak{}')
+    return ''.join(out)
 
 
 def _normalize_unicode_math(text: str) -> str:
@@ -431,7 +446,7 @@ def escape_latex(text: str) -> str:
         # 模型自撰的行内公式同样要规范化: `$0\leqz\leqL$` 里的 `\leqz` 会让整篇
         # 编译报 `! Undefined control sequence.`（见 `_separate_glued_commands`）；
         # `\text{...}` 里的数学记法同理会报 `! Missing $ inserted.`
-        math_blocks.append("$" + escape_math(match.group(0)[1:-1]) + "$")
+        math_blocks.append("$" + _inline_math(match.group(0)[1:-1]) + "$")
         return f"\x00MATH{len(math_blocks) - 1}\x00"
 
     # 正文块也可能包含展示公式；先保护整块，避免把其中的命令当成普通文本转义。
@@ -440,7 +455,7 @@ def escape_latex(text: str) -> str:
         return f"\x00MATH{len(math_blocks) - 1}\x00"
 
     def _protect_inline_delimited(match: "re.Match[str]") -> str:
-        math_blocks.append(r"\(" + escape_math(match.group(1)) + r"\)")
+        math_blocks.append(r"\(" + _inline_math(match.group(1)) + r"\)")
         return f"\x00MATH{len(math_blocks) - 1}\x00"
 
     text = re.sub(r"\$\$(.*?)\$\$", _protect_display, text or "", flags=re.DOTALL)
@@ -463,7 +478,7 @@ def escape_latex(text: str) -> str:
 
     text = _protect_bare_commands(text, _store_math)
     # Keep a relational expression together instead of emitting '$-$' per symbol.
-    plain_math = re.compile(r"[A-Za-z0-9\u0370-\u03ff_{}()\[\].=+*/^<>!−×±≤≥≠ᵀ′″]+")
+    plain_math = re.compile(r"[A-Za-z0-9\u0370-\u03ff_{}()\[\].,=+*/^<>!−×±≤≥≠ᵀ′″]+")
 
     def _protect_expression(match: re.Match) -> str:
         value = match.group(0)
@@ -478,7 +493,7 @@ def escape_latex(text: str) -> str:
             return value
         if (re.search(r"[=<>≤≥≠]", value)
                 and re.search(r"[_^\u0370-\u03ff−×±≤≥≠ᵀ′″]", value)):
-            math_blocks.append("$" + _math_body(value) + "$")
+            math_blocks.append("$" + _inline_math(value) + "$")
             return f"\x00MATH{len(math_blocks) - 1}\x00"
         return value
 
@@ -556,7 +571,8 @@ def escape_math(text: str) -> str:
     不做这一步的后果实测: 公式里带 `λ`/`，`/`−` 时日志报
     `Missing character: There is no λ in font cmmi12`, 公式出现空洞。
     """
-    body = _normalize_unicode_math(text or "")
+    from src.publication.math_content import normalize_scripts
+    body = normalize_scripts(_normalize_unicode_math(text or ""))
     for char, latex in _CJK_PUNCT_IN_MATH.items():
         if char in body:
             body = body.replace(char, latex)
