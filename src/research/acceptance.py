@@ -29,6 +29,35 @@ _EXPERIMENT_RESULT_ASSERTION = re.compile(
 )
 
 
+def _asserts_experiment_result(text: str) -> bool:
+    # A disclaimer cannot join a later clause to manufacture an assertion.
+    for clause in re.split(r"[。！？!?；;\n]", text):
+        for match in _EXPERIMENT_RESULT_ASSERTION.finditer(clause):
+            prefix = clause[:match.start()]
+            statement = match.group()
+            if re.search(r"(?:若|如果|假如|假设|倘若|一旦)[^，,]*$", prefix):
+                continue
+            if re.search(r"(?:并非|不是|不属于|不能声称|尚未|未曾|并未|没有)[^，,]*$", prefix):
+                continue
+            if re.search(r"(?:本文|本研究|我们).{0,5}(?:尚未|未曾|没有|并未).{0,5}(?:实验|实测|试验|仿真)", statement):
+                continue
+            return True
+    return False
+
+
+def _symbol_text(text: str) -> str:
+    # Only normalize subscript braces, not all punctuation (which joins words).
+    return re.sub(r"_\{([^{}]+)\}", r"_\1", text)
+
+
+def _design_disclosure(claim: Claim) -> bool:
+    """An explicitly unproved grouping proposal is not a result awaiting proof."""
+    return (claim.claim_type == ClaimType.scenario and claim.status == ClaimStatus.proposed
+            and not (claim.formal_spec or claim.lhs or claim.rhs or claim.effect_estimate)
+            and bool(re.search(r"候选设计|候选分组|分层建议|设计提案", claim.statement))
+            and bool(re.search(r"尚非已证实|尚未证实|未经验证|待验证|不构成.*因果", claim.statement)))
+
+
 @dataclass
 class GateResult:
     passed: bool
@@ -101,6 +130,8 @@ def theory_validity_gate(
 
     for claim in claims:
         from src.verification.definitions import is_notation_definition
+        if _design_disclosure(claim):
+            continue  # Keep proposed status; open obligations above still block.
         if is_notation_definition(claim) and claim.status not in (ClaimStatus.supported, ClaimStatus.refuted):
             continue  # A notation disclosure is not a verified scientific conclusion.
         if checked_definition(claim, in_scope):
@@ -358,7 +389,8 @@ def delivery_gate(manuscript: str, snapshot: ResearchSnapshot,
             continue
         if claim.variable_domains:
             missing = [f"{v}∈{d}" for v, d in claim.variable_domains.items()
-                       if v not in manuscript]
+                       if not re.search(r"(?<![A-Za-z0-9_])" + re.escape(_symbol_text(v))
+                                        + r"(?![A-Za-z0-9_])", _symbol_text(manuscript))]
             if missing and len(missing) == len(claim.variable_domains):
                 reasons.append(f"结论 {claim.id} 的适用条件未出现在正文中: {', '.join(missing)}")
 
@@ -366,7 +398,7 @@ def delivery_gate(manuscript: str, snapshot: ResearchSnapshot,
     for spec in snapshot.experiment_specs or []:
         status = str(spec.get("execution_status", "proposed"))
         if status in ("proposed", "spec_validated") \
-                and _EXPERIMENT_RESULT_ASSERTION.search(manuscript):
+                and _asserts_experiment_result(manuscript):
             reasons.append(
                 f"实验规格 {spec.get('id')} 尚未执行 ({status}), 正文不得出现实验结果"
             )

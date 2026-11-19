@@ -29,6 +29,11 @@ class PublicationMetadata(BaseModel):
     author_verified_by: str = ""
     author_source_url: str = ""
     author_note: str = ""
+    issn: str = ""
+    published_date: str = ""
+    publication_source_url: str = ""
+    publisher_url: str = ""
+    metadata_provenance: str = ""  # JSON field -> authoritative retrieval URL.
 
 
 BIBLIO_FIELDS = tuple(PublicationMetadata.model_fields)

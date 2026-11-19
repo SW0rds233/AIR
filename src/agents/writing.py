@@ -66,6 +66,10 @@ class WritingAgent(AgentBase):
 statement_role=definition 只允许呈现 lhs := rhs 及变量解释，不当作已证定理，也不引用其文字中的附带推论。
 notation_scope 是记号披露，不是证明；交代有限指标集、变量域、归一化和量纲。blocked/unsupported 不得称为“确定回答”或“已核验”，也不把单纯记号的编码不支持写成数学反例。
 formal_spec 的 premises 是条件假设，conclusion 的核验不验证这些假设符合现实；前提和变量域必须随定理给出。
+sympy 的恒等式展开、定义代入和单元计数只作方法一致性说明，不列为科学创新；贡献必须回答研究问题。
+研究对象的行业/地区/时期、入排标准与分析单位全篇一致。若采用比 formal_spec 更窄的口径，原计数/证书只作条件示例，不能沿用为当前设计的已证结果；应报告模型修订需求。
+替换来源失败时，核对受影响的引用句，撤去不适用的引用并删除/限定无依据论断，保留未决项；不得以另一个只相关的背景来源冒充支持。
+政策、产业报告可支持发布日期、机构行为或计划等背景事实；不能代替因果效应证据。缺少官方原文时注明待核实，不虚构政策和引用。
 模型的 formal_encoding 是已有方程结构。不得自行删去路径、换识别目标或变量含义；确需简化须列出新增假设并提出建模修订需求。
 实验建议写明对象、观测变量、对照/基线、采样方案、可证伪预测与判定标准；没有执行记录就只写建议。
 将工具不支持、资料不足等过程诊断集中到局限或附录，主文解释它们对结论的具体限制，避免逐条堆砌日志。
@@ -946,10 +950,11 @@ def _section_material(packet: WritingPacket, role: str,
             "excerpt": excerpt,
         })
     pieces = ["来源: " + json.dumps(source_rows, ensure_ascii=False)]
-    if role in {"method", "result", "discussion", "conclusion", "revision"}:
+    if role in {"introduction", "method", "result", "discussion", "conclusion", "revision"}:
         pieces.append("命题及其状态: " + json.dumps([
             {key: row.get(key) for key in ("id", "status", "statement", "statement_role", "premises",
-                "formal_spec", "lhs", "rhs", "variables", "variable_domains", "reasoning", "support_refs")}
+                "formal_spec", "lhs", "rhs", "variables", "variable_domains", "reasoning", "support_refs",
+                "scope_population", "scope_region", "scope_period", "scope_conditions", "study")}
             for row in sorted(packet.claims, key=lambda c: c.get("status") not in {"supported", "refuted"})[:20]],
             ensure_ascii=False)[:18000])
     if role in {"method", "result", "discussion", "revision"}:
