@@ -416,11 +416,15 @@ def delivery_gate(manuscript: str, snapshot: ResearchSnapshot,
     for claim in snapshot.claims:
         if claim.status != ClaimStatus.supported:
             continue
-        if claim.variable_domains:
-            missing = [f"{v}∈{d}" for v, d in claim.variable_domains.items()
+        # Real is a solver sort, not an empirical applicability condition.
+        # Keep actual restrictions (positive, nonzero, integer, etc.) visible.
+        restricted_domains = {v: d for v, d in claim.variable_domains.items()
+                              if d.strip().lower() not in {'real', 'reals', 'r'}}
+        if restricted_domains:
+            missing = [f"{v}∈{d}" for v, d in restricted_domains.items()
                        if not re.search(r"(?<![A-Za-z0-9_])" + re.escape(_symbol_text(v))
                                         + r"(?![A-Za-z0-9_])", _symbol_text(manuscript))]
-            if missing and len(missing) == len(claim.variable_domains):
+            if missing and len(missing) == len(restricted_domains):
                 reasons.append(f"结论 {claim.id} 的适用条件未出现在正文中: {', '.join(missing)}")
 
     # 实验建议不得出现"已执行"结果

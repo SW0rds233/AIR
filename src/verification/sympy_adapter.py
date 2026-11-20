@@ -16,13 +16,13 @@ MAX_VECTOR_DIM = 4096
 _FUNCS = {
     "sqrt", "exp", "log", "Abs", "sin", "cos", "tan", "asin", "acos", "atan",
     "sinh", "cosh", "tanh", "Max", "Min", "Rational", "sign", "floor", "ceiling",
-    "factorial", "binomial", "dot",
+    "factorial", "binomial", "dot", "matrix",
 }
 
 _ALLOWED_NODES = (
     ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant, ast.Name, ast.Call,
     ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod, ast.UAdd, ast.USub,
-    ast.Load, ast.Tuple,
+    ast.Load, ast.Tuple, ast.MatMult,
 )
 
 _COMPLEX_DOMAINS = {"complex", "complexes", "c"}
@@ -98,7 +98,7 @@ def _complex_domain(assumptions) -> str | None:
     return None
 
 
-def _parse(text: str, symbols: dict):
+def _parse(text: str, symbols: dict, *, allow_matrix: bool = False):
     import sympy
 
     # Mathematical input uses ^ for powers; never evaluate it as Python XOR.
@@ -106,6 +106,11 @@ def _parse(text: str, symbols: dict):
     if isinstance(text, str):
         text = text.replace("^", "**")
     _validate(text)
+    if '@' in text or re.search(r'\bmatrix\s*\(', text):
+        if not allow_matrix:
+            raise _UnsafeExpression('此核验目标须逐分量编码；矩阵仅受理化简、恒等与恒成立等号条件')
+        from src.verification.matrix_arithmetic import parse_matrix_expression
+        return parse_matrix_expression(text, symbols)
     local = dict(symbols)
     for fn in _FUNCS:
         if hasattr(sympy, fn):
@@ -297,7 +302,7 @@ def op_simplify(arguments: dict) -> VerificationResult:
     variables = arguments.get("variables", [])
     symbols, _ = _to_symbols(variables, arguments.get("assumptions"))
     try:
-        expr = _parse(arguments["expr"], symbols)
+        expr = _parse(arguments["expr"], symbols, allow_matrix=True)
     except _UnsafeExpression as e:
         return _unsupported(str(e))
     import sympy
@@ -310,12 +315,15 @@ def op_prove_identity(arguments: dict) -> VerificationResult:
     variables = arguments.get("variables", [])
     symbols, _ = _to_symbols(variables, arguments.get("assumptions"))
     try:
-        lhs = _parse(arguments["lhs"], symbols)
-        rhs = _parse(arguments["rhs"], symbols)
+        lhs = _parse(arguments["lhs"], symbols, allow_matrix=True)
+        rhs = _parse(arguments["rhs"], symbols, allow_matrix=True)
     except _UnsafeExpression as e:
         return _unsupported(str(e))
     import sympy
 
+    if isinstance(lhs, sympy.MatrixBase) or isinstance(rhs, sympy.MatrixBase):
+        from src.verification.matrix_arithmetic import check_matrix_identity
+        return check_matrix_identity(lhs, rhs, variables, arguments.get('assumptions'))
     diff = sympy.simplify(sympy.expand(lhs - rhs))
     if diff == 0 or diff.is_zero:
         return _ok("prove_identity", certificate=f"{lhs} - ({rhs}) = 0", raw=str(diff))
@@ -433,12 +441,18 @@ def op_equality_condition(arguments: dict) -> VerificationResult:
         return _unsupported(f"变量 {complex_var} 为复数域")
     symbols, _ = _to_symbols(variables, arguments.get("assumptions"))
     try:
-        lhs = _parse(arguments["lhs"], symbols)
-        rhs = _parse(arguments["rhs"], symbols)
+        lhs = _parse(arguments["lhs"], symbols, allow_matrix=True)
+        rhs = _parse(arguments["rhs"], symbols, allow_matrix=True)
     except _UnsafeExpression as e:
         return _unsupported(str(e))
     import sympy
 
+    if isinstance(lhs, sympy.MatrixBase) or isinstance(rhs, sympy.MatrixBase):
+        from src.verification.matrix_arithmetic import check_matrix_identity
+        result = check_matrix_identity(lhs, rhs, variables, arguments.get('assumptions'))
+        if result.status == VerificationStatus.passed:
+            return result  # Every declared assignment satisfies component equality.
+        return _unsupported('非恒成立的矩阵等号条件须逐分量联立求解，不能用单一标量条件替代')
     diff = sympy.expand(lhs - rhs)
     if diff == 0 or diff.is_zero:
         return _ok("equality_condition", certificate="恒成立（声明域内所有赋值均取等）")

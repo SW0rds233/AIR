@@ -137,7 +137,7 @@ def compile_latex(tex_path: str, workdir: str | None = None, engine: str = "xela
     if diagnostics['oversized_float_count']:
         return False, 'LaTeX 表格或图片浮体超过页高，内容可能被裁切:\n' + last_log
     if diagnostics["missing_glyphs"]:
-        return False, "LaTeX 缺失字形，PDF 内容不完整:\n" + "\n".join(diagnostics["missing_glyphs"]) + "\n" + last_log
+        return False, "LaTeX 缺失字形，PDF 内容不完整: " + "; ".join(diagnostics["missing_glyphs"][:3]) + "\n" + last_log
     if diagnostics["max_overfull_pt"] > OVERFULL_BLOCKING_PT:
         return False, (f"LaTeX 排版溢出 {diagnostics['max_overfull_pt']:.2f}pt "
                        f"(阻断阈值 {OVERFULL_BLOCKING_PT:.1f}pt)，请修正后再交付\n" + last_log)

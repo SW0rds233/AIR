@@ -75,6 +75,22 @@ _UNICODE_TO_LATEX_MATH: dict[str, str] = {
     char: latex.strip("$") for char, latex in _UNICODE_TO_LATEX.items()
 }
 
+_SCRIPT_RUNS = (
+    ('⁰¹²³⁴⁵⁶⁷⁸⁹ⁿⁱ⁻⁺⁼⁽⁾', '0123456789ni-+=()', '^'),
+    ('₀₁₂₃₄₅₆₇₈₉₋₊₌₍₎', '0123456789-+=()', '_'),
+)
+
+
+def _unicode_scripts(text: str, *, math_mode: bool) -> str:
+    # Treat consecutive script glyphs as ONE exponent/index: ⁻¹ -> ^{-1}.
+    for chars, plain, marker in _SCRIPT_RUNS:
+        translation = str.maketrans(chars, plain)
+        def replace(match):
+            script = marker + '{' + match.group().translate(translation) + '}'
+            return script if math_mode else '$' + script + '$'
+        text = re.sub('[' + chars + ']+', replace, text)
+    return text
+
 #: 公式体里的全角标点: 数学模式下这些字形不存在 (日志里的
 #: `Missing character: There is no ， in font ...`), 换成 ASCII 等价物并补一个间距。
 _CJK_PUNCT_IN_MATH: dict[str, str] = {
@@ -338,6 +354,7 @@ def _inline_math(value: str) -> str:
 
 def _normalize_unicode_math(text: str) -> str:
     """One normalization path, including indices and explicit math delimiters."""
+    text = _unicode_scripts(text, math_mode=True)
     def replace(match):
         latex = _UNICODE_TO_LATEX_MATH[match.group()]
         # A following variable must not become part of a control word: ∈K -> \in K.
@@ -478,7 +495,7 @@ def escape_latex(text: str) -> str:
 
     text = _protect_bare_commands(text, _store_math)
     # Keep a relational expression together instead of emitting '$-$' per symbol.
-    plain_math = re.compile(r"[A-Za-z0-9\u0370-\u03ff_{}()\[\].,=+*/^<>!−×±≤≥≠ᵀ′″]+")
+    plain_math = re.compile(r"[A-Za-z0-9\u0370-\u03ff_{}()\[\].,=+*/^<>!−×±≤≥≠ᵀ′″⁰¹²³⁴⁵⁶⁷⁸⁹ⁿⁱ⁻⁺⁼⁽⁾₀₁₂₃₄₅₆₇₈₉₋₊₌₍₎]+")
 
     def _protect_expression(match: re.Match) -> str:
         value = match.group(0)
@@ -549,6 +566,7 @@ def escape_latex(text: str) -> str:
     # Unicode → LaTeX: 数学符号与希腊字母进数学模式 (字体里没有这些字形)。
     # 放在最后: 它新造的 `$...$` (例如 `ᵀ`→`$^{\mathrm{T}}$`) 含 `^`, 而上面所有会
     # 改写 `^`/`_` 的步骤都已经过去了, 因此不会再被打到。
+    text = _unicode_scripts(text, math_mode=False)
     for char, latex in _UNICODE_TO_LATEX.items():
         if char in text:
             text = text.replace(char, latex)
@@ -588,6 +606,17 @@ def _display_math(value: str) -> str:
     """Split long top-level formula groups; never split an existing TeX environment."""
     from src.publication.math_content import normalize_environment
     body = escape_math(normalize_environment(value))
+    aligned = re.fullmatch(r'\\begin\{aligned\}(.*?)\\end\{aligned\}', body, re.S)
+    if aligned and not re.search(r'\\(?:begin|end)\{', aligned.group(1)):
+        parts = re.split(r'(\\\\\*?(?:\[[^\]]*\])?)', aligned.group(1))
+        for index in range(0, len(parts), 2):
+            row = parts[index].strip()
+            # Only the usual lhs &= rhs layout; multi-column alignments and
+            # nested environments retain their own column/row semantics.
+            if row.count('&') == 1:
+                wrapped = _wrap_math_row(row)
+                parts[index] = wrapped[0] + ''.join(r' \\ &' + line for line in wrapped[1:])
+        body = r'\begin{aligned}' + ''.join(parts) + r'\end{aligned}'
     # Pure text-label sets need real row breaks: allowbreak is ineffective in
     # an aligned math cell. Keep each text command and the set semantics intact.
     def wrap_labels(match):
@@ -597,6 +626,29 @@ def _display_math(value: str) -> str:
         rows = [r",\ ".join(labels[i:i + 2]) for i in range(0, len(labels), 2)]
         return r"\left\{\begin{gathered}" + r",\\ ".join(rows) + r"\end{gathered}\right\}"
     body = re.sub(r"\\\{((?:\\text\{[^{}]*\}(?:\s|,|\\[ ,;!])*)+)\\\}", wrap_labels, body)
+    def wrap_indicator(match):
+        conditions = match.group(2)
+        if len(conditions) < 120:
+            return match.group(0)
+        rows, start, depth = [], 0, 0
+        for index, char in enumerate(conditions):
+            if index and conditions[index-1] == '\\':
+                continue
+            if char in '{([':
+                depth += 1
+            elif char in '})]':
+                depth -= 1
+            elif char == ',' and depth == 0:
+                rows.append(conditions[start:index].strip())
+                start = index + 1
+            if depth < 0:
+                return match.group(0)
+        if depth or not rows:
+            return match.group(0)
+        rows.append(conditions[start:].strip())
+        return match.group(1) + r'\begin{gathered}' + r',\\ '.join(rows) + r'\end{gathered}\right]'
+    body = re.sub(r'(\\(?:mathbf|mathbb)\{1\}(?:\\!)?\\left\[)(.*?)\\right\]',
+                  wrap_indicator, body, flags=re.S)
     if re.search(r"\\(?:begin|end)\{", body):
         # 模型自己写了环境（如 `\begin{aligned}…\tag{3.1}\end{aligned}`）: 不拆行,
         # 但编号若落在内部环境里必须提出来（amsmath: `\tag not allowed here`）
@@ -841,6 +893,7 @@ def _render_table(data: dict[str, Any], heading: str = '', block_id: str = '') -
     width = rf'\dimexpr(\textwidth-{2*len(header)}\tabcolsep)/{len(header)}\relax'
     columns = ' '.join(r'>{\raggedright\arraybackslash}p{' + width + '}' for _ in header)
     from src.publication.tables import table_title
+    from src.publication.math_content import math_parts
     header_row = " & ".join(escape_latex(h) for h in header) + r" \\"
     out = [r"\begingroup", r"\small",
            r"\renewcommand{\arraystretch}{1.2}",
@@ -850,10 +903,31 @@ def _render_table(data: dict[str, Any], heading: str = '', block_id: str = '') -
            r"\toprule", header_row, r"\midrule", r"\endfirsthead",
            r"\toprule", header_row, r"\midrule", r"\endhead",
            r"\midrule", r"\endfoot", r"\bottomrule", r"\endlastfoot"]
-    for row in rows:
-        cells = [escape_latex(str(c)) for c in (row or [])][: len(header)]
+    for row_index, row in enumerate(rows):
+        cells, wide = [], []
+        for column, value in enumerate((row or [])[:len(header)]):
+            value = str(value)
+            # A narrow p column cannot fit a multi-factor equation, even with
+            # allowbreak. Preserve the table association in a full-width row.
+            pieces = math_parts(value)
+            formula = pieces[0][1] if len(pieces) == 1 and pieces[0][0] else ''
+            if (len(header) > 1 and len(formula) > max(24, 100 // len(header))
+                    and re.search(r'[=<>≤≥]', formula)
+                    and re.search(r'[_^\\\u0370-\u03ff\u2070-\u209f]|[A-Za-z0-9)]\s*[+*/−-]', formula)
+                    and not re.search(r'[\u4e00-\u9fff]|https?://', formula)):
+                label = f'{header[column]}（{row_index+1}.{column+1}）'
+                cells.append(escape_latex(f'见下行{label}'))
+                wide.append((label, formula))
+            else:
+                cells.append(escape_latex(value))
         cells += [""] * (len(header) - len(cells))
         out.append(" & ".join(cells) + r" \\")
+        for label, formula in wide:
+            full_width = r'\dimexpr\textwidth-2\tabcolsep\relax'
+            content = (escape_latex(label) + r'\par\noindent\(\displaystyle '
+                       + _display_math(formula) + r'\)')
+            out.append(r'\multicolumn{' + str(len(header)) + '}{p{' + full_width
+                       + '}}{' + content + r'} \\')
     out += [r"\end{longtable}", r"\endgroup", ""]
     return out
 

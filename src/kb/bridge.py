@@ -136,6 +136,11 @@ def _record_key(ref: SourceRef, resolved: dict) -> str:
     return f"title:{(ref.title or '').strip().lower()}"
 
 
+def _navigation_excerpt(text: str) -> bool:
+    """Dot-leader TOCs are navigation, not the cited substantive passage."""
+    return len(re.findall(r'(?:\.{4,}|…{2,}|·{4,})\s*\d+', text or '')) >= 2
+
+
 def build_retrieval_request(claim: Claim, gap_type: str = "",
                             category: str = "", max_results: int = 5) -> RetrievalRequest:
     """按命题构造定向检索请求: 检索请求绑定缺口而不是裸字符串。"""
@@ -592,7 +597,9 @@ def gather_sources(
 
     merged: list[SourceRef] = []
     seen: set[str] = set()
-    for ref in refs:
+    # Prefer a substantive hit before collapsing passages into one document.
+    # Keep original retrieval order within each group; do not invent relevance.
+    for ref in sorted(refs, key=lambda item: _navigation_excerpt(item.excerpt)):
         resolved = service.resolve(ref) if service is not None and service.available else {}
         key = _record_key(ref, resolved)
         if key in seen:
@@ -611,7 +618,8 @@ def gather_sources(
     for item in items:
         key = f"doi:{item.doi.lower()}" if item.doi else item.source_id or item.literature_id
         previous = unique.get(key)
-        if previous is None or (previous.content_level != "fulltext" and item.content_level == "fulltext"):
+        quality = lambda evidence: (not _navigation_excerpt(evidence.excerpt), evidence.content_level == 'fulltext')
+        if previous is None or quality(item) > quality(previous):
             if previous is not None:
                 item.retrieval_queries = list(dict.fromkeys([*previous.retrieval_queries, *item.retrieval_queries]))
             unique[key] = item

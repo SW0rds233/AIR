@@ -29,6 +29,8 @@ def uses_population_scope(claim: Any) -> bool:
 
 
 def is_theoretical_claim(claim: Any) -> bool:
+    if is_empirical_mechanism(claim):
+        return False
     if has_empirical_context(claim):
         return False
     if _study(claim).get("design") == "theory":
@@ -37,6 +39,18 @@ def is_theoretical_claim(claim: Any) -> bool:
     strategy = claim.get("strategy", "") if isinstance(claim, dict) else claim.strategy
     # Do not erase an empirical assertion merely because it mentions a matrix.
     return kind in ("definitional", "descriptive") and strategy in ("derivation", "proof")
+
+
+def is_empirical_mechanism(claim: Any) -> bool:
+    """A prose mechanism needs evidence even if its study is labelled theory."""
+    row = claim if isinstance(claim, dict) else claim.model_dump(mode="json")
+    study = _study(claim)
+    return bool(row.get("claim_type") in {"causal", "descriptive"}
+        and row.get("mechanism_links")
+        and (row.get("claim_type") == "causal" or row.get("evidence_requirements"))
+        and not (row.get("formal_spec") or row.get("lhs") or row.get("rhs") or row.get("expr"))
+        and study.get("design", "none") in {"theory", "simulation", "none"}
+        and not (study.get("rows") or study.get("data_ref") or study.get("data_table")))
 
 
 def is_formal_question(text: str) -> bool:

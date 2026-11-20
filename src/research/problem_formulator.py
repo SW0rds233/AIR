@@ -231,12 +231,9 @@ def _obligations_for(claim: Claim, wants_equality: bool, method_available: dict[
     # 义务绑定到具体命题版本: 命题换代后义务不得沿用
     ver = claim.version
 
-    from src.research.classification import is_theoretical_claim
+    from src.research.classification import is_empirical_mechanism, is_theoretical_claim
     theoretical = is_theoretical_claim(claim)
-    if (claim.claim_type == ClaimType.causal and claim.mechanism_links
-            and not claim.formal_spec and not (claim.lhs and claim.rhs) and not claim.expr
-            and claim.study.design.value in {"theory", "simulation", "none"}
-            and not (claim.study.rows or claim.study.data_ref or claim.study.data_table)):
+    if is_empirical_mechanism(claim):
         # A proposed mechanism is an empirical hypothesis even when labelled
         # "theory". Its support/transfer scope cannot be established by algebra.
         return _applied_obligations(claim, ver, method_available) + [
