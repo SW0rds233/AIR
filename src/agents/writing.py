@@ -1426,6 +1426,12 @@ def build_packet_from_context(task: AgentTask, context: ContextPack) -> WritingP
     models = context.objects.get("model") or []
     validations = context.objects.get("validation_plan") or []
     verification = context.objects.get("verification") or []
+    versions = {row['id']:int(row.get('version') or 1) for row in claims if row.get('id')}
+    def current_record(row):
+        return (row.get('claim_id') not in versions
+                or int(row.get('claim_version') or 1)==versions[row['claim_id']])
+    verification = [row for row in verification if current_record(row)]
+    obligations = [row for row in context.objects.get('obligation') or [] if current_record(row)]
     unknown_descriptions = {
         "quantifiers": "题目中的量词或适用范围尚需确认。",
         "main_question": "核心研究问题尚需用户确认。",
@@ -1457,7 +1463,7 @@ def build_packet_from_context(task: AgentTask, context: ContextPack) -> WritingP
                            if isinstance(s, dict)],
         deliverables=as_list_of_str(brief.get("deliverables")),
         output_language=str(brief.get("output_language") or ""),
-        claims=claims, models=models, obligations=context.objects.get("obligation") or [],
+        claims=claims, models=models, obligations=obligations,
         validations=validations, verifications=verification,
         sources=evidence,
         figures=context.objects.get("figure") or [],
