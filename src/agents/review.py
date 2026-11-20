@@ -162,6 +162,9 @@ class ReviewAgent(AgentBase):
   observed 必须是材料中该字段的实际值，expected 是所要求的值；另述支持要求值的原始依据。
   质量/适用性问题须定位正文引用句与来源摘录的实际错位；不能要求在参考文献条目写用途或免责声明。
   原文为中文不强制翻译题名，采用来源实际完整署名，不凭拼音猜中文名。
+  中英文题名/刊名并存不是出版身份异常的证据；刊物质量须依据内容、方法或可定位出版记录。
+  正文、公式与表格中提到的具名研究必须有结构化来源引用；引用键齐全不代表没有隐含缺引。
+  符号核对以当前正文的 math 字段为准；模型旧式只供追溯，正文已经消歧时不能再报旧符号。
   分析单位、入排标准、模型参数改变交 modeling/research；纯表述歧义才交 writing。
   恒等式与计数一致性证书只核验编码，不自动构成科学贡献；以是否回答研究问题评价贡献。
   对上一轮每条问题逐项核对 acceptance：已解决的给出当前块与理由，未解决的沿用 issue_id。
@@ -242,7 +245,8 @@ class ReviewAgent(AgentBase):
                 source_conflicts = _review_source_conflicts(payload, context)
                 contradictions = date_conflicts + list(anchor_conflicts.values()) + list(source_conflicts.values())
                 all_unanchored = bool(anchor_conflicts) and len(anchor_conflicts) == len(payload.get('issues') or [])
-                if (date_conflicts or all_unanchored or source_conflicts) and not task.budget.exceeded_by(usage):
+                if (date_conflicts or all_unanchored or source_conflicts
+                        or any('公式原句' in note for note in anchor_conflicts.values())) and not task.budget.exceeded_by(usage):
                     # One factual correction, not a second vote or a score booster.
                     import json
                     try:
@@ -632,7 +636,7 @@ def _review_source_conflicts(payload: dict, context: ContextPack) -> dict[int, s
         identity_accusation = re.search(
             r'DOI.{0,25}(?:不匹配|异常|错误)|前缀.{0,20}(?:不符|异常|不一致)|'
             r'(?:缺少|无|没有|未提供).{0,15}ISSN|(?:非正式|不满足正式|未正式)'
-            r'|(?:JCR|CiteScore|伪刊|掠夺性)', text, re.I)
+            r'|(?:JCR|CiteScore|伪刊|掠夺性)|(?:中英文|中文内容|中文题名).{0,25}(?:不匹配|不符|混杂)', text, re.I)
         targets = [sources[key] for key in issue.get('affected_ids') or [] if key in sources
                    and sources[key].get('publication_source_url')]
         if not identity_accusation or not targets:
@@ -690,6 +694,18 @@ def _review_grounding_conflicts(payload: dict, context: ContextPack) -> dict[int
             conflicts[index] = f'审阅意见 {index + 1} 的正文块不存在于当前版本'
         elif not normalize(quote) or not any(normalize(quote) in normalize(blocks[t]) for t in targets):
             conflicts[index] = f'审阅意见 {index + 1} 的 quoted_text 缺失或不在所指当前正文块中'
+        else:
+            # Catch a concrete old formula quoted in the diagnosis despite a
+            # correct current quoted_text (e.g. a_i was already changed to alpha_i).
+            claimed = re.findall(r'''公式(?:仍|中)?(?:写|为|使用|出现)[：:\s]*['"“]([^'"”]+)['"”]''',
+                                 str(item.get('detail') or ''))
+            def formula_text(value):
+                value = re.sub(r'\\(?:left|right)\b', '', value)
+                value = re.sub(r'\\(?:mathrm|text|operatorname)\{([^{}]*)\}', r'\1', value)
+                return re.sub(r'[\s{}]', '', value)
+            if any('=' in expr and not any(formula_text(expr) in formula_text(blocks[t]) for t in targets)
+                   for expr in claimed):
+                conflicts[index] = f'审阅意见 {index + 1} 所称公式原句不在当前目标块；须以当前 math 字段重新核查'
     return conflicts
 
 

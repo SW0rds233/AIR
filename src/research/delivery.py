@@ -101,7 +101,7 @@ def assess_delivery(store: Any, *, project_id: str, problem_id: str, run_id: str
     theory = theory_validity_gate(
         snapshot.claims, snapshot.obligations, snapshot.verifications,
         snapshot.dependency_edges, snapshot=snapshot)
-    delivery = delivery_gate(manuscript_md, snapshot, theory_gate=theory)
+    delivery = delivery_gate(manuscript_md, snapshot, theory_gate=theory, blocks=blocks)
     publication = publication_gate(
         manuscript_md, snapshot, references=list(references),
         compile_status=compile_status, blocks=blocks, checklist=checklist,

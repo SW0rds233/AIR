@@ -10,7 +10,7 @@ _MAX_LEN = 4000
 _ALLOWED = (
     ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.UnaryOp, ast.Not, ast.USub, ast.UAdd,
     ast.BinOp, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Compare, ast.Lt, ast.LtE, ast.Gt,
-    ast.GtE, ast.Eq, ast.NotEq, ast.Constant, ast.Name, ast.Load,
+    ast.GtE, ast.Eq, ast.NotEq, ast.Constant, ast.Name, ast.Load, ast.Pow,
 )
 
 
@@ -107,6 +107,21 @@ def _eval(node, env, int_mode, z3):
             return left - right
         if isinstance(node.op, ast.Mult):
             return left * right
+        if isinstance(node.op, ast.Pow):
+            if (isinstance(node.right, ast.Constant) and type(node.right.value) is int
+                    and 0 <= node.right.value <= 32):
+                # Multiplication keeps integer variables in the integer sort.
+                product = z3.IntVal(1) if int_mode else z3.RealVal(1)
+                for _ in range(node.right.value):
+                    product = product * left
+                return product
+            try:
+                exponent = ast.literal_eval(node.right)
+            except (ValueError,TypeError):
+                exponent = None
+            if isinstance(exponent,(int,float)) and abs(exponent)>32:
+                raise _Unsupported("数值幂指数超出有界核验范围")
+            raise _Unsupported("power_requires_symbolic_check")
         if isinstance(node.op, ast.Div):
             if int_mode:
                 raise _Unsupported("整型域不支持除法 (请改用实数域)")
@@ -199,6 +214,9 @@ def op_check_implication(arguments: dict) -> VerificationResult:
             return _result(VerificationStatus.failed, "存在反模型", "A ∧ ¬C 可满足", model)
         return _result(VerificationStatus.unknown, "求解器返回 unknown (超时/超出片段)")
     except _Unsupported as e:
+        if str(e) == "power_requires_symbolic_check":
+            from src.verification.power_implication import check_power_implication
+            return check_power_implication(arguments)
         return _result(VerificationStatus.unsupported, str(e))
     except Exception as e:  # noqa: BLE001
         return _result(VerificationStatus.error, f"z3 执行异常: {e}")

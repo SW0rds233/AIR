@@ -597,7 +597,7 @@ def _display_math(value: str) -> str:
         rows = [r",\ ".join(labels[i:i + 2]) for i in range(0, len(labels), 2)]
         return r"\left\{\begin{gathered}" + r",\\ ".join(rows) + r"\end{gathered}\right\}"
     body = re.sub(r"\\\{((?:\\text\{[^{}]*\}(?:\s|,|\\[ ,;!])*)+)\\\}", wrap_labels, body)
-    if re.search(r"\\(?:begin|end)\{|\\\\", body):
+    if re.search(r"\\(?:begin|end)\{", body):
         # 模型自己写了环境（如 `\begin{aligned}…\tag{3.1}\end{aligned}`）: 不拆行,
         # 但编号若落在内部环境里必须提出来（amsmath: `\tag not allowed here`）
         return _hoist_inner_tags(body)
@@ -610,6 +610,15 @@ def _display_math(value: str) -> str:
             depth += 1
         elif char in "})]" and (index == 0 or body[index - 1] != "\\"):
             depth = max(0, depth - 1)
+        elif depth == 0 and body.startswith(r"\\", index):
+            # A bare row separator is not a multiline environment. equation
+            # ignores it; consume its optional spacing and build aligned below.
+            if body[start:index].strip():
+                rows.append(body[start:index].strip())
+            separator = re.match(r"\\\\\*?(?:\s*\[[^\]]*\])?", body[index:])
+            index += separator.end()
+            start = index
+            continue
         elif char == ";" and depth == 0:
             if body[start:index].strip():
                 rows.append(body[start:index].strip())

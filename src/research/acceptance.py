@@ -345,8 +345,31 @@ def _aligned(record: VerificationRecord, claim: Claim) -> bool:
     return True
 
 
+def _pending_disclosure(claim_id: str, blocks: list | None) -> bool:
+    from src.publication.claims import asserts_completed_proof
+
+    linked = []
+    for block in blocks or []:
+        row = block.model_dump(mode='json') if hasattr(block, 'model_dump') else block
+        if any(kind == 'claim' and ref.get('id') == claim_id
+               for kind, ref in zip(row.get('ref_kinds') or [], row.get('refs') or [])):
+            linked.append(row)
+    if not linked:
+        return False  # A global disclaimer cannot qualify an unlocated assertion.
+    for row in linked:
+        text = str(row.get('text') or '')
+        if (not row.get('needs_check') or asserts_completed_proof(text)
+                or not re.search(r'待核验|尚未.{0,12}核验|未经.{0,12}核验|未完成.{0,12}核验', text)):
+            return False
+        for clause in re.split(r'[。！？；\n]', text):
+            for match in re.finditer(r'(?:已|已经)(?:证明|证实|核验)|定理成立', clause):
+                if not re.search(r'不(?:能|得|可)?|并非|未', clause[max(0, match.start()-10):match.start()]):
+                    return False
+    return True
+
+
 def delivery_gate(manuscript: str, snapshot: ResearchSnapshot,
-                  theory_gate: GateResult | None = None) -> GateResult:
+                  theory_gate: GateResult | None = None, *, blocks: list | None = None) -> GateResult:
     """论文表达门槛 + 研究有效性门槛的联合出口检查。"""
     reasons: list[str] = []
     unresolved: list[str] = []
@@ -362,10 +385,16 @@ def delivery_gate(manuscript: str, snapshot: ResearchSnapshot,
             reasons.append(f"主要结论 {claim.id} 未映射到正文位置")
 
     # 未决义务的结论不得作为定理写入正文
+    claim_versions = {claim.id: claim.version for claim in snapshot.claims}
     for obligation in snapshot.obligations:
+        if claim_versions.get(obligation.claim_id, obligation.claim_version) != obligation.claim_version:
+            continue  # History is retained, but only the current version governs delivery.
         if obligation.required and obligation.status in (ObligationStatus.open, ObligationStatus.blocked) \
                 and obligation.claim_id in mapped:
-            reasons.append(f"未关闭义务 {obligation.id} 的结论被写入正文")
+            if _pending_disclosure(obligation.claim_id, blocks):
+                unresolved.append(f"未关闭义务 {obligation.id} 已作为待核验候选披露，仍不构成已证结论")
+            else:
+                reasons.append(f"未关闭义务 {obligation.id} 的结论被写入正文")
 
     # 正文不得把"证明计划"当作"已完成证明"陈述
     if snapshot.attempts:

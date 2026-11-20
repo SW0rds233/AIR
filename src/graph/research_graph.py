@@ -1014,20 +1014,30 @@ class TeamRun:
         if self._cached_default_builder is not None:
             return self._cached_default_builder
         source_sets = self._source_set_rows
-        def source_rows(kind):
-            rows = (self.projection.rows(kind) if hasattr(self.projection, "rows")
+        def projected(kind):
+            return (self.projection.rows(kind) if hasattr(self.projection, "rows")
                     else object_rows(self.projection.store, kind))
+        def source_rows(kind):
+            rows = projected(kind)
+            from src.agents.review_state import latest_review_issues
             limit = 40
+            if kind == 'review_issue':
+                rows = latest_review_issues(rows)
             if kind == "manuscript":
                 # Review/patch the actual current text and tables, never a truncated copy.
                 return rows[-1:]
             if kind == "evidence":
-                manuscripts = (self.projection.rows("manuscript") if hasattr(self.projection, "rows")
-                               else object_rows(self.projection.store, "manuscript"))
+                manuscripts = projected('manuscript')
                 cited = {ref.get("id") for manuscript in manuscripts[-1:]
                          for section in manuscript.get("sections", []) for block in section.get("blocks", [])
                          for ref, ref_kind in zip(block.get("refs", []), block.get("ref_kinds", []))
                          if ref_kind == "source"}
+                # A missing citation is, by definition, not in the cited set.
+                # Preserve sources named by the current review before trimming.
+                cited.update(ref.get('id') for issue in latest_review_issues(projected('review_issue'))
+                             for ref in issue.get('affected_refs') or [] if isinstance(ref,dict))
+                cited.update(gap.get('source_id') for manuscript in manuscripts[-1:]
+                             for gap in manuscript.get('gaps') or [] if gap.get('kind')=='ineligible_reference')
                 rows = sorted(rows, key=lambda row: (row.get("source_id") or row.get("id")) not in cited)
                 limit = max(limit, sum((r.get("source_id") or r.get("id")) in cited for r in rows))
             return slim_object_rows(rows, limit=limit,
