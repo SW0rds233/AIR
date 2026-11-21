@@ -1006,7 +1006,8 @@ def _claim_repair_target(issue):
     text = ' '.join([issue.summary, issue.detail, *issue.acceptance])
     if (targets and issue.category in {'science', 'fidelity'}
             and (issue.suggested_owner in {'reasoning', 'modeling'} or re.search(
-                r'formal_spec|mechanism_links|编码前提|命题.{0,25}(?:歧义|混淆|前提|定义)', text))):
+                r'formal_spec|mechanism_links|编码前提|命题.{0,25}(?:歧义|混淆|前提|定义)|'
+                r'\bblocked\b|MatMult|核验.{0,15}(?:受阻|未完成|未被.*受理)|未获.{0,8}核验', text))):
         return targets[0]
     return ''
 
