@@ -168,3 +168,18 @@ def test_table_english_description_does_not_become_a_formula():
     text = 'population = adult participants from the coastal region'
     tex = '\n'.join(_render_table({'header':['field','description'], 'rows':[['scope',text]]}))
     assert r'\multicolumn' not in tex and text in tex
+
+
+def test_table_english_prose_with_equation_symbols_stays_in_its_cell():
+    from src.publication.render_latex import _render_table
+    text = 'the total cost = base price + tax + shipping and handling fees'
+    tex = '\n'.join(_render_table({'header':['field','description'], 'rows':[['scope',text]]}))
+    assert r'\multicolumn' not in tex and text in tex
+
+
+def test_table_parenthesized_symbolic_row_still_gets_full_width():
+    from src.publication.render_latex import _render_table
+    formula = 'y(A2) - y(A1) = (c1 + c2(A1 + A2))(A2 - A1)'
+    tex = '\n'.join(_render_table({'header':['name','expression','scope','state'],
+        'rows':[['difference', formula, 'conditional', 'checked']]}))
+    assert r'\multicolumn{4}' in tex and formula.split('=')[0].strip() in tex

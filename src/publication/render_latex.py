@@ -882,6 +882,47 @@ def _render_block(block: Block, citations: dict[str, int],
     return out
 
 
+_TABLE_EXPLICIT_MATH = re.compile(r'(?<!\\)\$|\\\(|\\\[|\\begin\{')
+_TABLE_MATH_MARKER = re.compile(
+    r'[_^\\{}]|[\u0370-\u03ff\u2070-\u209f]|[−×÷≤≥≠≈±∑∫√∞→←↔]')
+_TABLE_PROSE_WORD = re.compile(r'(?<!\\)\b[a-z]{3,}\b')
+_TABLE_PROSE_PAIR = re.compile(r'[a-z]{3,}\s+[a-z]{3,}')
+_TABLE_OPERATORS = re.compile(r'[=<>≤≥+\-*/]')
+
+
+def _table_formula(value: str, pieces: list[tuple[bool, str]]) -> str:
+    """Return a table cell only when it is unambiguously a display formula.
+
+    ``math_parts`` deliberately treats an undelimited value as math because it
+    is normally called on a manuscript math block.  A table cell is different:
+    English prose may contain ``=`` and ``+`` without being an equation.
+    """
+    if len(pieces) != 1 or not pieces[0][0]:
+        return ''
+    formula = pieces[0][1].strip()
+    if not formula or not re.search(r'[=<>≤≥]', formula):
+        return ''
+    if re.search(r'[\u4e00-\u9fff]|https?://', formula):
+        return ''
+    if _TABLE_EXPLICIT_MATH.search(value):
+        return formula
+    # An English sentence such as "the total cost = base price + tax" must
+    # stay in its p-column rather than become a display-math row.
+    if (len(_TABLE_PROSE_WORD.findall(formula)) >= 2
+            and _TABLE_PROSE_PAIR.search(formula)):
+        return ''
+    if _TABLE_MATH_MARKER.search(formula):
+        return formula
+    brackets = len(re.findall(r'[()\[\]{}]', formula))
+    operators = len(_TABLE_OPERATORS.findall(formula))
+    if brackets >= 2 and operators >= 2:
+        return formula
+    letters = len(re.findall(r'[A-Za-z]', formula))
+    if letters <= 12 and operators >= 3 and not re.search(r'\s{2,}', formula):
+        return formula
+    return ''
+
+
 def _render_table(data: dict[str, Any], heading: str = '', block_id: str = '') -> list[str]:
     """Page-breakable table with fixed total width and repeated column headings."""
     header = [str(h) for h in (data.get("header") or [])]
@@ -910,11 +951,8 @@ def _render_table(data: dict[str, Any], heading: str = '', block_id: str = '') -
             # A narrow p column cannot fit a multi-factor equation, even with
             # allowbreak. Preserve the table association in a full-width row.
             pieces = math_parts(value)
-            formula = pieces[0][1] if len(pieces) == 1 and pieces[0][0] else ''
-            if (len(header) > 1 and len(formula) > max(24, 100 // len(header))
-                    and re.search(r'[=<>≤≥]', formula)
-                    and re.search(r'[_^\\\u0370-\u03ff\u2070-\u209f]|[A-Za-z0-9)]\s*[+*/−-]', formula)
-                    and not re.search(r'[\u4e00-\u9fff]|https?://', formula)):
+            formula = _table_formula(value, pieces)
+            if len(header) > 1 and len(formula) > max(24, 100 // len(header)):
                 label = f'{header[column]}（{row_index+1}.{column+1}）'
                 cells.append(escape_latex(f'见下行{label}'))
                 wide.append((label, formula))
