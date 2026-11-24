@@ -351,8 +351,8 @@ class ReasoningAgent(AgentBase):
             claim["id"] = object_id
             version = int(existing.get("version") or 1) if existing else 1
             encoding_changed = existing and any(key in claim and claim[key] != existing.get(key)
-                for key in ("lhs", "rhs", "expr", "wrt", "relation", "variables", "variable_domains", "study", "formal_spec", "statement_role",
-                            "mechanism_links", "premises", "scope_conditions", "scope_population", "scope_region", "scope_period"))
+                for key in ("lhs", "rhs", "expr", "wrt", "direction", "relation", "variables", "variable_domains", "study", "formal_spec", "statement_role",
+                            "claim_type", "mechanism_links", "premises", "evidence_requirements", "scope_conditions", "scope_population", "scope_region", "scope_period"))
             if existing and str(existing.get("statement") or "").strip() == statement and not encoding_changed:
                 # Repeated prose is not new scientific progress and must not reset proof state.
                 continue

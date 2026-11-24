@@ -175,6 +175,15 @@ def review_claim(claim: Claim,
     review.findings.append(_check_reverse_causality(claim, text, evidence))
     review.findings.append(_check_metric_substitution(claim, text))
     review.findings.append(_check_conclusion_strength(claim, text, evidence))
+    from src.research.classification import is_empirical_mechanism, has_empirical_context
+    if is_empirical_mechanism(claim) and not has_empirical_context(claim):
+        # A proposed mechanism still needs scope, alternative explanations and
+        # evidence, but has no measured sample on which to run these tests.
+        for finding in review.findings:
+            if finding.check_id in {'sample_selection_bias', 'measurement_error',
+                                    'reverse_causality', 'multiple_comparisons'}:
+                finding.status = NOT_APPLICABLE
+                finding.reason = '候选机制尚无经验样本/估计；取得数据后再启用该检查'
     return review
 
 

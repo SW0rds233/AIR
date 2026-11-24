@@ -124,12 +124,24 @@ class ResearchCommitService:
             if kind == "claim":
                 try:
                     # Ignore self-reported proof state, but reject malformed content.
-                    Claim.model_validate(_strip_claimed_state(proposal.payload))
+                    candidate = Claim.model_validate(_strip_claimed_state(proposal.payload))
                 except ValidationError as e:
                     outcome.rejected.append({
                         "proposal_id": proposal.proposal_id, "kind": proposal.kind,
                         "reason": f"命题字段不符合契约: {e}"})
                     continue
+                previous_payload = self.store.get('claim', proposal.object_id or candidate.id)
+                previous = _claim_of(previous_payload) if previous_payload else None
+                if previous is not None:
+                    fields = ('statement','claim_type','statement_role','formal_spec','lhs','rhs',
+                              'expr','wrt','direction','relation','variables','variable_domains',
+                              'study','premises','mechanism_links','evidence_requirements',
+                              'scope_conditions','scope_population','scope_region','scope_period')
+                    changed = any(getattr(previous,key) != getattr(candidate,key) for key in fields)
+                    if candidate.version < previous.version or (changed and candidate.version == previous.version):
+                        outcome.rejected.append({'proposal_id':proposal.proposal_id,'kind':proposal.kind,
+                            'reason':'命题陈述/编码/适用条件已变更，必须升版；不得复用当前版本的旧义务与证书'})
+                        continue
                 conflicts = conflicting_code_parameters(
                     problem_statement, str(proposal.payload.get("statement") or ""))
                 if conflicts:
@@ -250,14 +262,29 @@ class ResearchCommitService:
             writes[(kind, object_id)] = payload
             staged[proposal.proposal_id] = proposal
 
-        # A formal assertion must never exist without its versioned proof duty.
-        # Register it in the same transaction; execution remains the reasoner's job.
+        # A revised claim receives current duties in the same transaction.
+        # Historical duties keep their original claim_version and certificates.
         from src.research.problem_formulator import obligations_for_claim
+        from src.verification.definitions import is_notation_definition
         for (kind, claim_id), payload in list(writes.items()):
-            if kind != "claim" or not payload.get("formal_spec"):
+            if kind != "claim":
                 continue
             claim = Claim.model_validate(payload)
+            previous = self.store.get('claim', claim_id)
+            notation = is_notation_definition(claim)
+            if not (claim.formal_spec or notation or
+                    (previous and previous.get('version',1) != claim.version)):
+                continue
             existing = self._obligations_for_claim(claim_id, writes)
+            if notation:
+                for old in existing:
+                    if old.claim_version == claim.version and old.required and old.kind == 'formal_argument':
+                        writes[('obligation',old.id)] = {
+                            **old.model_dump(mode='json'), **_scope_meta(task,result),
+                            'required':False,
+                            'detail':'当前版本仅作记号披露；撤销错配的形式证明要求，未证明任何性质'}
+                        events.append(('obligation_reclassified', {'obligation_id':old.id,
+                            'claim_id':claim.id,'claim_version':claim.version,'reason':'notation_only'}))
             for obligation in obligations_for_claim(claim):
                 if any(old.claim_version == claim.version and old.kind == obligation.kind for old in existing):
                     continue

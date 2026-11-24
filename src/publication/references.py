@@ -132,6 +132,11 @@ def _authors(value) -> str:
 def format_reference(source: dict[str, Any]) -> str:
     kind = source.get("publication_type") or source.get("doc_type") or "journal-article"
     title, year = str(source.get("title") or ""), str(source.get("year") or "")
+    # Publisher records sometimes leak an unknown control word (\\fusion).
+    # Clean display text only; keep registered metadata and actual TeX commands.
+    from src.publication.render_latex import _KNOWN_TEX_COMMANDS
+    title = re.sub(r'\\+([A-Za-z]{3,})(?![A-Za-z{])',
+                   lambda match: match.group() if match.group(1) in _KNOWN_TEX_COMMANDS else match.group(1), title)
     authors, venue = _authors(_author_rows(source)), str(source.get("venue") or "")
     code = {"journal-article": "J", "journal": "J", "proceedings-article": "C", "conference": "C",
             "book": "M", "monograph": "M", "book-chapter": "M", "thesis": "D",

@@ -120,6 +120,9 @@ def ref_to_evidence(service: KnowledgeService, ref: SourceRef,
         item.notes = (item.notes + " " + str(read["failure"])).strip()
     if item.content_level == "abstract" and not item.location.lower().startswith("abstract"):
         item.location = "abstract " + item.location
+    from src.kb.report_metadata import recover_report_metadata
+    recovered = recover_report_metadata(item.model_dump(mode='json'))
+    item = SourceEvidence.model_validate(recovered)
     return item
 
 

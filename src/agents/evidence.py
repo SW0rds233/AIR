@@ -174,6 +174,9 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
     # ---- 主流程 ----
     def _run(self, task: AgentTask, context: ContextPack, runtime: AgentRuntime,
              usage: UsageRecord, tools: list[ToolSpec]) -> AgentResult:
+        report = self._repair_report_metadata(task, context, usage)
+        if report is not None:
+            return report
         repaired = self._repair_author_metadata(task, context, usage)
         if repaired is not None:
             return repaired
@@ -260,6 +263,7 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
             )
 
         evidence_items, coverage, unresolved = collected
+        evidence_items = _inherit_registered_bibliography(evidence_items, context)
         runtime.emit("evidence_retrieval", {
             "task_id": task.task_id, "agent": self.role,
             **_coverage_dict(coverage), "sources": len(evidence_items),
@@ -370,6 +374,39 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                             changes=changes, needs=needs, unresolved=unresolved,
                             usage=usage, payload=payload)
 
+    def _repair_report_metadata(self, task, context, usage):
+        if task.hints.get('repair_action') != 'verify_source':
+            return None
+        from src.kb.report_metadata import recover_report_metadata
+        from src.publication.references import citation_eligible
+        targets = {ref.id for ref in task.input_refs} | set(task.hints.get('focus_blocks') or [])
+        changes = []
+        for row in context.objects.get('evidence') or []:
+            source_id = str(row.get('source_id') or row.get('id') or '')
+            if source_id not in targets or len(changes) >= 4:
+                continue
+            refreshed = recover_report_metadata(row)
+            if refreshed != row and citation_eligible(refreshed):
+                changes.append(build_proposal('evidence', object_id=source_id,
+                    payload=refreshed, expected_revision=row.get('_storage_revision'),
+                    rationale='依据同一文件首页恢复机构报告书目；支持关系保持未判定'))
+        if not changes:
+            return None
+        need = ResearchNeed(kind=NeedKind.manuscript_revision,owner='writing',
+            statement='使用已登记的机构报告条目核对引用；文档自述的规划与效果必须分别限定',
+            why='书目身份可追溯不等于效果已获证据支持',blocked_refs=list(task.input_refs),
+            hints={**task.hints,'repair_action':'revise_citation'},
+            acceptance=['引用原文实际涉及的系统与地区；不得据规划、自述或定义推断现实因果效应'])
+        content_need = ResearchNeed(kind=NeedKind.more_sources,owner='evidence',
+            statement='定向核读已登记报告中审阅点名的正文片段，评估背景或逐环支持关系',
+            why='封面只恢复书目；当前摘录不能替代具体案例的正文证据',blocked_refs=list(task.input_refs),
+            hints={**task.hints,'repair_action':'read_source',
+                   'query':str(changes[0].payload.get('title') or '') + ' ' + ' '.join(task.acceptance_criteria)[:160]},
+            acceptance=['按 source_id 回原文定位审阅点名的案例，保留页码与摘录；不以封面替代内容，不提升整条因果链'],
+            blocking=True)
+        return self.partial(task,'已从可定位首页恢复机构报告书目，待写作核对引用用途',
+            changes=changes,needs=[content_need,need],usage=usage)
+
     def _repair_author_metadata(self, task, context, usage):
         """Recheck the cited record itself instead of retrieving the same bad cache."""
         from src.agents.citation_repair import metadata_repair
@@ -431,12 +468,12 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
         stage = self.role or "evidence"
         if not runtime.llm_available(stage):
             return rows
-        claims = [claim for claim in (_parse_claim(row) for row in
-                  context.objects.get("claim", [])) if claim is not None]
+        claims = _support_targets(task, context)
         target = str(task.hints.get("claim_id") or "")
         if target:
-            claims = [claim for claim in claims if claim.id == target]
             if not claims:
+                runtime.emit('evidence_target_unavailable', {'task_id':task.task_id,
+                    'claim_id':target,'reason':'目标不存在或仅是命名/定义；不把定义登记为被经验资料支持'})
                 return rows
         targets = claims[:4] or [Claim(statement=context.request or task.objective)]
         try:
@@ -777,6 +814,36 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                 if len(out) >= 40:
                     return out
         return out
+
+
+def _inherit_registered_bibliography(rows, context):
+    from src.publication.references import citation_eligible, BIBLIO_FIELDS
+    from src.kb.report_metadata import recover_report_metadata
+    previous = {str(row.get('source_id') or row.get('id')):recover_report_metadata(row)
+                for row in context.objects.get('evidence') or []}
+    out = []
+    for row in rows:
+        registered = previous.get(str(row.get('source_id') or row.get('id')), {})
+        if (not citation_eligible(row) and citation_eligible(registered)
+                and registered.get('file_hash') and row.get('file_hash') == registered['file_hash']):
+            row = {**row, **{key:registered[key] for key in
+                (*BIBLIO_FIELDS, 'title','authors','year','venue','doi','url','source_kind') if registered.get(key)}}
+        out.append(row)
+    return out
+
+
+def _support_targets(task, context):
+    """Spend the bounded semantic-judgement budget on scientific assertions."""
+    from src.verification.definitions import is_definition_assignment
+    claims = [claim for claim in (_parse_claim(row) for row in context.objects.get('claim') or [])
+              if claim is not None and claim.statement_role != 'definition'
+              and not is_definition_assignment(claim)]
+    target = str(task.hints.get('claim_id') or '')
+    if target:
+        return [claim for claim in claims if claim.id == target]
+    focused = {ref.id for ref in task.input_refs}
+    return sorted(claims, key=lambda claim: (claim.id not in focused,
+        claim.status.value in {'supported','refuted'}, not bool(claim.mechanism_links or claim.evidence_requirements)))
 
 
 def _study_from(context: ContextPack):

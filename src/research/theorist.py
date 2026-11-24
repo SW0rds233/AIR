@@ -64,6 +64,8 @@ def _steps_for(claim: Claim, strategy: str) -> list[ProofStep]:
         return [ProofStep(index=1, statement="核对定义两端的符号声明与函数元数", rule="definition"),
                 ProofStep(index=2, statement="单独核查定义域、量纲与适用条件；附带推论另建证明目标",
                           rule="scope_check")]
+    if not (claim.lhs and claim.rhs) and not (claim.expr and claim.wrt):
+        return []  # No empty differences or fabricated algebra for prose claims.
     if strategy == "monotonicity_differentiation":
         return [
             ProofStep(index=1, statement=f"考察 {claim.expr} 关于 {claim.wrt} 的导数",

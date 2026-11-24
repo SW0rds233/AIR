@@ -61,7 +61,7 @@ def _is_grouping_disclosure(claim) -> bool:
             or claim.formal_spec or claim.lhs or claim.rhs or claim.expr or claim.effect_estimate):
         return False
     text = claim.statement.strip()
-    if not re.match(r'(?:分组|分层|分类|统计|测量)口径定义|(?:符号|变量|分组轴)命名', text):
+    if not re.match(r'(?:分组|分层|分类|统计|测量)口径定义|(?:符号|变量|分组轴|环节)命名', text):
         return False
     if not re.search(r'仅命名|仅作.{0,6}(?:定义|披露)|不含任何经验断言', text):
         return False

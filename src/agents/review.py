@@ -976,8 +976,8 @@ def _route_unverified_source_repairs(issues, context):
     routed = []
     for issue in issues:
         material = issue.summary + ' ' + ' '.join(issue.acceptance)
-        needs_source = (issue.repair_action == 'revise_text' and issue.category in {'fidelity','citation','completeness'}
-            and re.search(r'参数|数值|元数据|作者|出版|数据缺失', material)
+        needs_source = (issue.repair_action in {'revise_text','revise_citation'} and issue.category in {'fidelity','citation','completeness'}
+            and re.search(r'参数|数值|元数据|作者|署名|年份|出版|数据缺失|参考文献|白皮书', material)
             and any(ref.id in sources and not citation_eligible(sources[ref.id]) for ref in issue.affected_refs))
         if needs_source:
             issue = issue.model_copy(update={'repair_action':'verify_source','suggested_owner':'evidence'})
@@ -991,6 +991,10 @@ def repair_owner(issue: ReviewIssueRef) -> str:
         return 'reasoning'  # Only this role may revise registered claims.
     if issue.repair_action in {"verify_source", "replace_source"}:
         return "evidence"
+    if (issue.category in {'science','fidelity'}
+            and re.search(r'模型.{0,18}(?:缺|未|没有)|(?:补充|增加|建立).{0,12}(?:模型|方程)',
+                          issue.summary + ' ' + issue.detail + ' '.join(issue.acceptance))):
+        return 'modeling'
     if issue.category == "citation":
         if issue.repair_action in {"revise_citation", "withdraw_citation"}:
             return "writing"
@@ -1051,7 +1055,7 @@ def _needs_from(issues: list[ReviewIssueRef]) -> list[ResearchNeed]:
                        if issue.repair_action == 'verify_source' else {}),
                    **({'metadata_only':True} if issue.category == 'citation'
                        and issue.repair_action == 'verify_source'
-                       and re.search(r'DOI|ISSN|作者|署名|出版|期刊|卷期|元数据|书目', issue.summary, re.I) else {}),
+                       and re.search(r'DOI|ISSN|作者|署名|出版|期刊|卷期|元数据|书目|参考文献|白皮书', issue.summary, re.I) else {}),
                    **({"query": doi.group(0).rstrip(".,;)")} if doi and owner == "evidence" else {}),
                    "focus_blocks": [ref.id for ref in issue.affected_refs]},
             owner=owner,
