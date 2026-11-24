@@ -181,6 +181,45 @@ class PDFCompilationTest(unittest.TestCase):
                    r"+\Delta S_i")
         self.assertIn(r"\begin{aligned}", escape_latex(f"$${formula}$$"))
 
+    def test_unsplittable_long_formula_is_scaled_to_the_line_width(self):
+        r"""回归（proj-mwu2z139gl5h）：断点窗口外没有位置的长公式原样输出。
+
+        `snap-3ececb4f/manuscript.tex` 第 128 行是一条 222 字符的单行公式，顶层
+        断点只有 `\quad`(113) 与 `=`(132)，都落在 `_wrap_math_row` 的 [25, 100]
+        窗口之外 → 原样返回一行；xelatex 报
+        ``Overfull \hbox (50.85374pt too wide) detected at line 128``，
+        超过 24pt 阻断阈值，交付被判失败（PDF 改名 `manuscript.failed.pdf`）。
+        现在改为按行宽缩放：`\ifdim\width>\linewidth` 只在真的过宽时收缩，
+        实测窄公式 46.49802pt 不变、这条 474.91408pt 收到 `\linewidth`
+        424.06033pt（正好 50.85375pt 的差额）。
+        """
+        formula = (r"\tau_{\max}(G)=\min\left\{\frac{R_{\mathrm{acq}}(G)}"
+                   r"{\max\{v_t(G),v_{t,\min}(G)\}},\,D_{\mathrm{abs}}(G)\right\},"
+                   r"\quad v_{t,\min}(G)=\max\left\{v_{\mathrm{noise}}(G),"
+                   r"\frac{R_{\mathrm{acq}}(G)}{D_{\mathrm{abs}}(G)}\right\}.")
+        box = r"\resizebox{\ifdim\width>\linewidth\linewidth\else\width\fi}{!}{$\displaystyle "
+        tex = render_latex(Manuscript(sections=[
+            Section(heading="模型", blocks=[Block(math=formula)])]))
+        self.assertIn(box, tex)
+        self.assertIn(r"\end{equation}", tex)
+        # 正文块里的展示公式同样按行宽缩放, 不再整行溢出
+        self.assertIn(box, escape_latex(f"$${formula}$$"))
+
+    def test_fitting_formula_is_not_boxed(self):
+        # 盒子只在编译期按实际宽度决定收缩; 短公式不该被套进去
+        tex = render_latex(Manuscript(sections=[
+            Section(heading="模型", blocks=[Block(math="E=mc^2")])]))
+        self.assertNotIn(r"\resizebox", tex)
+
+    def test_tag_survives_the_width_box(self):
+        # `\tag` 属于公式层, 不能跟着公式体进盒子（amsmath 在盒子内报错）
+        from src.publication.render_latex import _display_math
+        long = r"a=b+c+d+e+f+g+h+i+j+k+l+m+n+o+p+q+r+s+t+u+v+w+x+y+z+a+b+c+d+e+f+g+h+i+j+k+l+m+n"
+        out = _display_math(long + r"\tag{3.1}")
+        if out.startswith(r"\resizebox"):
+            self.assertIn(r"$\}\tag{3.1}", out)
+            self.assertNotIn(r"\tag{3.1}$", out)
+
     def test_glued_control_word_gets_separated(self):
         r"""回归（transfer-eval2）：模型写 `$0\leqz\leqL$`，TeX 把 `\leqz` 当成未定义命令。
 

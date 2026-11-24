@@ -602,6 +602,10 @@ def escape_math(text: str) -> str:
     return _separate_glued_commands(_fix_text_groups(body))
 
 
+#: 单行展示公式的安全宽度（字符数）：超过它就必须断行或按行宽缩放。
+_MATH_ROW_LIMIT = 100
+
+
 def _display_math(value: str) -> str:
     """Split long top-level formula groups; never split an existing TeX environment."""
     from src.publication.math_content import normalize_environment
@@ -685,6 +689,10 @@ def _display_math(value: str) -> str:
     if body[start:].strip():
         rows.append(body[start:].strip())
     rows = [part for row in rows for part in _wrap_math_row(row)]
+    if max((len(row) for row in rows), default=0) > _MATH_ROW_LIMIT:
+        # 断点窗口内没有可用位置时（实测一条 222 字符的 τ_max 公式只在 113/132
+        # 处有 `\quad`/`=`），不要原样输出一条必然溢出的一行：按行宽缩放。
+        return _scaled_display(body)
     if len(rows) > 1:
         # 用 aligned 包住各行时, 模型写在公式末尾的 `\tag` 会被卷进内部环境 ——
         # 先摘出来, 拼到 `\end{aligned}` 之后（编号属于公式层, 不属于内部环境）
@@ -696,7 +704,7 @@ def _display_math(value: str) -> str:
     return _hoist_inner_tags(body)
 
 
-def _wrap_math_row(row: str, limit: int = 100) -> list[str]:
+def _wrap_math_row(row: str, limit: int = _MATH_ROW_LIMIT) -> list[str]:
     """Break a long equation at operators outside TeX groups."""
     if len(row) <= limit:
         return [row]
@@ -730,6 +738,21 @@ def _wrap_math_row(row: str, limit: int = 100) -> list[str]:
             start += len(r"\quad")
     parts.append(row[start:].strip())
     return parts
+
+
+def _scaled_display(body: str) -> str:
+    r"""让一条无法安全断行的展示公式按行宽收缩。
+
+    `\resizebox{\linewidth}{!}` 会把窄公式也拉到行宽，所以用 `\width` 判断
+    自然宽度：只有真的过宽才收缩。实测窄公式 46.49802pt 保持 46.49942pt，
+    宽公式 474.91408pt 收到 `\linewidth` 424.06033pt（正是本轮日志里
+    50.85374pt 的溢出量）。`\tag` 属于公式层，必须留在盒子外面。
+    """
+    tags = "".join(_TAG_RE.findall(body))
+    if tags:
+        body = _TAG_RE.sub("", body).strip()
+    width = r"\ifdim\width>\linewidth\linewidth\else\width\fi"
+    return r"\resizebox{" + width + r"}{!}{$\displaystyle " + body + "$}" + tags
 
 
 #: 模型自撰的方程编号（`\tag{3.4}` 与 `\tag*{...}` 两种写法）。
