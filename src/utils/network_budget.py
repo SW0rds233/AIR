@@ -130,17 +130,28 @@ def model_call(fn: Callable[[], Any], *, timeout: float, phase: str) -> Any:
     budget = current_budget()
     if budget is None or _in_model_call.get():
         return network_call(fn, timeout=timeout, phase=phase)
-    budget.check()
-    if budget.role == "evidence":
-        if budget.state.evidence_model_attempts >= 150:
-            budget.deferred = True
-            budget.stop_reason = "证据层累计模型调用达到 150 次上限；保留资料，转入写作与缺口报告"
-            raise ModelBudgetExceeded(budget.stop_reason)
-        budget.state.evidence_model_attempts += 1
-    budget.model_attempts += 1
     token = _in_model_call.set(True)
     try:
-        return network_call(fn, timeout=timeout, phase=phase)
+        for attempt in range(3):
+            budget.check()
+            if budget.role == "evidence":
+                if budget.state.evidence_model_attempts >= 150:
+                    budget.deferred = True
+                    budget.stop_reason = "证据层累计模型调用达到 150 次上限；保留资料，转入写作与缺口报告"
+                    raise ModelBudgetExceeded(budget.stop_reason)
+                budget.state.evidence_model_attempts += 1
+            budget.model_attempts += 1
+            try:
+                return network_call(fn, timeout=timeout, phase=phase)
+            except Exception as error:
+                if (isinstance(error,(NetworkUnavailable,TaskDeadlineExceeded,ModelBudgetExceeded))
+                        or not network_error(error)):
+                    raise
+                if attempt == 2 or budget.deferred or budget.remaining() <= 3:
+                    budget.deferred_reason = '模型连接失败，保留当前任务待恢复'
+                    budget.defer(phase, cooldown=True)
+                    raise
+                retry_wait((.8,2.)[attempt])
     finally:
         _in_model_call.reset(token)
 
@@ -150,6 +161,23 @@ def network_error(error: BaseException) -> bool:
         return False
     return isinstance(error, (ConnectionError, TimeoutError, OSError)) or any(
         name in type(error).__name__.lower() for name in ("connection", "connect", "timeout", "readerror"))
+
+
+def error_diagnostics(error: BaseException) -> dict:
+    """Types and hostname only: never credentials, headers, paths or query keys."""
+    from urllib.parse import urlsplit
+    chain, seen, host = [], set(), ''
+    current = error
+    while current is not None and id(current) not in seen and len(chain)<6:
+        seen.add(id(current))
+        chain.append(type(current).__name__)
+        try:
+            request = getattr(current,'request',None)
+            host = host or (urlsplit(str(getattr(request,'url',''))).hostname or '')
+        except (ValueError,RuntimeError):
+            pass
+        current = current.__cause__ or current.__context__
+    return {'error_chain':chain,'root_cause_type':chain[-1], 'endpoint_host':host}
 
 
 def network_call(fn: Callable[[], Any], *, timeout: float = 120, phase: str = "network",
@@ -194,6 +222,7 @@ def network_call(fn: Callable[[], Any], *, timeout: float = 120, phase: str = "n
                 if not failure_scope and budget.state.unavailable_until:
                     budget.event("network_recovered", phase=phase)
                 if not failure_scope:
+                    budget.failures = 0
                     budget.state.failures = 0
                     budget.state.unavailable_until = 0
                 return value
@@ -221,7 +250,7 @@ def network_call(fn: Callable[[], Any], *, timeout: float = 120, phase: str = "n
             budget.failures += 1
             budget.state.failures += 1
             budget.event("network_error", phase=phase, error_type=type(error).__name__,
-                         failures=budget.failures)
+                         failures=budget.failures, **error_diagnostics(error))
             if budget.state.failures >= budget.max_failures:
                 budget.defer(phase, cooldown=True)
         raise

@@ -75,6 +75,22 @@ _UNICODE_TO_LATEX_MATH: dict[str, str] = {
     char: latex.strip("$") for char, latex in _UNICODE_TO_LATEX.items()
 }
 
+# Enclosed list markers occur in quoted abstracts. Font fallback is incomplete
+# even on CJK installations; use core TeX commands for both prose and math.
+for _start, _count, _first, _style in (
+    (0x2460,20,1,'circle'), (0x2474,20,1,'paren'), (0x2488,20,1,'period'),
+    (0x2776,10,1,'circle'), (0x2780,10,1,'circle'), (0x278A,10,1,'circle'),
+    (0x24B6,26,ord('A'),'letter'), (0x24D0,26,ord('a'),'letter'),
+):
+    for _index in range(_count):
+        _value = chr(_first+_index) if _style=='letter' else str(_first+_index)
+        _latex = ('(' + _value + ')' if _style=='paren' else _value+'.'
+                  if _style=='period' else r'\textcircled{' + _value + '}')
+        _UNICODE_TO_LATEX[chr(_start+_index)] = _latex
+        _UNICODE_TO_LATEX_MATH[chr(_start+_index)] = r'\text{' + _latex + '}'
+_UNICODE_TO_LATEX['⓪'] = r'\textcircled{0}'
+_UNICODE_TO_LATEX_MATH['⓪'] = r'\text{\textcircled{0}}'
+
 _SCRIPT_RUNS = (
     ('⁰¹²³⁴⁵⁶⁷⁸⁹ⁿⁱ⁻⁺⁼⁽⁾', '0123456789ni-+=()', '^'),
     ('₀₁₂₃₄₅₆₇₈₉₋₊₌₍₎', '0123456789-+=()', '_'),
@@ -127,7 +143,7 @@ _INLINE_SUBSCRIPT_RE = re.compile(
 #: 必须排在单独的上标/下标规则**之前**, 否则会被拆成两半 (`Σ_{t=0}` + 认不出的 `^{166}`)。
 _INLINE_SUBSUP_RE = re.compile(
     r"(?<![A-Za-z0-9\\])([A-Za-z0-9\u0370-\u03ff])_"
-    r"(\{[^{}]*\}|[A-Za-z0-9]{1,3})\^(\{[^{}]*\}|-?[A-Za-z0-9]+)")
+    r"(\{[^{}]*\}|[A-Za-z0-9]{1,3})\^(\{[^{}]*\}|\([^()]*\)|-?[A-Za-z0-9]+)")
 
 #: 通用中文论文前言 (ctexart + xelatex)。这里是**唯一**定义, 综述侧的 Markdown
 #: 渲染器从本模块取用, 避免两处 preamble 漂移。
@@ -980,7 +996,12 @@ def _render_table(data: dict[str, Any], heading: str = '', block_id: str = '') -
                 cells.append(escape_latex(f'见下行{label}'))
                 wide.append((label, formula))
             else:
-                cells.append(escape_latex(value))
+                rendered = escape_latex(value)
+                # Mixed prose/set descriptions stay text. Standalone operator
+                # fragments still need legal breaks between long identifiers.
+                rendered = re.sub(r'(\$\\(?:times|to|leftrightarrow)\$)',
+                                  lambda match:match.group()+r'\allowbreak{}', rendered)
+                cells.append(rendered)
         cells += [""] * (len(header) - len(cells))
         out.append(" & ".join(cells) + r" \\")
         for label, formula in wide:
