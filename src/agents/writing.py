@@ -622,26 +622,10 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
             for model in packet.models[:10]:
                 variables = model.get("variables") or []
                 assumptions = model.get("assumptions") or []
-                details = []
-                if variables:
-                    details.append("变量与取值域: " + "; ".join(
-                        f"{v.get('symbol', '')} ({v.get('meaning', '')}, "
-                        f"{v.get('domain', '')}, {v.get('unit', '')})"
-                        for v in variables if isinstance(v, dict)))
-                if assumptions:
-                    details.append("假设: " + "; ".join(
-                        f"{a.get('statement', '')} [{a.get('origin') or '来源未注明'}]"
-                        for a in assumptions if isinstance(a, dict)))
-                if model.get("applicability"):
-                    details.append("适用范围: " + str(model["applicability"]))
-                if model.get("open_conditions"):
-                    details.append("待核查: " + "; ".join(as_list_of_str(
-                        model.get("open_conditions"))))
                 model_section.blocks.append(Block(
                     role=BlockRole.method,
                     text=f"{clip(str(model.get('name', '')), 120)}: "
-                         f"{clip(str(model.get('mechanism', '')), 400)}"
-                         + ("。" + "。".join(details) if details else ""),
+                         + str(model.get('mechanism') or '').rstrip('。.!') + '。',
                     input_versions=dict(packet.input_versions),
                 ))
                 block = model_section.blocks[-1]
@@ -650,8 +634,24 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
                                   ObjectRef(id=str(model["id"]),
                                             version=int(model.get("version", 1) or 1)))
                 claim_id = str(model.get("claim_id") or "")
-                if claim_id:
+                if claim_id in {str(claim.get('id')) for claim in packet.claims}:
                     block.add_ref(RefKind.claim.value, ObjectRef(id=claim_id))
+                if variables:
+                    model_section.blocks.append(Block(role=BlockRole.table,
+                        heading=str(model.get('name') or '模型') + '的变量定义',
+                        data={'header':['符号','含义','取值域','单位'],
+                              'rows':[[str(v.get(key) or '') for key in ('symbol','meaning','domain','unit')]
+                                      for v in variables if isinstance(v,dict)]},
+                        input_versions=dict(packet.input_versions)))
+                for assumption in assumptions:
+                    if isinstance(assumption,dict) and assumption.get('statement'):
+                        model_section.blocks.append(Block(role=BlockRole.method,
+                            text='假设：' + str(assumption['statement']).rstrip('。.!') + '。',
+                            input_versions=dict(packet.input_versions)))
+                for label,key in [('适用范围','applicability'),('待核查条件','open_conditions')]:
+                    for path,value in _structured_lines(model.get(key),label):
+                        model_section.blocks.append(Block(role=BlockRole.limitation,
+                            text=path + '：' + value, input_versions=dict(packet.input_versions)))
                 source_ids = set(as_list_of_str(model.get("source_ids")))
                 source_ids.update(as_list_of_str(model.get("source_refs")))
                 for assumption in assumptions:
@@ -668,12 +668,13 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
         if packet.validations:
             validation_section = Section(heading="5 验证建议 (未执行)", role="discussion")
             for plan in packet.validations[:5]:
-                validation_section.blocks.append(Block(
-                    role=BlockRole.limitation,
-                    text="验证方案建议: " + clip(str(plan.get("summary") or plan), 800)
-                         + " (本轮未执行)",
-                    needs_check=True,
-                ))
+                for label,value in _structured_lines(plan):
+                    validation_section.blocks.append(Block(role=BlockRole.limitation,
+                        text=label + '：' + value, needs_check=True,
+                        input_versions=dict(packet.input_versions)))
+                if not validation_section.blocks:
+                    validation_section.blocks.append(Block(role=BlockRole.limitation,
+                        text='本轮没有可展开的验证方案内容，验证尚未执行。',needs_check=True))
             manuscript.sections.append(validation_section)
 
         if packet.unresolved:
@@ -1153,7 +1154,7 @@ def _manuscript_text(manuscript: Manuscript) -> str:
 
 
 def _strip_internal_ids(value: str) -> str:
-    return re.sub(r"\b(?:clm|obl|ver|model|evi|src)-[A-Za-z0-9_-]{5,}\b", "", value or "").strip()
+    return re.sub(r"\b(?:clm|obl|ver|model|mdl|evi|src|doc)-[A-Za-z0-9_-]{5,}\b", "", value or "").strip()
 
 
 def _reference_numbers(manuscript: Manuscript) -> set[int]:
@@ -1413,6 +1414,26 @@ def apply_block_patch(manuscript: Manuscript, patches: Any, allowed: set[str], *
     result.revision_log.append({"version": manuscript.version + 1, "changed_blocks": changed_blocks,
                                 "dropped_blocks": dropped, "ignored_fields": ignored})
     return result
+
+
+def _structured_lines(value, label='', depth=0):
+    """Flatten registered plan fields at field boundaries, never str(dict)."""
+    labels={'summary':'方案摘要','competing':'竞争假设','design':'研究设计','treatment':'处理变量',
+        'outcome':'结果变量','units':'分析单位','controls':'对照与控制','confounders':'混杂因素',
+        'parameters':'参数','metrics':'评价指标','budget':'资源需求','stop_conditions':'停止条件',
+        'limitations':'局限','falsification':'证伪检验','needs':'资料需求','compute':'计算资源',
+        'data':'数据','time':'时间','validation_problems':'方案检查项'}
+    hidden={'id','version','claim_id','source_ids','source_refs','input_versions','subquestion',
+            'executed','execution_status','_scope'}
+    if depth > 6 or value is None:
+        return []
+    if isinstance(value,dict):
+        return [line for key,item in value.items() if not str(key).startswith('_') and key not in hidden
+                for line in _structured_lines(item,(label+' / ' if label else '')+labels.get(key,str(key)),depth+1)]
+    if isinstance(value,list):
+        return [line for i,item in enumerate(value,1)
+                for line in _structured_lines(item,f'{label} {i}',depth+1)]
+    return [(label or '方案说明',str(value))] if isinstance(value,(str,int,float,bool)) and str(value).strip() else []
 
 
 def build_packet_from_context(task: AgentTask, context: ContextPack) -> WritingPacket:

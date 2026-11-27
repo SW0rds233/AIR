@@ -240,7 +240,7 @@ class BudgetedLLM:
                                       timeout=LLM_TIMEOUT, phase="llm")
         except Exception as exc:
             if self._on_event:
-                from src.utils.network_budget import NetworkUnavailable, TaskDeadlineExceeded, ModelBudgetExceeded, ModelCallTimeout
+                from src.utils.network_budget import NetworkUnavailable, TaskDeadlineExceeded, ModelBudgetExceeded, ModelCallTimeout, error_diagnostics
                 deferred = isinstance(exc, (NetworkUnavailable, TaskDeadlineExceeded, ModelBudgetExceeded))
                 if isinstance(exc, ModelCallTimeout) or (not deferred and
                         (isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower())):
@@ -249,6 +249,7 @@ class BudgetedLLM:
                     deferred = False
                 self._on_event("llm_deferred" if deferred else "llm_error", {"task_id": self._task_id,
                                               "agent": self._stage,
+                                              **error_diagnostics(exc),
                                               "error": f"{type(exc).__name__}: {exc}"[:300]})
             raise
         self._account(result)
@@ -856,6 +857,10 @@ class InProcessExecutor:
             result.payload["deferred"] = True
             result.payload["pending_resume"] = not bool(network.stop_reason)
             result.payload["deferred_reason"] = network.stop_reason or network.deferred_reason or "网络暂不可用"
+            result.payload['deferred_kind'] = ('budget' if network.stop_reason else 'deadline'
+                if network.remaining() <= 0 else 'network'
+                if network.state.unavailable_until > time.monotonic() else 'capacity')
+            result.payload['retry_after_seconds'] = max(0,round(network.state.unavailable_until-time.monotonic()))
             result.unresolved.append(result.payload["deferred_reason"])
         result = self.runtime.finalize(task, result, grant)
         return result

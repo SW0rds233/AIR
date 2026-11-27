@@ -3,6 +3,7 @@ from __future__ import annotations
 """团队研究的主控循环：决策、派工、登记成果和复盘。"""
 
 import logging
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -186,6 +187,7 @@ class TeamLoopState:
     clarifications: int = 0
     rounds: int = 0
     review_revisions: int = 0
+    network_recoveries: int = 0
     stop_reason: str = ""
     finished: bool = False
 
@@ -194,6 +196,7 @@ class TeamLoopState:
         return {
             "rounds": self.rounds,
             "review_revisions": self.review_revisions,
+            "network_recoveries": self.network_recoveries,
             "finished": self.finished,
             "stop_reason": self.stop_reason,
             "tasks": sorted(self.results),
@@ -661,8 +664,14 @@ class TeamRun:
                     self.runtime.emit("run_stopped", {"reason": state.stop_reason})
                     return False
                 if result.pending_resume:
+                    if self._recover_network_task(task,result,state):
+                        return True
+                    if self.cancel.cancelled:
+                        self._finish(state,self.cancel.reason or '用户停止',status='stopped')
+                        return False
                     self._finish(state, str(result.payload.get("deferred_reason") or
-                                            "任务未完成，保留已有成果（可恢复）"),
+                                            "任务未完成，保留已有成果（可恢复）")
+                                 + '；可在同一会话继续未完成任务',
                                  status=TaskStatus.partial.value)
                     return False
                 if task.agent == "review" and result.payload.get("recovery_required"):
@@ -1128,6 +1137,7 @@ class TeamRun:
             "review_threshold": self.review_threshold,
             "rounds": state.rounds,
             "review_revisions": state.review_revisions,
+            "network_recoveries": state.network_recoveries,
             "finished": state.finished,
             "stop_reason": state.stop_reason,
             "clarifications": state.clarifications,
@@ -1286,6 +1296,42 @@ class TeamRun:
                          status=TaskStatus.partial.value)
         return self.outcome
 
+    def _recover_network_task(self, task, result, state) -> bool:
+        """One persisted cooldown per run, reopening only the deferred task."""
+        if (result.payload.get('deferred_kind') != 'network' or self.cancel.cancelled
+                or state.network_recoveries >= 1 or state.rounds + 1 >= self.max_rounds):
+            return False
+        network = self.runtime.network_state
+        wait = max(0., network.unavailable_until-time.monotonic())
+        if wait > 61:
+            return False
+        row = next((row for row in state.plan.tasks if row.get('task_id')==task.task_id),None)
+        if row is None:
+            return False
+        state.network_recoveries += 1
+        self.save_state()
+        self.runtime.emit('network_cooldown_wait', {'task_id':task.task_id,'wait_seconds':round(wait),
+            'attempt':state.network_recoveries,'action':'resume_original_task'})
+        deadline=time.monotonic()+min(wait,60.)
+        heartbeat=time.monotonic()+15
+        while time.monotonic()<deadline:
+            if self.cancel.cancelled:
+                return False
+            time.sleep(max(0.,min(1.,deadline-time.monotonic())))
+            if time.monotonic()>=heartbeat:
+                self.runtime.emit('task_heartbeat', {'task_id':task.task_id,'phase':'network_cooldown',
+                    'remaining_seconds':round(max(0.,deadline-time.monotonic()))})
+                heartbeat=time.monotonic()+15
+        if self.cancel.cancelled:
+            return False
+        network.failures=0
+        network.unavailable_until=0
+        row['attempt']=int(row.get('attempt',1))+1
+        state.pending_retries.add(assignment_key(state.brief,task.agent,task.objective))
+        self.runtime.emit('network_task_retry_scheduled', {'task_id':task.task_id,'attempt':row['attempt']})
+        self.save_state()
+        return True
+
     def reopen_deferred(self) -> bool:
         """Explicit resume re-enables original task identities, never successful tasks."""
         pending = {tid for tid, result in self.loop.results.items() if result.pending_resume}
@@ -1431,6 +1477,7 @@ def rebuild_loop_state(payload: dict[str, Any]) -> TeamLoopState | None:
         state.open_needs = [ResearchNeed.model_validate(row)
                             for row in (payload.get("open_needs") or [])]
         state.rounds = int(payload.get("rounds", 0) or 0)
+        state.network_recoveries = max(0,int(payload.get('network_recoveries',0) or 0))
         state.review_revisions = max(
             int(payload.get("review_revisions", 0) or 0),
             _review_revisions_from_history(state.plan, state.results),

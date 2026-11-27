@@ -25,6 +25,8 @@ def apply_review_gate(delivery: dict[str, Any], review: dict[str, Any]) -> dict[
     review = dict(review)
     if review.get("semantic_reviewed") is False or review.get("decision") == "unreviewed":
         review.update(score=0, accepted=False, current=False)
+        if result.get('level') in {'研究备忘录','条件性研究报告','论文草稿'}:
+            result['level'] += '（未审阅）'
     result["review"] = dict(review)
     accepted = review.get("accepted", review.get("decision") == "accepted")
     if not accepted or not review.get("current"):

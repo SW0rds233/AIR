@@ -201,7 +201,12 @@ class ModelingAgent(AgentBase):
             supporting_sources=supporting_source_ids, known_inputs=known_input_ids)
         for index, model in enumerate(candidates):
             model = normalise_model_candidate(model)
-            if not model.get("claim_id") and len(claim_rows) == 1:
+            claim_id = str(model.get('claim_id') or '')
+            if claim_id and claim_id not in {str(row['id']) for row in claim_rows}:
+                unknowns.append(f'候选模型 {index+1} 的 claim_id={claim_id} 未登记；保留未绑定模型，待明确关联')
+                model['claim_id'] = ''
+                model['open_conditions'] = as_list_of_str(model.get('open_conditions')) + ['需明确关联的已登记命题']
+            elif not claim_id and len(claim_rows) == 1:
                 model["claim_id"] = str(claim_rows[0]["id"])
             try:
                 # Persist the validated aliases too (not merely the unnormalised input).
@@ -258,7 +263,7 @@ class ModelingAgent(AgentBase):
         if rejected_models:
             return self.partial(task, summary, changes=changes,
                                 unresolved=unknowns[:6], usage=usage, payload=payload_out)
-        return self.completed(task, summary, changes=changes, unresolved=checks[:6],
+        return self.completed(task, summary, changes=changes, unresolved=list(dict.fromkeys([*unknowns,*checks]))[:10],
                               usage=usage, payload=payload_out)
 
     def repair_schema_once(self, candidates, task, runtime, usage, known_sources,
