@@ -20,6 +20,8 @@ from src.agents.protocol import (
     UsageRecord,
 )
 from src.agents.registry import describe_team
+from src.agents.citation_repair import metadata_repair
+from src.utils.network_budget import EVIDENCE_MODEL_LIMIT
 from src.agents.runtime import AgentRuntime, CancelToken, InProcessExecutor
 from src.agents.supervisor import (
     DecisionKind,
@@ -152,11 +154,12 @@ def _review_before_delivery(state, task_order, max_revisions, max_rounds, remain
     issues = [issue for issue in issues if attempts.get(issue.issue_id, 0) < 2]
     if not issues:
         return None, "审阅未通过；同一问题已尝试两次修复，保留未决，需新的依据后再处理"
+    from src.agents.review import _revision_need
+    review_context = ContextPack(objects={"manuscript": [verdict.get("reviewed_manuscript") or {}]})
+    need = _revision_need(review_context, issues, {"decision": "revision", **verdict})
     return AgentTask(agent="writing", objective="按最后一轮审阅修订相关章节并重新提交审阅",
-        hints={"review_cycle": True, "need_kind": "manuscript_revision", "review_task_id": review_id,
-               "review_issue_ids": [i.issue_id for i in issues],
-               "focus_blocks": [ref.id for issue in issues for ref in issue.affected_refs]},
-        acceptance_criteria=[i.summary for i in issues]), ""
+        hints={**need.hints, "need_kind": "manuscript_revision", "review_task_id": review_id},
+        acceptance_criteria=need.acceptance), ""
 
 __all__ = [
     "TeamLoopState",
@@ -188,6 +191,7 @@ class TeamLoopState:
     rounds: int = 0
     review_revisions: int = 0
     network_recoveries: int = 0
+    watchdog_recoveries: int = 0
     stop_reason: str = ""
     finished: bool = False
 
@@ -197,6 +201,7 @@ class TeamLoopState:
             "rounds": self.rounds,
             "review_revisions": self.review_revisions,
             "network_recoveries": self.network_recoveries,
+            "watchdog_recoveries": self.watchdog_recoveries,
             "finished": self.finished,
             "stop_reason": self.stop_reason,
             "tasks": sorted(self.results),
@@ -622,6 +627,14 @@ class TeamRun:
                     self._finish(state, self.cancel.reason or "用户停止", status="stopped")
                     self.runtime.emit("run_stopped", {"reason": state.stop_reason})
                     return False
+                # An earlier task in this batch may have consumed the last call.
+                if (task.agent == "evidence" and task.task_id not in state.results
+                        and not metadata_repair(task.hints)
+                        and self.runtime.network_state.evidence_model_attempts >= EVIDENCE_MODEL_LIMIT):
+                    self.runtime.emit("evidence_task_skipped", {
+                        "task_id": task.task_id, "reason": "证据层模型调用额度已用尽",
+                    })
+                    continue
                 resuming = task.task_id in state.results and state.results[task.task_id].pending_resume
                 if _is_review_revision(task) and not resuming and state.review_revisions >= self.max_review_revisions:
                     self._finish(
@@ -1025,13 +1038,15 @@ class TeamRun:
         source_sets = self._source_set_rows
         def projected(kind):
             return (self.projection.rows(kind) if hasattr(self.projection, "rows")
-                    else object_rows(self.projection.store, kind))
+                    else object_rows(self.projection.store, kind,
+                                     limit=None if kind == "review_issue" else 40, run_id=self.run_id))
         def source_rows(kind):
             rows = projected(kind)
             from src.agents.review_state import latest_review_issues
             limit = 40
             if kind == 'review_issue':
                 rows = latest_review_issues(rows)
+                limit = len(rows)
             if kind == "manuscript":
                 # Review/patch the actual current text and tables, never a truncated copy.
                 return rows[-1:]
@@ -1107,9 +1122,11 @@ class TeamRun:
         """
         view = self.task_store.recoverable()
         restored = self._load_loop_state()
+        can_reopen = bool(restored and restored.rounds < self.max_rounds and
+                          any(result.pending_resume for result in restored.results.values()))
         return {"summary": summarize_recovery(view), **view,
                 "loop_state_restorable": restored is not None,
-                "resumable": bool(restored and restored.plan and not restored.finished)}
+                "resumable": bool(restored and restored.plan and (not restored.finished or can_reopen))}
 
     # ---- 持久化与恢复 ----
     def save_state(self, *, status: str = "") -> bool:
@@ -1138,6 +1155,7 @@ class TeamRun:
             "rounds": state.rounds,
             "review_revisions": state.review_revisions,
             "network_recoveries": state.network_recoveries,
+            "watchdog_recoveries": state.watchdog_recoveries,
             "finished": state.finished,
             "stop_reason": state.stop_reason,
             "clarifications": state.clarifications,
@@ -1297,16 +1315,31 @@ class TeamRun:
         return self.outcome
 
     def _recover_network_task(self, task, result, state) -> bool:
-        """One persisted cooldown per run, reopening only the deferred task."""
-        if (result.payload.get('deferred_kind') != 'network' or self.cancel.cancelled
-                or state.network_recoveries >= 1 or state.rounds + 1 >= self.max_rounds):
+        """Reopen the same task once per interruption kind within the run budget."""
+        kind = result.payload.get("deferred_kind")
+        if (kind not in {"network", "watchdog_gap"} or self.cancel.cancelled
+                or state.rounds >= self.max_rounds):
             return False
+        row = next((row for row in state.plan.tasks if row.get("task_id") == task.task_id), None)
+        if row is None:
+            return False
+        if kind == "watchdog_gap":
+            if state.watchdog_recoveries >= 1:
+                return False
+            state.watchdog_recoveries += 1
+        elif not self._wait_for_network(task, state):
+            return False
+        row["attempt"] = int(row.get("attempt", 1)) + 1
+        state.pending_retries.add(assignment_key(state.brief, task.agent, task.objective))
+        self.save_state()
+        event = "watchdog_task_retry_scheduled" if kind == "watchdog_gap" else "network_task_retry_scheduled"
+        self.runtime.emit(event, {"task_id": task.task_id, "attempt": row["attempt"]})
+        return True
+
+    def _wait_for_network(self, task, state) -> bool:
         network = self.runtime.network_state
         wait = max(0., network.unavailable_until-time.monotonic())
-        if wait > 61:
-            return False
-        row = next((row for row in state.plan.tasks if row.get('task_id')==task.task_id),None)
-        if row is None:
+        if state.network_recoveries >= 1 or wait > 61:
             return False
         state.network_recoveries += 1
         self.save_state()
@@ -1326,10 +1359,6 @@ class TeamRun:
             return False
         network.failures=0
         network.unavailable_until=0
-        row['attempt']=int(row.get('attempt',1))+1
-        state.pending_retries.add(assignment_key(state.brief,task.agent,task.objective))
-        self.runtime.emit('network_task_retry_scheduled', {'task_id':task.task_id,'attempt':row['attempt']})
-        self.save_state()
         return True
 
     def reopen_deferred(self) -> bool:
@@ -1341,8 +1370,10 @@ class TeamRun:
         for row in self.loop.plan.tasks:
             if row.get("task_id") not in pending:
                 continue
-            self.loop.pending_retries.add(assignment_key(self.loop.brief, row["agent"], row["objective"]))
-            row["attempt"] = int(row.get("attempt", 1)) + 1
+            key = assignment_key(self.loop.brief, row["agent"], row["objective"])
+            if key not in self.loop.pending_retries:
+                self.loop.pending_retries.add(key)
+                row["attempt"] = int(row.get("attempt", 1)) + 1
             found.append(row["task_id"])
         if not found:
             return False
@@ -1478,6 +1509,7 @@ def rebuild_loop_state(payload: dict[str, Any]) -> TeamLoopState | None:
                             for row in (payload.get("open_needs") or [])]
         state.rounds = int(payload.get("rounds", 0) or 0)
         state.network_recoveries = max(0,int(payload.get('network_recoveries',0) or 0))
+        state.watchdog_recoveries = max(0, int(payload.get("watchdog_recoveries", 0) or 0))
         state.review_revisions = max(
             int(payload.get("review_revisions", 0) or 0),
             _review_revisions_from_history(state.plan, state.results),

@@ -168,7 +168,10 @@ def test_cooldown_retry_allowance_survives_restoring_checkpoint():
     assert restored is not None and restored.network_recoveries==1
 
 
-def test_actual_team_steps_resume_the_original_review_without_replaying_done_tasks(tmp_path,monkeypatch):
+@pytest.mark.parametrize("kind,counter", [
+    ("network", "network_recoveries"), ("watchdog_gap", "watchdog_recoveries"),
+])
+def test_actual_team_steps_resume_the_original_review_without_replaying_done_tasks(tmp_path,monkeypatch,kind,counter):
     from src.graph.research_graph import TeamRun,TeamLoopState
     from src.research.task_store import TaskStore
     from src.agents.supervisor import SupervisorAgent,TeamPlan,ResearchBrief
@@ -184,11 +187,15 @@ def test_actual_team_steps_resume_the_original_review_without_replaying_done_tas
         calls=[]
         def execute(task,results):
             calls.append(task.task_id)
-            payload=({'pending_resume':True,'deferred_kind':'network','retry_after_seconds':0}
+            payload=({'pending_resume':True,'deferred_kind':kind,'retry_after_seconds':0}
                      if len(calls)==1 else {'semantic_reviewed':True})
             return AgentResult(agent='review',task_id=task.task_id,outcome='partial',payload=payload)
         monkeypatch.setattr(run,'_execute_one',execute)
-        assert run.step() and not run.loop.finished and run.loop.network_recoveries==1
+        assert run.step() and not run.loop.finished and getattr(run.loop, counter) == 1
+        restored = run._load_loop_state()
+        assert restored and getattr(restored, counter) == 1
+        assert run.restore_state() and run.reopen_deferred()
+        assert run.loop.plan.tasks[0]["attempt"] == 2
         run.step()
         assert calls==['original-review','original-review']
         assert not run.loop.results[task.task_id].pending_resume

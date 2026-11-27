@@ -104,14 +104,20 @@ class TeamProjection:
         return version
 
     # ---- 查询 (角色视图) ----
-    def rows(self, kind: str, *, limit: int = 40) -> list[dict[str, Any]]:
+    def rows(self, kind: str, *, limit: int | None = None) -> list[dict[str, Any]]:
         """本运行的对象行。
 
         默认**按本运行的 `run_id` 裁剪**: `TeamProjection` 总是绑定在某次运行上,
         返回项目全部最新对象会让"同项目的另一次运行"混进当前画面。
         需要项目级视图时调用 `project_rows`。
         """
-        return object_rows(self.store, kind, limit=limit,
+        if kind == "review_issue":
+            from src.agents.review_state import latest_review_issues
+            # The current review can refer to an old open issue. Historical
+            # exports use object_rows; the role view needs the whole open set.
+            active = latest_review_issues(object_rows(self.store, kind, limit=None, run_id=self.run_id))
+            return active[:limit]
+        return object_rows(self.store, kind, limit=40 if limit is None else limit,
                            run_id=getattr(self, "run_id", "") or "")
 
     def project_rows(self, kind: str, *, limit: int = 40) -> list[dict[str, Any]]:
@@ -205,7 +211,7 @@ def _model_for_kind(kind: str):
     }.get(str(kind))
 
 
-def object_rows(store: ResearchStore, kind: str, *, limit: int = 40,
+def object_rows(store: ResearchStore, kind: str, *, limit: int | None = 40,
                 run_id: str = "") -> list[dict[str, Any]]:
     """取某类对象的最新版本行 (带版本号)。
 
@@ -218,6 +224,10 @@ def object_rows(store: ResearchStore, kind: str, *, limit: int = 40,
     if run_id:
         rows = [row for row in rows
                 if str((row.get("_scope") or {}).get("run_id", "")) == run_id]
+    if stored == "review_issue":
+        # list_latest is oldest first. Apply the limit to the current review
+        # before history, or long runs lose precisely their newest findings.
+        rows.sort(key=lambda row: row.get("_submitted_at", ""), reverse=True)
     rows = rows[:limit]
     for row in rows:
         if stored == "model":
@@ -230,7 +240,11 @@ def object_rows(store: ResearchStore, kind: str, *, limit: int = 40,
             row["_storage_revision"] = revision
             # 命题的 version 表示陈述/编码版本；仅证明状态变化也会追加
             # 存储修订，不能让后者冒充新的科学命题版本。
-            if stored != "claim":
+            # Legacy initial drafts may be stored under a separate object ID.
+            # A first storage revision can therefore already be manuscript v2.
+            if stored == "manuscript":
+                row.setdefault("version", revision)
+            elif stored != "claim":
                 row["version"] = revision
     return rows
 

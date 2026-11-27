@@ -49,6 +49,8 @@ _SEVERITY_ORDER = {
 
 _CATEGORY_WEIGHTS = {"science": 30, "fidelity": 15, "citation": 15,
                      "readability": 25, "figure": 5, "completeness": 10}
+_ISSUE_PENALTIES = {IssueSeverity.major: 30, IssueSeverity.minor: 10,
+                    IssueSeverity.advisory: 3, IssueSeverity.blocking: 100}
 
 
 def judge_review(issues: list[ReviewIssueRef], *, threshold: int = 80,
@@ -72,14 +74,17 @@ def judge_review(issues: list[ReviewIssueRef], *, threshold: int = 80,
              (i.severity == IssueSeverity.major and i.category not in
               {"readability", "figure", "completeness"})]
     scores: dict[str, int] = {}
-    for category, weight in weights.items():
-        points = 100 - sum({IssueSeverity.major: 30, IssueSeverity.minor: 10,
-                            IssueSeverity.advisory: 3,
-                            IssueSeverity.blocking: 100}[issue.severity]
-                           for issue in issues if issue.category == category)
+    adjustments = {}
+    for category in weights:
+        deductions = {issue.issue_id: _ISSUE_PENALTIES[issue.severity]
+                      for issue in issues if issue.category == category}
+        points = max(0, 100 - sum(deductions.values()))
         proposed = (category_scores or {}).get(category)
         if isinstance(proposed, (int, float)) and not isinstance(proposed, bool) \
                 and 0 <= proposed <= 100:
+            if points < int(proposed):
+                adjustments[category] = {"reported": proposed, "effective": points,
+                                         "issue_deductions": deductions}
             points = min(points, int(proposed))
         scores[category] = max(0, points)
     score = round(sum(scores[k] * weight for k, weight in weights.items()) / sum(weights.values()))
@@ -88,7 +93,7 @@ def judge_review(issues: list[ReviewIssueRef], *, threshold: int = 80,
                 "accepted" if score >= threshold else "revision")
     return {"score": score, "threshold": threshold, "decision": decision,
             "accepted": decision == "accepted", "category_scores": scores,
-            "fatal_issue_ids": [issue.issue_id for issue in fatal],
+            "score_adjustments": adjustments, "fatal_issue_ids": [issue.issue_id for issue in fatal],
             "semantic_reviewed": semantic_reviewed}
 
 
@@ -128,6 +133,8 @@ class ReviewAgent(AgentBase):
 - 引用问题时给出原文片段作为定位;
 - 针对正文的意见必须给出 block_id 与 quoted_text（当前块中逐字摘录的原句），
   不得把旧版本的问题或自己的概括冒充原文。对整节缺项可引用该节现有的代表句说明缺口。
+- 表格标题和行列按当前稿件的实际编号提供，分别核对是否有编号、正文指代是否明确。
+  PDF 的独立公式由排版器编号；评价引用准确性时应核对文中的指称和被引用公式。
 - **引用编号每轮重新排序**: 上一轮台账里对 `[n]` 的主题描述不得沿用 —— 重排之后
   `[34]` 已经是另一篇文献, 沿用旧描述会把同一个问题反复报成"未解决"
   (实测: 连续 4 轮误判 Critical 未解决)。判断"是否已解决"必须回到**本轮正文与文献表**;
@@ -307,7 +314,9 @@ class ReviewAgent(AgentBase):
                     unresolved.append("独立审阅的定位或分项评分不完整，不能视为通过")
 
         deterministic = deterministic_issues(context)
-        issues = _reuse_review_ids(_merge_issues(issues, deterministic), context)
+        checks = payload.get("previous_issue_checks", []) if isinstance(payload, dict) else []
+        checks = [check for check in checks if isinstance(check, dict)] if isinstance(checks, list) else []
+        issues = _reuse_review_ids(_merge_issues(issues, deterministic), context, checks)
         issues = _route_unverified_source_repairs(issues, context)
         issues = [issue for issue in issues if issue.category not in excluded]
         if parse_note:
@@ -321,7 +330,12 @@ class ReviewAgent(AgentBase):
         judgement["reported_category_scores"] = llm_scores
         judgement["grounding_conflicts"] = list(grounding_conflicts.values())
         judgement["validation_details"] = validation_details
-        judgement['previous_issue_checks'] = (payload.get('previous_issue_checks') or []) if isinstance(payload, dict) else []
+        judgement['previous_issue_checks'] = checks
+        validation_details["score_adjustments"] = judgement.get("score_adjustments", {})
+        for category, adjustment in validation_details["score_adjustments"].items():
+            basis = "、".join(f"{key} 扣 {points} 分" for key, points in adjustment["issue_deductions"].items())
+            category_notes[category] = (category_notes.get(category, "") +
+                f" 分项自报 {adjustment['reported']}，按已定位问题计分上限为 {adjustment['effective']}（{basis}）。").strip()
         if grounding_conflicts and judgement["accepted"]:
             judgement.update(accepted=False, decision="incomplete")
         from src.publication.manuscript_state import manuscript_identity
@@ -336,6 +350,18 @@ class ReviewAgent(AgentBase):
         if quota_exhausted:
             judgement["recovery_required"] = "审阅服务配额耗尽，请补充配额或切换审阅模型后继续"
 
+        changes = _issue_updates(issues, context, task, checks, semantic_reviewed, judgement["reviewed_manuscript"])
+        if judgement["accepted"]:
+            unaccounted = [change.payload["issue_id"] for change in changes
+                           if change.payload.get("severity") in {"blocking", "major"}
+                           and change.payload.get("status") in {"not_rechecked", "open"}
+                           and change.payload["issue_id"] not in {issue.issue_id for issue in issues}]
+            if unaccounted:
+                semantic_reviewed = False
+                judgement.update(accepted=False, decision="unreviewed", score=0, semantic_reviewed=False)
+                validation_details["missing_previous_issue_checks"] = unaccounted
+                unresolved.append("仍有重大历史问题未在当前稿件完成定位复核：" + "、".join(unaccounted))
+                changes = _issue_updates(issues, context, task, [], False, judgement["reviewed_manuscript"])
         if not issues:
             if not semantic_reviewed:
                 manuscript = (context.objects.get("manuscript") or [{}])[-1]
@@ -353,7 +379,7 @@ class ReviewAgent(AgentBase):
             return self.completed(
                 task, ("未发现原则性问题，评分达到门槛" if judgement["accepted"]
                        else "未发现原则性问题，但分项评分未达到门槛"),
-                needs=needs, replan=bool(needs), unresolved=unresolved, usage=usage,
+                changes=changes, needs=needs, replan=bool(needs), unresolved=unresolved, usage=usage,
                 payload={"schema": "ReviewReport/v2", "issues": [],
                          "by_severity": {}, "by_category": {}, **judgement})
 
@@ -369,14 +395,6 @@ class ReviewAgent(AgentBase):
         needs = [need for need in needs if need.kind != NeedKind.manuscript_revision]
         if not judgement["accepted"] and semantic_reviewed and writing_issues:
             needs.append(_revision_need(context, writing_issues, judgement))
-        changes = [ChangeProposal(
-            kind="review_issue",
-            object_id=_review_object_id(issue, task, context),
-            payload=issue.to_dict(),
-            rationale=f"审阅问题 ({issue.category}, {issue.severity.value})",
-            input_versions={},
-            may_change_conclusion=False,      # 审阅从不直接改结论真值
-        ) for issue in issues]
         return self.completed(
             task, summary, changes=changes, needs=needs,
             unresolved=unresolved[:6], usage=usage,
@@ -565,10 +583,7 @@ def _normalize_review_anchors(payload: dict, context: ContextPack) -> dict:
     """Recover legacy anchors only when their quoted words occur in this version."""
     if not isinstance(payload.get('issues'), list):
         return payload
-    paper = (context.objects.get('manuscript') or [{}])[-1]
-    blocks = {b.get('block_id'): '\n'.join(str(b.get(key) or '') for key in ('text', 'math'))
-              for section in paper.get('sections') or [] for b in section.get('blocks') or []
-              if b.get('block_id')}
+    blocks = _review_block_texts(context)
     normalize = lambda value: re.sub(r'\s+', '', str(value or ''))
     items = []
     for original in payload.get('issues') or []:
@@ -665,10 +680,7 @@ def _review_grounding_conflicts(payload: dict, context: ContextPack) -> dict[int
     """Unanchored accusations trigger review repair, never manuscript rewriting."""
     if not isinstance(payload.get('issues'), list):
         return {0: '审阅 issues 必须是结构化列表'}
-    paper = (context.objects.get('manuscript') or [{}])[-1]
-    blocks = {b.get('block_id'): '\n'.join(str(b.get(key) or '') for key in ('text', 'math'))
-              for section in paper.get('sections') or [] for b in section.get('blocks') or []
-              if b.get('block_id')}
+    blocks = _review_block_texts(context)
     if not blocks:
         return {}
     normalize = lambda text: re.sub(r'\s+', '', str(text or ''))
@@ -741,7 +753,7 @@ def _issue_from(item: Any) -> ReviewIssueRef | None:
         return None
 
 
-def _reuse_review_ids(issues: list[ReviewIssueRef], context: ContextPack) -> list[ReviewIssueRef]:
+def _reuse_review_ids(issues: list[ReviewIssueRef], context: ContextPack, checks=()) -> list[ReviewIssueRef]:
     """Keep an anchored, substantially unchanged finding in the same issue history."""
     from difflib import SequenceMatcher
     from src.agents.review_state import latest_review_issues
@@ -751,10 +763,24 @@ def _reuse_review_ids(issues: list[ReviewIssueRef], context: ContextPack) -> lis
         targets = {ref.id for ref in issue.affected_refs}
         reported_id = issue.issue_id
         issue.issue_id = _issue_id(issue.category, issue.summary)
+        # Reviewers may assign a temporary ID to a still-open issue and name
+        # that ID in their recheck of the original. Require both links.
+        linked = {check.get("issue_id") for check in checks
+                  if check.get("status") == "unresolved" and reported_id
+                  and isinstance(check.get("issue_id"), str) and isinstance(check.get("block_ids"), list)
+                  and reported_id in re.findall(r"[\w-]+", str(check.get("reason") or ""), re.ASCII)
+                  and targets.intersection(value for value in (check.get("block_ids") or [])
+                                           if isinstance(value, str))}
         for old in previous:
             old_id = old.get('issue_id')
             old_targets = {ref.get('id') for ref in old.get('affected_refs') or [] if isinstance(ref, dict)}
-            if not old_id or old_id in used or old.get('category') != issue.category:
+            if not old_id or old_id in used:
+                continue
+            if len(linked) == 1 and old_id in linked and targets & old_targets:
+                issue.issue_id = old_id
+                used.add(old_id)
+                break
+            if old.get('category') != issue.category:
                 continue
             same = ' '.join(str(old.get('summary') or '').split()) == ' '.join(issue.summary.split())
             similar = bool(targets & old_targets) and SequenceMatcher(
@@ -765,6 +791,43 @@ def _reuse_review_ids(issues: list[ReviewIssueRef], context: ContextPack) -> lis
                 used.add(old_id)
                 break
     return issues
+
+
+def _issue_updates(issues, context, task, checks, semantic_reviewed, identity):
+    from src.agents.review_state import latest_review_issues
+    previous = latest_review_issues(context.objects.get("review_issue") or [])
+    if previous and not semantic_reviewed:
+        # Preserve the authoritative issue set through an invalid review. Its
+        # provisional observations remain available in the attempt report.
+        return []
+    changes = [ChangeProposal(kind="review_issue", object_id=_review_object_id(issue, task, context),
+        payload={**issue.to_dict(), "status": "open", "dedupe_key": issue.issue_id,
+                 "reviewed_manuscript": identity},
+        rationale=f"审阅问题 ({issue.category}, {issue.severity.value})") for issue in issues]
+    if not semantic_reviewed:
+        return changes
+    current_ids = {issue.issue_id for issue in issues}
+    blocks = _review_block_texts(context)
+    for old in previous:
+        old_id = old.get("issue_id")
+        if not old_id or not old.get("id") or old_id in current_ids:
+            continue
+        matches = [check for check in checks if check.get("issue_id") == old_id]
+        status, reason, anchors = "not_rechecked", "", []
+        if len(matches) == 1:
+            check = matches[0]
+            refs = check.get("block_ids")
+            if (isinstance(refs, list) and refs and all(isinstance(ref, str) and ref in blocks for ref in refs)
+                    and isinstance(check.get("reason"), str) and check["reason"].strip()
+                    and check.get("status") in ("resolved", "superseded", "unresolved")):
+                status = "open" if check["status"] == "unresolved" else check["status"]
+                reason, anchors = check["reason"], refs
+        data = {key: value for key, value in old.items()
+                if not key.startswith("_") and key not in {"id", "version"}}
+        changes.append(ChangeProposal(kind="review_issue", object_id=old["id"],
+            payload={**data, "status": status, "dedupe_key": old_id, "reviewed_manuscript": identity,
+                     "check_reason": reason, "check_block_ids": anchors}, rationale="复核上一轮审阅意见"))
+    return changes
 
 
 def _review_object_id(issue, task, context):
@@ -829,22 +892,53 @@ def _tally(issues: list[ReviewIssueRef], field: str = "category") -> dict[str, i
     return out
 
 
+def _review_view(context: ContextPack):
+    """Use the same citations, numbered captions, rows and table mentions as publication."""
+    from src.publication.references import citation_group, citation_numbers, citation_suffix
+    from src.publication.schemas import BlockRole, Manuscript, assign_render_numbers
+    from src.publication.tables import markdown_table, render_table_mentions
+    row = (context.objects.get("manuscript") or [{}])[-1]
+    row = row.get("manuscript", row)
+    try:
+        paper = render_table_mentions(Manuscript.model_validate(row))
+    except ValueError:
+        return row
+    numbers = assign_render_numbers(paper)
+    # The validated paper is a render copy. Its block order also includes tables
+    # extracted from Markdown in older manuscripts.
+    for block in paper.all_blocks():
+        citations = citation_group(citation_numbers(block, numbers["citations"]))
+        lines = [citation_suffix(block.text, citations), block.math]
+        if block.role == BlockRole.table:
+            lines.extend(markdown_table(block, numbers["tables"].get(block.block_id, "")))
+        block.text = "\n".join(line for line in lines if line)
+        block.math = ""
+    return paper.model_dump(mode="json")
+
+
+def _review_block_texts(context: ContextPack):
+    return {block["block_id"]: "\n".join(str(block.get(k) or "") for k in ("text", "math")).strip()
+            for section in _review_view(context).get("sections") or []
+            if isinstance(section, dict) for block in section.get("blocks") or []
+            if isinstance(block, dict) and block.get("block_id")}
+
+
 def _draft_text(context: ContextPack) -> str:
     parts: list[str] = []
-    for manuscript in (context.objects.get("manuscript") or [])[-1:]:
-        parts.append(f"# {manuscript.get('title', '')}")
-        if manuscript.get("abstract"):
-            parts.append(str(manuscript["abstract"]))
-        for section in manuscript.get("sections") or []:
-            if not isinstance(section, dict):
-                continue
-            parts.append(f"## {section.get('heading', '')}")
-            for block in section.get("blocks") or []:
-                if isinstance(block, dict):
-                    parts.append(f"block_id={block.get('block_id')} refs={block.get('refs')} kinds={block.get('ref_kinds')}")
-                    parts.append(str(block.get("text") or ""))
-                    if block.get("math"):
-                        parts.append("公式: " + str(block["math"]))
+    if not context.objects.get("manuscript"):
+        return ""
+    manuscript = _review_view(context)
+    parts.append(f"# {manuscript.get('title', '')}")
+    if manuscript.get("abstract"):
+        parts.append(str(manuscript["abstract"]))
+    for section in manuscript.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        parts.append(f"## {section.get('heading', '')}")
+        for block in section.get("blocks") or []:
+            if isinstance(block, dict):
+                parts.append(f"block_id={block.get('block_id')} refs={block.get('refs')} kinds={block.get('ref_kinds')}")
+                parts.extend(str(block[key]) for key in ("text", "math") if block.get(key))
     return "\n\n".join(parts)
 
 
@@ -942,12 +1036,10 @@ def _review_materials(context, *, compact=False):
         "obligations": context.objects.get("obligation") or [],
         "sources": sources,
         "figure_count": len(context.objects.get("figure") or []),
-        "tables": [b for s in manuscript.get("sections", []) for b in s.get("blocks", [])
-                   if b.get("role") == "table"],
         "omitted_uncited_sources": max(0, len(by_source) - len(source_keys)),
         "revision_log": manuscript.get("revision_log", [])[-3:],
         "previous_issues": [{k: issue.get(k) for k in ("issue_id", "summary", "acceptance", "locator", "affected_refs", "repair_action")}
-                            for issue in latest_review_issues(context.objects.get("review_issue") or [])[:24]],
+                            for issue in latest_review_issues(context.objects.get("review_issue") or [])],
     }, ensure_ascii=False)
 
 

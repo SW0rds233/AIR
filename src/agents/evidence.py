@@ -496,7 +496,7 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
             chosen = None
             chosen_claim = None
             for claim in targets:
-                if calls >= 16 or task.budget.exceeded_by(usage):
+                if calls >= 16 or task.budget.exceeded_by(usage) or not runtime.llm_available(stage):
                     break
                 raw = {key: value for key, value in row.items()
                        if key in SourceEvidence.model_fields}

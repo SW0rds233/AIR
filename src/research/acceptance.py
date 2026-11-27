@@ -84,6 +84,8 @@ def theory_validity_gate(
     reasons: list[str] = []
     unresolved: list[str] = []
     current_claim_versions = {claim.id: claim.version for claim in claims}
+    if not claims:
+        unresolved.append("没有已登记命题可供核验")
     obligations = [obligation for obligation in obligations
                    if current_claim_versions.get(obligation.claim_id,
                                                   obligation.claim_version)

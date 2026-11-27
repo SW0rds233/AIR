@@ -57,6 +57,11 @@ def append_run_event(*, project_id: str, problem_id: str, run_id: str,
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
+    if kind == "delivery_assessed" and payload.get("phase") == "after_export":
+        report = json.loads(identity.read_text("utf-8"))
+        report.update(stage="exported", delivery=record["payload"],
+                      note="已导出快照；交付判定和编译结果见 delivery")
+        _atomic_text(identity, json.dumps(report, ensure_ascii=False, indent=2))
     return path
 
 
@@ -97,6 +102,19 @@ def write_run_progress(store: Any, *, project_id: str, problem_id: str,
             manuscript = Manuscript.model_validate(
                 {key: value for key, value in payload.items() if not key.startswith("_")})
             _atomic_text(root / "manuscript-draft.md", render_markdown(manuscript))
+            history_path = root / "manuscript-history.json"
+            if task.agent == "writing" or not history_path.is_file():
+                history = []
+                for latest in rows:
+                    for revision in store.list_versions(kind, latest["id"]):
+                        data = revision["data"]
+                        if (data.get("_scope") or {}).get("run_id") == run_id:
+                            history.append({**data, "_storage_revision": revision["version"]})
+                # Older runs can have separate storage IDs for the initial draft
+                # and its revisions. Keep their original identities for auditing.
+                history.sort(key=lambda row: (row.get("_submitted_at", ""),
+                                              row.get("version", 1), row["_storage_revision"]))
+                _atomic_text(history_path, json.dumps(history, ensure_ascii=False, indent=2))
     report = {
         "project_id": project_id, "problem_id": problem_id, "run_id": run_id,
         "latest_task": {"task_id": task.task_id, "agent": task.agent,

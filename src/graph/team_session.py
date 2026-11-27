@@ -486,10 +486,12 @@ class TeamSession:
             *package_notes, *(delivery_result.get("blocking") or []),
             *(delivery_result.get("unresolved") or [])
         ])
-        self._publish_final_delivery(delivery_result)
+        self._publish_final_delivery(delivery_result, snapshot_id=package.name,
+                                     compilation_status=compile_status)
         return package
 
-    def _publish_final_delivery(self, delivery: dict[str, Any]) -> None:
+    def _publish_final_delivery(self, delivery: dict[str, Any], *, snapshot_id: str = "",
+                                compilation_status: str = "") -> None:
         """Replace the preliminary export gate with the actual compilation verdict."""
         outcome = self.team.outcome
         previous = outcome.delivery
@@ -509,7 +511,10 @@ class TeamSession:
         outcome.stop_reason = self.team.loop.stop_reason = reason.strip(" |")
         outcome.unresolved_report["stop_reason"] = outcome.stop_reason
         self.team.save_state(status=outcome.status)
-        self.team.runtime.emit("delivery_assessed", {**delivery, "phase": "after_export"})
+        self.team.runtime.emit("delivery_assessed", {
+            **delivery, "phase": "after_export", "snapshot_id": snapshot_id,
+            "compilation_status": compilation_status, "run_status": outcome.status,
+        })
 
     def _compile_package(self, package: Path, tex_text: str) -> tuple[str, str]:
         """把 `.tex` 写进交付包并编译为 PDF; 返回 `(编译状态, 日志)`。

@@ -72,6 +72,20 @@ def normalize_tables(manuscript: Manuscript, *, inplace=False) -> Manuscript:
     return result
 
 
+def render_table_mentions(manuscript: Manuscript) -> Manuscript:
+    """Resolve local table callouts on a render copy after final ordering."""
+    from src.publication.schemas import assign_render_numbers
+
+    rendered = normalize_tables(manuscript)
+    numbers = assign_render_numbers(rendered)["tables"]
+    for block in rendered.all_blocks():
+        if block.block_id in numbers and valid_table(block.data):
+            # Only the lead-in in the table's own block has a definite target.
+            block.text = re.sub(r"^(?:下表|本表|变量定义表(?=汇总))",
+                                f"表 {numbers[block.block_id]} ", block.text, count=1)
+    return rendered
+
+
 def markdown_table(block, number):
     data = block.data
     if not valid_table(data):

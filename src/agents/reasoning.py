@@ -22,7 +22,6 @@ from src.agents.protocol import (
     NeedKind,
     ObjectRef,
     ResearchNeed,
-    TaskOutcome,
     UsageRecord,
 )
 from src.agents.runtime import AgentRuntime, ToolSpec
@@ -176,7 +175,8 @@ class ReasoningAgent(AgentBase):
         # 义务与核验记录作为候选提交, 命题状态由唯一提交口按内核判据重算。
         repair_encoding = task.hints.get('verification_status') == 'unsupported'
         repair_claim = bool(task.hints.get('repair_claim'))
-        if strategy == "derivation" and not (repair_encoding or repair_claim):
+        rejected_candidate = task.hints.get("rejected_candidate")
+        if strategy == "derivation" and not (repair_encoding or repair_claim or rejected_candidate):
             formal = self.formal_closure(task, context, runtime, usage)
             if formal is not None:
                 return formal
@@ -187,6 +187,7 @@ class ReasoningAgent(AgentBase):
         missing: list[str] = []
         limitations: list[str] = []
         needs: list[ResearchNeed] = []
+        model_needs: list[ResearchNeed] = []
         parse_note = ""
         observations = []
 
@@ -204,6 +205,11 @@ class ReasoningAgent(AgentBase):
                             for s in (context.objects.get("evidence") or [])[:15])
                 + f"\n# 上下文\n{context_summary(context)}"
             )
+            if rejected_candidate:
+                import json
+                prompt += ("\n以下候选尚未登记。核对原陈述、变量域与前提，修正字段，只提交同一陈述。"
+                           "若有两个不同目标，说明哪一个编码与原陈述等价及理由；无法确定时报告缺口。\n"
+                           + json.dumps(rejected_candidate, ensure_ascii=False))
             if repair_encoding:
                 import json
                 target = next((row for row in context.objects.get('claim') or []
@@ -250,7 +256,8 @@ class ReasoningAgent(AgentBase):
                                    if isinstance(c, dict)]
                 missing = as_list_of_str(payload.get("missing_conditions"))
                 limitations = as_list_of_str(payload.get("limitations"))
-                needs = _needs_from_payload(payload.get("needs"))
+                model_needs = _needs_from_payload(payload.get("needs"))
+                needs.extend(model_needs)
                 strategy = str(payload.get("strategy") or strategy)
 
         # A tool hit is not yet a registered, readable source. Evidence owns ingestion.
@@ -303,6 +310,7 @@ class ReasoningAgent(AgentBase):
         research_text = _research_text(context)
         theory_context = is_formal_question(research_text)
         changes = []
+        registration_errors: list[str] = []
         fidelity_issues: list[str] = []
         seen_statements: set[str] = set()
         known = {str(row.get("id")): row for row in context.objects.get("claim", [])}
@@ -313,6 +321,9 @@ class ReasoningAgent(AgentBase):
             claim = dict(candidate)
             statement = str(claim.get("statement") or "").strip()
             if not statement or statement in seen_statements:
+                continue
+            if rejected_candidate and statement != rejected_candidate.get("statement"):
+                limitations.append("编码修复改变了原命题陈述，保留原问题待核查")
                 continue
             conflicts = conflicting_code_parameters(research_text, statement)
             if conflicts:
@@ -350,6 +361,10 @@ class ReasoningAgent(AgentBase):
                 "project": task.project_id, "problem": task.problem_id, "statement": statement})
             claim["id"] = object_id
             version = int(existing.get("version") or 1) if existing else 1
+            # Keep explicit empty fields when updating an existing record, so
+            # merging it cannot resurrect the redundant comparison.
+            if _repeats_formal_conclusion(claim):
+                claim.update(lhs="", rhs="", relation="custom")
             encoding_changed = existing and any(key in claim and claim[key] != existing.get(key)
                 for key in ("lhs", "rhs", "expr", "wrt", "direction", "relation", "variables", "variable_domains", "study", "formal_spec", "statement_role",
                             "claim_type", "mechanism_links", "premises", "evidence_requirements", "scope_conditions", "scope_population", "scope_region", "scope_period"))
@@ -375,7 +390,18 @@ class ReasoningAgent(AgentBase):
                     "status", "assurance", "support_kind", "validation_status", "coverage",
                     "verification_scope", "verification_closure"}})
             except ValueError as error:
-                limitations.append(f"候选未登记（{object_id}）: {str(error)[:600]}")
+                problem = f"候选未登记（{object_id}）: {str(error)[:450]}"
+                registration_errors.append(problem)
+                if not rejected_candidate:
+                    needs.append(ResearchNeed(
+                        kind=NeedKind.derivation, owner="reasoning",
+                        statement="校正命题编码：" + statement,
+                        why=problem,
+                        acceptance=["依据原陈述选择等价的单一目标，保留前提和量词后重新登记"],
+                        hints={"rejected_candidate": {key: claim[key] for key in (
+                            "statement", "claim_type", "statement_role", "study", "premises", "variables",
+                            "variable_domains", "formal_spec", "lhs", "relation", "rhs", "expr", "wrt",
+                            "direction") if key in claim}, "trigger_id": "claim-schema:" + object_id}))
                 continue
             changes.append(build_proposal("claim", object_id=object_id,
                 payload={**claim, "strategy": strategy, "subquestion": task.subquestion,
@@ -402,6 +428,18 @@ class ReasoningAgent(AgentBase):
             rationale="推理给出反例候选 (是否成立由判定层核验)",
         ) for c in counterexamples)
 
+        # The model sometimes queues a proof against its own temporary claim ID
+        # before this function validates the candidate. Only the verified binding
+        # above can dispatch such a check against a concrete object and version.
+        temporary_ids = {str(c["id"]) for c in claims if c.get("id") and str(c["id"]) not in known}
+        for need in model_needs:
+            if need.kind != NeedKind.derivation:
+                continue
+            if any(re.search(r"(?<![\w-])" + re.escape(alias) + r"(?![\w-])",
+                             need.statement, flags=re.ASCII) for alias in temporary_ids):
+                needs.remove(need)
+                limitations.append("模型提出的附加核验尚未执行：" + need.statement)
+
         summary = f"策略 {strategy}: 提出 {sum(c.kind == 'claim' for c in changes)} 条新增/修订命题候选"
         if counterexamples:
             summary += f", {len(counterexamples)} 条反例候选"
@@ -413,7 +451,8 @@ class ReasoningAgent(AgentBase):
         payload_out = {
             "schema": "ReasoningResult/v1",
             "strategy": strategy,
-            "claims": claims,
+            "claims": [c.payload for c in changes if c.kind == "claim"],
+            "candidate_problems": registration_errors,
             "counterexamples": counterexamples,
             "missing_conditions": missing,
             "limitations": limitations,
@@ -436,15 +475,17 @@ class ReasoningAgent(AgentBase):
                 task, "候选命题与题面参数冲突，未提交研究结论",
                 needs=needs, unresolved=fidelity_issues,
                 usage=usage, payload=payload_out)
-        outcome = TaskOutcome.completed if (claims or counterexamples) \
-            else TaskOutcome.blocked
-        if outcome == TaskOutcome.blocked:
+        if not changes:
+            if not needs and not rejected_candidate:
+                needs.append(ResearchNeed(kind=NeedKind.derivation, statement="需要重新推导",
+                                          why="当前没有命题或反例候选"))
             return self.blocked(
-                task, "没有可审查的推理产出",
-                needs=needs or [ResearchNeed(
-                    kind=NeedKind.derivation, statement="需要重新推导",
-                    why="当前没有命题或反例候选")],
+                task, registration_errors[0] if registration_errors else "没有可审查的新增推理产出",
+                needs=needs,
                 usage=usage, payload=payload_out)
+        if registration_errors:
+            return self.partial(task, summary, changes=changes, needs=needs,
+                                unresolved=registration_errors + limitations, usage=usage, payload=payload_out)
         replan = bool(counterexamples)
         return self.completed(task, summary, changes=changes, needs=needs,
                               unresolved=[*fidelity_issues[:4], *missing[:4], *limitations[:4]],
@@ -1050,6 +1091,25 @@ def _attempt_from_plan(plan_outcome) -> Any:
         return ProofAttempt(**raw)
     except Exception:  # noqa: BLE001 - 载荷不全时给空尝试, 由内核补"无形式化片段"步骤
         return ProofAttempt()
+
+
+def _repeats_formal_conclusion(claim: dict) -> bool:
+    """Remove a duplicate goal only if the two comparisons have identical syntax trees."""
+    import ast
+
+    spec = claim.get("formal_spec")
+    relation = claim.get("relation")
+    if (not isinstance(spec, dict) or relation not in ("==", "!=", "<", "<=", ">", ">=")
+            or not claim.get("lhs") or not claim.get("rhs") or claim.get("expr") or claim.get("wrt")):
+        return False
+    comparison = f"({claim['lhs']}) {relation} ({claim['rhs']})"
+    conclusion = spec.get("conclusion")
+    if not isinstance(conclusion, str) or max(len(comparison), len(conclusion)) > 4000:
+        return False
+    try:
+        return ast.dump(ast.parse(comparison, mode="eval")) == ast.dump(ast.parse(conclusion.strip(), mode="eval"))
+    except (SyntaxError, ValueError, RecursionError):
+        return False
 
 
 def _needs_from_payload(value: Any) -> list[ResearchNeed]:

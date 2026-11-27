@@ -10,6 +10,7 @@ from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, field
 from queue import Empty, Queue
 from threading import BoundedSemaphore, Thread
+import sys
 import time
 from typing import Callable, Any
 
@@ -28,6 +29,24 @@ class ModelCallTimeout(TaskDeadlineExceeded):
 
 class ModelBudgetExceeded(RuntimeError):
     pass
+
+
+# Use an elapsed clock that includes system sleep and ignores civil clock changes.
+if sys.platform == "win32":
+    import ctypes
+    _tick_count = ctypes.windll.kernel32.GetTickCount64
+    _tick_count.restype = ctypes.c_uint64
+
+    def _watchdog_clock() -> float:
+        return _tick_count() / 1000
+elif hasattr(time, "CLOCK_BOOTTIME"):
+    def _watchdog_clock() -> float:
+        return time.clock_gettime(time.CLOCK_BOOTTIME)
+else:
+    _watchdog_clock = time.monotonic
+
+
+EVIDENCE_MODEL_LIMIT = 150
 
 
 @dataclass
@@ -57,6 +76,7 @@ class NetworkBudget:
     model_attempts: int = 0
     stop_reason: str = ""
     deferred_reason: str = ""
+    poll_interrupted: bool = False
 
     def defer(self, phase: str, *, cooldown: bool = False) -> None:
         self.deferred = True
@@ -80,6 +100,8 @@ class NetworkBudget:
             self.cancel()
         if self.stop_reason:
             raise ModelBudgetExceeded(self.stop_reason)
+        if self.poll_interrupted:
+            raise TaskDeadlineExceeded(self.deferred_reason)
         if self.remaining() <= 0:
             if not self.deferred:
                 self.event("task_deadline", phase="task", action="resume_unfinished")
@@ -135,7 +157,7 @@ def model_call(fn: Callable[[], Any], *, timeout: float, phase: str) -> Any:
         for attempt in range(3):
             budget.check()
             if budget.role == "evidence":
-                if budget.state.evidence_model_attempts >= 150:
+                if budget.state.evidence_model_attempts >= EVIDENCE_MODEL_LIMIT:
                     budget.deferred = True
                     budget.stop_reason = "证据层累计模型调用达到 150 次上限；保留资料，转入写作与缺口报告"
                     raise ModelBudgetExceeded(budget.stop_reason)
@@ -201,22 +223,45 @@ def network_call(fn: Callable[[], Any], *, timeout: float = 120, phase: str = "n
         finally:
             _in_call.reset(token)
             budget.state.workers.release()
-    Thread(target=lambda: context.run(work), daemon=True, name="air-remote-read").start()
-    deadline = time.monotonic() + min(max(.001, timeout), budget.remaining())
+    call_seconds = min(max(.001, timeout), budget.remaining())
+    deadline = time.monotonic() + call_seconds
+    wall_deadline = _watchdog_clock() + call_seconds
+    last_poll = _watchdog_clock()
+
+    def check_poll() -> None:
+        nonlocal last_poll
+        now = _watchdog_clock()
+        gap = now - last_poll
+        last_poll = now
+        if now >= wall_deadline and gap >= 60:
+            # The caller normally wakes every second, even with a slow server.
+            # A long gap can also mean process suspension, so record what we saw.
+            budget.poll_interrupted = budget.deferred = True
+            budget.deferred_reason = "远程调用监控长时间中断并超时，需恢复原任务"
+            budget.event("task_watchdog_gap", phase=phase, gap_seconds=round(gap),
+                         action="discard_late_reply")
+            raise TaskDeadlineExceeded(budget.deferred_reason)
+
     heartbeat = time.monotonic() + budget.heartbeat_seconds
+    Thread(target=lambda: context.run(work), daemon=True, name="air-remote-read").start()
     try:
         while True:
+            check_poll()
             budget.check()
-            remaining = min(deadline - time.monotonic(), budget.remaining())
+            remaining = min(deadline - time.monotonic(), wall_deadline - last_poll,
+                            budget.remaining())
             if remaining <= 0:
                 error_type = ModelCallTimeout if _in_model_call.get() else TaskDeadlineExceeded
                 raise error_type(f"{phase} 单次调用超过时间预算，迟到结果不再采用")
             try:
-                ok, value = result.get(timeout=min(remaining, 1., budget.heartbeat_seconds))
+                try:
+                    ok, value = result.get(timeout=min(remaining, 1., budget.heartbeat_seconds))
+                finally:
+                    check_poll()
                 if not ok:
                     raise value
                 budget.check()
-                if time.monotonic() >= deadline:
+                if time.monotonic() >= deadline or last_poll >= wall_deadline:
                     error_type = ModelCallTimeout if _in_model_call.get() else TaskDeadlineExceeded
                     raise error_type(f"{phase} 单次调用超过时间预算，迟到结果不再采用")
                 if not failure_scope and budget.state.unavailable_until:

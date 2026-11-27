@@ -6,6 +6,7 @@ Narrative belongs to WritingAgent; this module handles escaping and layout only.
 """
 
 import re
+import unicodedata
 from typing import Any
 
 from src.publication.schemas import Block, Manuscript, RefKind, assign_render_numbers
@@ -33,7 +34,7 @@ _UNICODE_TO_LATEX: dict[str, str] = {
     "∑": r"$\sum$", "∏": r"$\prod$", "∫": r"$\int$", "∂": r"$\partial$",
     # 集合与逻辑
     "∈": r"$\in$", "∉": r"$\notin$", "⊂": r"$\subset$", "⊆": r"$\subseteq$",
-    "⊃": r"$\supset$", "∪": r"$\cup$", "∩": r"$\cap$", "∅": r"$\emptyset$",
+    "⊃": r"$\supset$", "⊇": r"$\supseteq$", "∪": r"$\cup$", "∩": r"$\cap$", "∅": r"$\emptyset$",
     "∀": r"$\forall$", "∃": r"$\exists$", "¬": r"$\neg$", "∧": r"$\wedge$",
     "∨": r"$\vee$", "⇒": r"$\Rightarrow$", "⇔": r"$\Leftrightarrow$",
     "→": r"$\to$", "←": r"$\leftarrow$", "↔": r"$\leftrightarrow$",
@@ -91,6 +92,28 @@ for _start, _count, _first, _style in (
 _UNICODE_TO_LATEX['⓪'] = r'\textcircled{0}'
 _UNICODE_TO_LATEX_MATH['⓪'] = r'\text{\textcircled{0}}'
 
+_STYLED_LETTER = re.compile(r"[\u2100-\u214f\U0001d400-\U0001d7ff]")
+
+
+def _styled_letters(text: str, *, math_mode: bool) -> str:
+    """Preserve mathematical alphabets, including letters encoded in Letterlike Symbols."""
+    def replace(match: re.Match) -> str:
+        char = match.group()
+        if char in _UNICODE_TO_LATEX or not unicodedata.decomposition(char).startswith("<font>"):
+            return char
+        name = unicodedata.name(char).removeprefix("MATHEMATICAL ")
+        base = unicodedata.normalize("NFKC", char)
+        # The AMS blackboard and calligraphic alphabets have capitals only.
+        if name.startswith("DOUBLE-STRUCK CAPITAL ") and re.fullmatch("[A-Z]", base):
+            body = rf"\mathbb{{{base}}}"
+        elif name.startswith("SCRIPT CAPITAL ") and re.fullmatch("[A-Z]", base):
+            body = rf"\mathcal{{{base}}}"
+        else:
+            body = rf"\AIRmathglyph{{{ord(char):X}}}"
+        return body if math_mode else f"${body}$"
+
+    return _STYLED_LETTER.sub(replace, text)
+
 _SCRIPT_RUNS = (
     ('⁰¹²³⁴⁵⁶⁷⁸⁹ⁿⁱ⁻⁺⁼⁽⁾', '0123456789ni-+=()', '^'),
     ('₀₁₂₃₄₅₆₇₈₉₋₊₌₍₎', '0123456789-+=()', '_'),
@@ -124,7 +147,7 @@ _INLINE_POWER_RE = re.compile(
 #: 中断), 以及模型自己写好的 `\{0,1\}^667`。内容限死在数字/字母/逗号/空白/正负号
 #: (含 U+2212 减号), 并用 lookbehind 排除 `\textbf{…}^2` 这类命令参数被误当成集合。
 _INLINE_SET_POWER_RE = re.compile(
-    r"(?<![A-Za-z\\])((?:\\?\{)[0-9A-Za-z,;\s+\-\u2212]*(?:\\?\}))\^"
+    r"(?<![A-Za-z_\\])((?:\\?\{)[0-9A-Za-z,;\s+\-\u2212]*(?:\\?\}))\^"
     r"(\{[^{}]*\}|-?[A-Za-z0-9]+)")
 
 #: 正文里"单字母_下标"的形状: `c_i`、`I_667`、`d_H`、`H_{1j}`、`Σ_{t=0}`。
@@ -151,6 +174,9 @@ LATEX_PREAMBLE = r"""\documentclass[UTF8,a4paper,12pt]{ctexart}
 \tracinglostchars=3
 \usepackage[hmargin=1.2in,vmargin=1in]{geometry}
 \usepackage{amsmath,amssymb}
+% Preserve styled digits, lowercase blackboard letters and other Unicode alphabets.
+% Load the math font only if a glyph needs it; respect the current script size.
+\DeclareRobustCommand{\AIRmathglyph}[1]{\text{\IfFontExistsTF{XITSMath-Regular.otf}{\fontspec{XITSMath-Regular.otf}}{\fontspec{latinmodern-math.otf}}\symbol{"#1}}}
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{array}
@@ -370,7 +396,7 @@ def _inline_math(value: str) -> str:
 
 def _normalize_unicode_math(text: str) -> str:
     """One normalization path, including indices and explicit math delimiters."""
-    text = _unicode_scripts(text, math_mode=True)
+    text = _styled_letters(_unicode_scripts(text, math_mode=True), math_mode=True)
     def replace(match):
         latex = _UNICODE_TO_LATEX_MATH[match.group()]
         # A following variable must not become part of a control word: ∈K -> \in K.
@@ -511,7 +537,8 @@ def escape_latex(text: str) -> str:
 
     text = _protect_bare_commands(text, _store_math)
     # Keep a relational expression together instead of emitting '$-$' per symbol.
-    plain_math = re.compile(r"[A-Za-z0-9\u0370-\u03ff_{}()\[\].,=+*/^<>!−×±≤≥≠ᵀ′″⁰¹²³⁴⁵⁶⁷⁸⁹ⁿⁱ⁻⁺⁼⁽⁾₀₁₂₃₄₅₆₇₈₉₋₊₌₍₎]+")
+    plain_math = re.compile(r"[A-Za-z0-9\u0370-\u03ff\u2100-\u214f\U0001d400-\U0001d7ff"
+                            r"_{}()\[\].,=+*/^<>!−×±≤≥≠⊂⊆⊃⊇∈∉ᵀ′″⁰¹²³⁴⁵⁶⁷⁸⁹ⁿⁱ⁻⁺⁼⁽⁾₀₁₂₃₄₅₆₇₈₉₋₊₌₍₎]+")
 
     def _protect_expression(match: re.Match) -> str:
         value = match.group(0)
@@ -524,7 +551,7 @@ def escape_latex(text: str) -> str:
                     return value
         if stack or re.search(r"[A-Za-z]{4,}_", value) or re.match(r"[A-Za-z]{4,}=", value):
             return value
-        if (re.search(r"[=<>≤≥≠]", value)
+        if (re.search(r"[=<>≤≥≠⊂⊆⊃⊇∈∉]", value)
                 and re.search(r"[_^\u0370-\u03ff−×±≤≥≠ᵀ′″]", value)):
             math_blocks.append("$" + _inline_math(value) + "$")
             return f"\x00MATH{len(math_blocks) - 1}\x00"
@@ -583,6 +610,7 @@ def escape_latex(text: str) -> str:
     # 放在最后: 它新造的 `$...$` (例如 `ᵀ`→`$^{\mathrm{T}}$`) 含 `^`, 而上面所有会
     # 改写 `^`/`_` 的步骤都已经过去了, 因此不会再被打到。
     text = _unicode_scripts(text, math_mode=False)
+    text = _styled_letters(text, math_mode=False)
     for char, latex in _UNICODE_TO_LATEX.items():
         if char in text:
             text = text.replace(char, latex)
@@ -824,8 +852,8 @@ def render_latex(manuscript: Manuscript, *, author: str = "AI Research Team",
     首次引用顺序分配, 这个映射只提供条目的**文字**; 缺条目时退回对象 id, 不编造作者
     与年份。
     """
-    from src.publication.tables import normalize_tables
-    manuscript = normalize_tables(manuscript)
+    from src.publication.tables import render_table_mentions
+    manuscript = render_table_mentions(manuscript)
     numbers = assign_render_numbers(manuscript)
     citations: dict[str, int] = numbers["citations"]
     labels = dict(references or {})

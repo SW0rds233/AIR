@@ -638,6 +638,11 @@ class AgentRuntime:
         `stage` 留空时按**主控**解析 —— 它是"这次运行有没有模型"的代表, 与
         `TeamRun.runtime.llm_available()` 的既有语义一致 (审计就是用它判断 G02)。
         """
+        from src.utils.network_budget import EVIDENCE_MODEL_LIMIT, current_budget
+        task_budget = current_budget()
+        if (task_budget and task_budget.role == "evidence"
+                and task_budget.state.evidence_model_attempts >= EVIDENCE_MODEL_LIMIT):
+            return False
         return self._resolve_llm(stage or "supervisor") is not None
 
     # ---- 成果校验 ----
@@ -729,7 +734,7 @@ class AgentRuntime:
         result.usage = result.usage
         self.emit("task_result", {"task_id": task.task_id, "agent": task.agent,
                                   "outcome": result.outcome.value,
-                                  "problems": problems,
+                                  "problems": problems + list(result.payload.get("candidate_problems") or []),
                                   "usage": result.usage.to_dict()})
         return result
 
@@ -857,9 +862,17 @@ class InProcessExecutor:
             result.payload["deferred"] = True
             result.payload["pending_resume"] = not bool(network.stop_reason)
             result.payload["deferred_reason"] = network.stop_reason or network.deferred_reason or "网络暂不可用"
-            result.payload['deferred_kind'] = ('budget' if network.stop_reason else 'deadline'
-                if network.remaining() <= 0 else 'network'
-                if network.state.unavailable_until > time.monotonic() else 'capacity')
+            if network.stop_reason:
+                kind = "budget"
+            elif network.poll_interrupted:
+                kind = "watchdog_gap"
+            elif network.remaining() <= 0:
+                kind = "deadline"
+            elif network.state.unavailable_until > time.monotonic():
+                kind = "network"
+            else:
+                kind = "capacity"
+            result.payload["deferred_kind"] = kind
             result.payload['retry_after_seconds'] = max(0,round(network.state.unavailable_until-time.monotonic()))
             result.unresolved.append(result.payload["deferred_reason"])
         result = self.runtime.finalize(task, result, grant)

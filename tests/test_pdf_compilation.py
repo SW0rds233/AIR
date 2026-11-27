@@ -10,6 +10,21 @@ from src.publication.schemas import Block, Manuscript, Section
 
 
 class PDFCompilationTest(unittest.TestCase):
+    def test_model_domain_stays_a_single_formula_before_chinese_annotation(self):
+        block = Block(role="table", data={"header": ["变量域"],
+                      "rows": [["𝕊⊂R_+^k×[0,1]^m；时点 t"]]})
+        tex = render_latex(Manuscript(sections=[Section(blocks=[block])]))
+        self.assertRegex(tex, r"\$\\mathbb\{S\}\\subset R_\+\^k\\times\[0,.*?1\]\^m\$；时点 t")
+
+    def test_styled_letters_keep_their_alphabet_in_prose_and_explicit_math(self):
+        value = escape_latex("集合 ℋ 与 $𝒮_i$，编号 𝟙 和 𝕫")
+        for marker in (r"\mathcal{H}", r"\mathcal{S}_i", r"\AIRmathglyph{1D7D9}",
+                       r"\AIRmathglyph{1D56B}"):
+            self.assertIn(marker, value)
+
+    def test_braced_variable_index_preceding_an_exponent_is_not_a_set(self):
+        self.assertEqual(escape_latex("C_{B,i,t}^{safe}"), "$C_{B,i,t}^{safe}$")
+
     def run_compiler(self, outcomes, output_elsewhere=False):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

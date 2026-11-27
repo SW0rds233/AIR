@@ -199,11 +199,15 @@ class ModelingAgent(AgentBase):
         candidates = self.repair_schema_once(
             candidates, task, runtime, usage, known_source_ids,
             supporting_sources=supporting_source_ids, known_inputs=known_input_ids)
+        binding_problems = []
+        known_claim_ids = {str(row["id"]) for row in claim_rows}
         for index, model in enumerate(candidates):
             model = normalise_model_candidate(model)
             claim_id = str(model.get('claim_id') or '')
-            if claim_id and claim_id not in {str(row['id']) for row in claim_rows}:
-                unknowns.append(f'候选模型 {index+1} 的 claim_id={claim_id} 未登记；保留未绑定模型，待明确关联')
+            if claim_id and claim_id not in known_claim_ids:
+                problem = f'候选模型 {index+1} 的 claim_id={claim_id} 未登记；保留未绑定模型，待明确关联'
+                binding_problems.append(problem)
+                unknowns.append(problem)
                 model['claim_id'] = ''
                 model['open_conditions'] = as_list_of_str(model.get('open_conditions')) + ['需明确关联的已登记命题']
             elif not claim_id and len(claim_rows) == 1:
@@ -243,7 +247,7 @@ class ModelingAgent(AgentBase):
             ))
         payload_out = {"schema": "ModelProposal/v1", "models": accepted_candidates,
                        "unknowns": unknowns, "fidelity_checks": checks,
-                       "schema_errors": schema_errors}
+                       "schema_errors": schema_errors, "candidate_problems": binding_problems}
         summary = f"提出 {len(changes)} 个候选模型"
         if checks:
             summary += f"; 忠实度检查发现 {len(checks)} 处需核查"

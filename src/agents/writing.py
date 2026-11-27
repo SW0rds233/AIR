@@ -35,6 +35,7 @@ from src.agents.writer_plan import (
     revision_section,
 )
 from src.publication.references import citation_suffix, research_citation_eligible
+from src.research.schemas import stable_id
 from src.publication.schemas import (
     Block,
     BlockRole,
@@ -115,6 +116,8 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
 展示公式放入 math 字段；aligned 等环境内不再嵌套 $，text 字段只保留正文与行内公式。
 公式内不要用 text 罗列超过三个中文路径名；索引取短符号，中文释义放正文或表格。
 同一模型只在方法节完整定义一次；结果节推演其含义，讨论节比较替代解释，结论直接回答问题。
+同一组变量集中在一张定义表。后续章节引用该表，只为新量或不同观测层级补充定义。
+表格引导段写出读者应比较的项目或由该表可见的限制。引用公式时说明用到哪一条关系以及推论所依赖的假设。
 不要在每节重抄同一公式、来源摘要和资料缺口。缺口在局限集中说明，其他章节只写相关影响。
 变量名称、含义、单位与效应尺度须全文一致；绝对变化与对数变化不能共用同一符号。
 区分纯定义、建模假设、假设下推论和经验发现，不把自选函数形式包装成事实上的必要条件。
@@ -174,6 +177,10 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
         if packet.is_revision():
             manuscript.manuscript_id = packet.revision_of
             manuscript.version = int(packet.prior_manuscript.get("version") or 1) + 1
+        else:
+            manuscript.manuscript_id = stable_id(
+                "ms", task.project_id, task.problem_id, task.run_id, task.task_id)
+            manuscript.version = 1
 
         # 两条起草路径在同一稿件 IR 层补齐出版结构，保证各格式同源。
         finalise_manuscript(manuscript, packet)
@@ -204,7 +211,7 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
                 blocking=True))
         changes = [ChangeProposal(
             kind="manuscript",
-            object_id=packet.revision_of,
+            object_id=manuscript.manuscript_id,
             payload=manuscript.to_dict(),
             rationale=f"第 {manuscript.version} 版稿件 ({len(manuscript.sections)} 节)",
             input_versions=dict(packet.input_versions),
@@ -373,10 +380,8 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
                 return None, "写作预算在分节起草时用尽"
             prior, issues = revision_section(packet, plan)
             material = _section_material(packet, str(plan["role"]), sources)
-            previous = "已写内容（避免重复定义与论证）: " + json.dumps([
-                {"heading": s["heading"], "paragraphs": [clip(str(b.get("text") or ""), 180)
-                    for b in s["blocks"]], "equations": [b.get("math") for b in s["blocks"] if b.get("math")]}
-                for s in sections], ensure_ascii=False)
+            previous = "已写内容（复用此前的符号与定义表）: " + json.dumps(
+                [_section_overview(section) for section in sections], ensure_ascii=False)
             prompt = (
                 f"研究问题: {packet.main_question or packet.original_request}\n"
                 f"论文大纲: {json.dumps(outline, ensure_ascii=False)}\n"
@@ -404,10 +409,9 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
                 ]), "content", ""))
             except Exception as error:  # noqa: BLE001 - 不拼接半篇论文
                 return None, f"章节 {index} 起草失败: {type(error).__name__}: {error}"
-            blocks = raw_section.get("blocks") if isinstance(raw_section, dict) else None
-            if not isinstance(blocks, list) or not any(
-                    isinstance(block, dict) and str(block.get("text") or "").strip()
-                    for block in blocks):
+            rows = raw_section.get("blocks") if isinstance(raw_section, dict) else None
+            blocks = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+            if not any(str(block.get("text") or "").strip() for block in blocks):
                 return None, f"章节 {index} 缺少可用正文: {note}"
             section_unresolved.extend(as_list_of_str(raw_section.get("unresolved"))[:6])
             sections.append({"heading": plan["heading"], "level": plan["level"],
@@ -417,13 +421,18 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
             f"{section['heading']}: " + " ".join(
                 clip(str(block.get("text") or ""), 240) for block in section["blocks"][:3]
                 if isinstance(block, dict)) for section in sections)
+        claim_states = [{"statement": clip(str(claim.get("statement") or ""), 300),
+                         "status": claim.get("status", "proposed"), "scope": claim.get("verification_scope")}
+                        for claim in packet.claims[:20]]
         try:
             raw_meta, _ = extract_json(getattr(llm.invoke([
                 SystemMessage(content=self.SYSTEM), HumanMessage(content=(
                     f"研究问题: {packet.main_question or packet.original_request}\n"
                     f"已写正文概览:\n{synopsis}\n"
+                    f"命题及其核验范围：{json.dumps(claim_states, ensure_ascii=False)}\n"
                     "据实际正文生成准确的学术标题、150–350 字摘要和 3–6 个关键词。"
                     "摘要依次说明问题、方法、已确定发现或候选框架、证据边界；"
+                    "没有已核验命题时，直接写模型提出了什么可检验关系以及什么观测可以区分候选解释。"
                     "不写修订过程，不把待核验候选称为实证结果。"
                     "只返回 JSON: {\"title\":\"\",\"abstract\":\"\","
                     "\"keywords\":[\"\"]}。")),
@@ -896,6 +905,21 @@ _REVISION_PROSE = re.compile(
 
 def _has_revision_changelog(text: str) -> bool:
     return bool(_REVISION_PROSE.search(text or ""))
+
+
+def _section_overview(section: dict) -> dict:
+    from src.publication.tables import valid_table
+
+    blocks = section["blocks"]
+    tables = []
+    for block in blocks:
+        data = block.get("data")
+        if valid_table(data):
+            tables.append({"title": block.get("heading"), "columns": data["header"],
+                           "row_labels": [clip(str(row[0]), 80) for row in data["rows"][:30]]})
+    return {"heading": section["heading"], "tables": tables,
+            "paragraphs": [clip(str(block.get("text") or ""), 180) for block in blocks],
+            "equations": [block["math"] for block in blocks if block.get("math")]}
 
 
 def _prior_section_brief(section: dict[str, Any]) -> str:
@@ -1503,8 +1527,8 @@ def render_markdown(manuscript: Manuscript, *,
     """把稿件渲染为 Markdown (保守: 不执行任何来源文本, 编号在渲染时分配)。"""
     from src.publication.schemas import assign_render_numbers
 
-    from src.publication.tables import normalize_tables, markdown_table
-    manuscript = normalize_tables(manuscript)
+    from src.publication.tables import render_table_mentions, markdown_table
+    manuscript = render_table_mentions(manuscript)
     numbers = assign_render_numbers(manuscript)
     lines: list[str] = [f"# {manuscript.title}", ""]
     if manuscript.abstract:
