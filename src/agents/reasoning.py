@@ -482,6 +482,7 @@ class ReasoningAgent(AgentBase):
             return self.blocked(
                 task, registration_errors[0] if registration_errors else "没有可审查的新增推理产出",
                 needs=needs,
+                unresolved=registration_errors,
                 usage=usage, payload=payload_out)
         if registration_errors:
             return self.partial(task, summary, changes=changes, needs=needs,

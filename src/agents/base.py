@@ -314,18 +314,23 @@ class AgentBase:
                 needs: list[ResearchNeed] | None = None,
                 summary: str = "", usage: UsageRecord | None = None,
                 payload: dict[str, Any] | None = None,
-                changes: list[ChangeProposal] | None = None) -> AgentResult:
+                changes: list[ChangeProposal] | None = None,
+                unresolved: list[str] | None = None) -> AgentResult:
         """受阻结果: 必须说明缺什么, 否则主控无从补派工。
 
         `changes` 必须接受: 受阻**不等于什么都没产出** —— 检索受阻时"新颖性未对照"
         这条记录仍然要落盘 (省略它会让交付物看起来没有新颖性问题)。此前这个入参不
         存在, 于是调用方一传就整条任务 `failed`, 而卡片上只写"成果不符合契约"。
+
+        `unresolved` 用于把"受阻的具体未决项" (例如候选未登记的校验错误) 带到主控
+        与报告里; 只填 `reason` 会让它在 `AgentResult.unresolved` 里丢掉。
         """
         return AgentResult(
             task_id=task.task_id, agent=role_of(self.role) or self.role,
             outcome=TaskOutcome.blocked, summary=summary or reason,
             proposed_changes=list(changes or []),
             failure_reason=reason, followup_needs=list(needs or []),
+            unresolved=list(unresolved or []),
             usage=usage or UsageRecord(), payload=dict(payload or {}),
             replan=True,
         )

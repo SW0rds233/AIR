@@ -628,9 +628,11 @@ class TeamRun:
                     self.runtime.emit("run_stopped", {"reason": state.stop_reason})
                     return False
                 # An earlier task in this batch may have consumed the last call.
+                network = self._network_state()
                 if (task.agent == "evidence" and task.task_id not in state.results
                         and not metadata_repair(task.hints)
-                        and self.runtime.network_state.evidence_model_attempts >= EVIDENCE_MODEL_LIMIT):
+                        and network is not None
+                        and network.evidence_model_attempts >= EVIDENCE_MODEL_LIMIT):
                     self.runtime.emit("evidence_task_skipped", {
                         "task_id": task.task_id, "reason": "证据层模型调用额度已用尽",
                     })
@@ -898,9 +900,10 @@ class TeamRun:
         if task.agent == "review":
             task.hints["review_threshold"] = self.review_threshold
         context = self._build_context(task, results)
-        if task.agent == "evidence":
-            self.runtime.network_state.evidence_model_attempts = max(
-                self.runtime.network_state.evidence_model_attempts,
+        network = self._network_state()
+        if task.agent == "evidence" and network is not None:
+            network.evidence_model_attempts = max(
+                network.evidence_model_attempts,
                 sum(int(r.payload.get("model_attempts", r.usage.llm_calls))
                     for r in results.values() if r.agent == "evidence"))
         try:
@@ -1335,6 +1338,15 @@ class TeamRun:
         event = "watchdog_task_retry_scheduled" if kind == "watchdog_gap" else "network_task_retry_scheduled"
         self.runtime.emit(event, {"task_id": task.task_id, "attempt": row["attempt"]})
         return True
+
+    def _network_state(self):
+        """本运行的网络/模型额度状态。
+
+        轻量测试替身可以不带 `runtime` 或 `network_state` (例如只实现 `emit` 的
+        SimpleNamespace, 或用 `__new__` 拼起来的 TeamRun): 此时视为额度尚未用尽,
+        而不是让整轮崩溃。
+        """
+        return getattr(getattr(self, "runtime", None), "network_state", None)
 
     def _wait_for_network(self, task, state) -> bool:
         network = self.runtime.network_state
