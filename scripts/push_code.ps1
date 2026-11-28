@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    推送代码/文档提交到远端，把 evals/reports/ 下的审查报告永久留在本地。
+    推送代码/文档提交到远端，把 evals/reports/ 下的审查报告正文永久留在本地。
 
 .DESCRIPTION
     本仓库口径（见 evals/reports/README.md「落点与推送口径」）：
@@ -11,8 +11,9 @@
 
     两者都在 `master` 上，直接 `git push` 必然把报告一起带上远端，所以推送统一走本脚本：
 
-      1. 把 `origin/master..master` 的提交分成「代码类」与「报告类」
-         （改动路径含 `evals/reports/` 即为报告类）；
+      1. 把 `origin/master..master` 的提交按改动分类：
+         * 「报告类」= 新增/修改 `evals/reports/` 下的报告正文（`README.md` 是索引，不算正文）；
+         * 「代码类」= 其余改动，含**删除**报告正文（远端树维护，例如清理历史报告）。
       2. 若有代码提交排在报告提交之上（历史交错），先在远端基点重放代码提交，
          再把报告提交重放到顶端，维持「报告永远是最上面的提交」这一不变量；
       3. 只推送代码类提交的顶端：`git push origin <tip>:refs/heads/master`；
@@ -46,6 +47,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ReportPrefix = "evals/reports/"
+$ReportIndex = "evals/reports/README.md"
 $remoteRef = "$Remote/$Branch"
 
 function Invoke-Git {
@@ -54,16 +56,27 @@ function Invoke-Git {
     return [pscustomobject]@{ Code = $LASTEXITCODE; Lines = @($out | ForEach-Object { "$_" }) }
 }
 
-function Get-TouchedPaths {
+function Get-Changes {
     param([string]$Sha)
     # core.quotepath=false：否则含中文的路径会被转义成 "evals/reports/\346..." 形式，分组就会判错
-    $r = Invoke-Git @("-c", "core.quotepath=false", "show", "--no-renames", "--name-only", "--format=", $Sha)
-    return @($r.Lines | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim().Trim('"') })
+    $r = Invoke-Git @("-c", "core.quotepath=false", "show", "--no-renames", "--name-status", "--format=", $Sha)
+    $changes = @()
+    foreach ($line in $r.Lines) {
+        if (-not $line -or -not $line.Trim()) { continue }
+        $parts = $line -split "`t"
+        if ($parts.Count -lt 2) { continue }
+        $changes += [pscustomobject]@{ Status = $parts[0].Trim(); Path = $parts[1].Trim().Trim('"') }
+    }
+    return $changes
 }
 
 function Test-ReportCommit {
-    param([string]$Sha)
-    return [bool](Get-TouchedPaths -Sha $Sha | Where-Object { $_ -like "$ReportPrefix*" })
+    param($Changes)
+    # 报告正文的新增/修改/改名才算「报告类」；删除正文是远端树维护，跟代码一起推
+    $body = @($Changes | Where-Object {
+            $_.Path -like "$ReportPrefix*" -and $_.Path -ne $ReportIndex -and $_.Status -notlike "D*"
+        })
+    return ($body.Count -gt 0)
 }
 
 function Get-Subject {
@@ -90,16 +103,21 @@ try {
 
     $code = @()
     $report = @()
+    $deletions = @()
     $seenReport = $false
     $interleaved = $false
     foreach ($sha in $range) {
-        if (Test-ReportCommit -Sha $sha) {
+        $changes = Get-Changes -Sha $sha
+        if (Test-ReportCommit -Changes $changes) {
             $seenReport = $true
             $report += $sha
         }
         else {
             if ($seenReport) { $interleaved = $true }
             $code += $sha
+            $deletions += @($changes | Where-Object {
+                    $_.Path -like "$ReportPrefix*" -and $_.Path -ne $ReportIndex -and $_.Status -like "D*"
+                } | ForEach-Object { $_.Path })
         }
     }
 
@@ -107,10 +125,14 @@ try {
     foreach ($sha in $code) {
         Write-Host ("  [推送] {0} {1}" -f $sha.Substring(0, 7), (Get-Subject -Sha $sha))
     }
+    if ($deletions.Count -gt 0) {
+        Write-Host ("  [推送] 该推送会从远端树删除 {0} 份报告正文：" -f $deletions.Count) -ForegroundColor Yellow
+        $deletions | ForEach-Object { Write-Host "         $_" -ForegroundColor Yellow }
+    }
     foreach ($sha in $report) {
-        $extra = @(Get-TouchedPaths -Sha $sha | Where-Object { $_ -notlike "$ReportPrefix*" })
+        $extra = @((Get-Changes -Sha $sha) | Where-Object { $_.Path -notlike "$ReportPrefix*" })
         if ($extra.Count -gt 0) {
-            Write-Host ("  [本地] {0} {1}  ⚠ 该提交同时改了非报告路径，这些改动不会推送：{2}" -f $sha.Substring(0, 7), (Get-Subject -Sha $sha), ($extra -join ", ")) -ForegroundColor Yellow
+            Write-Host ("  [本地] {0} {1}  ⚠ 该提交同时改了非报告路径，这些改动不会推送：{2}" -f $sha.Substring(0, 7), (Get-Subject -Sha $sha), (($extra | ForEach-Object { $_.Path }) -join ", ")) -ForegroundColor Yellow
         }
         else {
             Write-Host ("  [本地] {0} {1}" -f $sha.Substring(0, 7), (Get-Subject -Sha $sha)) -ForegroundColor DarkGray
