@@ -1,16 +1,24 @@
 #!/bin/sh
-# 推送守卫：evals/reports/ 下的审查报告只提交到本地，不进入远端历史。
+# 推送守卫：evals/reports/ 下的审查报告正文只提交到本地，不进入远端历史。
 #
 # 启用（仓库本地配置，不随仓库分发）：
 #   git config --local core.hooksPath .githooks
 #
 # 报告与代码都在 master 上时直接 git push 会把报告一起推上去，因此拦截并指向
 # scripts/push_code.ps1（它只推代码类提交，报告留在本地）。
+#
+# 例外：**删除**报告正文的提交允许推送——那是远端树的清理动作；README.md 是索引，不算正文。
 
 zero=$(printf '%0.40s' 0)
 status=0
 
 while read -r local_ref local_sha remote_ref remote_sha; do
+    # 去掉可能的 CR（Windows 侧写入的 stdin 会带 \r，否则 range 解析失败）
+    local_ref=$(printf '%s' "$local_ref" | tr -d '\r')
+    local_sha=$(printf '%s' "$local_sha" | tr -d '\r')
+    remote_ref=$(printf '%s' "$remote_ref" | tr -d '\r')
+    remote_sha=$(printf '%s' "$remote_sha" | tr -d '\r')
+
     case "$remote_ref" in
         refs/heads/*) ;;
         *) continue ;;
@@ -24,9 +32,24 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         range="$remote_sha..$local_sha"
     fi
 
-    hits=$(git rev-list "$range" -- evals/reports 2>/dev/null | head -n 5)
+    # 只挑「新增/修改/改名」报告正文的提交；纯删除放行
+    hits=$(git rev-list "$range" | while read -r commit; do
+        git -c core.quotepath=false show --no-renames --name-status --format= "$commit" 2>/dev/null |
+            while IFS="	" read -r st path; do
+                case "$path" in
+                    evals/reports/README.md) continue ;;
+                    evals/reports/*)
+                        case "$st" in
+                            D*) ;;
+                            *) echo "$commit $path" ;;
+                        esac
+                        ;;
+                esac
+            done
+    done | head -n 5)
+
     if [ -n "$hits" ]; then
-        echo "pre-push 拒绝：这次推送包含 evals/reports/ 下的报告提交（口径：报告只留本地）。" >&2
+        echo "pre-push 拒绝：这次推送包含 evals/reports/ 下的报告正文（口径：报告只留本地）。" >&2
         echo "$hits" | sed 's/^/  /' >&2
         echo "请改用：pwsh -File scripts/push_code.ps1" >&2
         status=1

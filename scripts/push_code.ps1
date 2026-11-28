@@ -207,9 +207,8 @@ try {
             $pushed = $true
             break
         }
-        $reason = @($out | Where-Object { "$_" -match 'error|fatal|rejected|failed' } | Select-Object -Last 1)[0]
-        if (-not $reason) { $reason = @($out | Select-Object -Last 1)[0] }
-        Write-Host ("  失败：{0}" -f $reason) -ForegroundColor DarkYellow
+        $tail = @($out | Where-Object { "$_".Trim() } | Select-Object -Last 4)
+        $tail | ForEach-Object { Write-Host ("  失败：{0}" -f $_) -ForegroundColor DarkYellow }
     }
     if (-not $pushed) { throw "推送失败：所有尝试均未成功（代码提交仍安全留在本地）。" }
 
