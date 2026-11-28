@@ -19,7 +19,7 @@ def build_paper_outline(packet: WritingPacket) -> list[dict[str, str | int]]:
                "证据现状与未决问题")
     return [
         {"heading": "引言", "level": 1, "role": "introduction",
-         "purpose": "提出研究问题、研究范围、贡献与本文结构；不汇报修订过程。"},
+         "purpose": "从需要解释的现象或两种不同预测入手，指出已有解释缺少哪一步，再提出本文能够回答的问题。"},
         {"heading": "相关研究与研究缺口", "level": 1, "role": "literature",
          "purpose": "按主题比较文献的方法、适用域和局限；以引用支持具体陈述。"},
         {"heading": "研究设计与资料基础", "level": 1, "role": "method",
@@ -32,28 +32,76 @@ def build_paper_outline(packet: WritingPacket) -> list[dict[str, str | int]]:
                      if packet.claims or packet.models else
                      "如实汇总已登记证据及当前未决问题；没有模型或命题时不编造机制。")},
         {"heading": "讨论与局限", "level": 1, "role": "discussion",
-         "purpose": "比较解释、适用域、反事实与未决项；说明进一步验证所需资料。"},
+         "purpose": "选取会改变核心结论的一个前提，比较它成立和失效时的预测，给出能够区分两者的观测或实验。"},
         {"heading": "结论", "level": 1, "role": "conclusion",
-         "purpose": "直接回答研究问题，区分已知、候选与未知；不给出未经验证的方向或数值。"},
+         "purpose": "用读者关心的量回答开篇问题，说清推导止于哪一环，以及这对解释结果有什么影响。"},
     ]
 
 
 def refine_outline(raw: Any, baseline: list[dict[str, str | int]]) -> list[dict[str, str | int]]:
-    """Accept model wording only when the argument's required roles survive."""
+    """Keep the inferential roles while allowing a shorter paper or distinct results."""
     rows = raw.get("sections") if isinstance(raw, dict) else None
-    if not isinstance(rows, list) or len(rows) != len(baseline):
+    if not isinstance(rows, list) or not 4 <= len(rows) <= len(baseline):
+        return baseline
+    order = ("introduction", "literature", "method", "result", "discussion", "conclusion")
+    roles = [row.get("role") if isinstance(row, dict) else None for row in rows]
+    if (any(role not in order for role in roles)
+            or not {"introduction", "method", "result", "conclusion"}.issubset(roles)
+            or roles.count("introduction") != 1 or roles.count("conclusion") != 1
+            or sorted(roles, key=order.index) != roles):
         return baseline
     refined = []
-    for row, expected in zip(rows, baseline):
-        if not isinstance(row, dict) or row.get("role") != expected["role"]:
-            return baseline
+    for index, row in enumerate(rows):
         heading = str(row.get("heading") or "").strip()
         purpose = str(row.get("purpose") or "").strip()
         if (not heading or len(heading) > 80 or not purpose or len(purpose) > 260
                 or any(term in heading + purpose for term in ("上一版", "本版", "审阅意见"))):
             return baseline
-        refined.append({**expected, "heading": heading, "purpose": purpose})
+        if any(section["heading"] == heading for section in refined):
+            return baseline
+        level = 2 if index and roles[index] == roles[index - 1] else 1
+        refined.append({"role": row["role"], "heading": heading, "purpose": purpose, "level": level})
     return refined
+
+
+def claim_basis(packet: WritingPacket) -> list[dict[str, Any]]:
+    """Pair each current statement with the actual checked expression and open conditions."""
+    basis = []
+    for claim in packet.claims[:20]:
+        claim_id = claim.get("id")
+        if not claim_id:
+            continue
+        version = claim.get("version") or 1
+
+        def current(row):
+            return (row.get("claim_id") == claim_id and str(row.get("claim_version") or 1) == str(version)
+                    and not row.get("stale"))
+
+        checked = []
+        for record in packet.verifications:
+            if (not current(record) or record.get("validation_status") != "verified"
+                    or record.get("usable") is False):
+                continue
+            arguments = record.get("arguments") or {}
+            target = arguments.get("conclusion") or record.get("checked_formula")
+            if not target:
+                continue
+            proof = {"id": record.get("id"), "scope": record.get("scope"),
+                     "premises": arguments.get("premises") or record.get("premises") or [],
+                     "target": target}
+            for key in ("variables", "assumptions"):
+                if arguments.get(key):
+                    proof[key] = arguments[key]
+            if record.get("assumption_ids"):
+                proof["assumption_ids"] = record["assumption_ids"]
+            checked.append(proof)
+        checked.sort(key=lambda proof: proof["scope"] != "target")
+        basis.append({"id": claim_id, "version": version, "status": claim.get("status", "proposed"),
+                      "statement": claim.get("statement"), "checked": checked[:4],
+                      "open_conditions": [o.get("statement") for o in packet.obligations
+                                          if current(o) and o.get("status", "open") in {"open", "blocked"}
+                                          and o.get("statement")]})
+    return basis
 
 
 def linked_source_ids(packet: WritingPacket) -> set[str]:

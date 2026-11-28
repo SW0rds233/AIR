@@ -14,10 +14,17 @@ class _Metadata(HTMLParser):
         self.scripts = []
         self.exports = []
         self._script = None
+        self._in_breadcrumbs = False
+        self._issue_label = None
+        self.issue_titles = []
 
     def handle_starttag(self, tag, attrs):
         row = dict(attrs)
-        if tag == 'meta':
+        if tag == 'nav':
+            self._in_breadcrumbs = 'cmp_breadcrumbs' in (row.get('class') or '').split()
+        elif tag == 'a' and self._in_breadcrumbs and '/issue/view/' in (row.get('href') or ''):
+            self._issue_label = []
+        elif tag == 'meta':
             self.rows.append((str(row.get('name') or row.get('property') or '').lower(),
                               row.get('content') or '', row.get('xml:lang') or row.get('lang') or ''))
         elif tag == 'script' and row.get('type') == 'application/ld+json':
@@ -29,11 +36,18 @@ class _Metadata(HTMLParser):
     def handle_data(self, data):
         if self._script is not None:
             self._script += data
+        if self._issue_label is not None:
+            self._issue_label.append(data)
 
     def handle_endtag(self, tag):
         if tag == 'script' and self._script is not None:
             self.scripts.append(self._script)
             self._script = None
+        elif tag == 'a' and self._issue_label is not None:
+            self.issue_titles.append(' '.join(''.join(self._issue_label).split()))
+            self._issue_label = None
+        elif tag == 'nav':
+            self._in_breadcrumbs = False
 
 
 def publisher_authors(html, doi, *, url=''):
@@ -119,6 +133,18 @@ def publisher_metadata(html, doi, *, url=''):
                   'volume':'citation_volume', 'issue':'citation_issue', 'issn':'citation_issn',
                   'publisher':'citation_publisher', 'published_date':'citation_publication_date'}
         out.update({key:values[tag] for key, tag in fields.items() if values.get(tag)})
+        conference = values.get('citation_conference_title')
+        if not conference:
+            # OJS publishes journals and proceedings. Use the *current issue*
+            # breadcrumb; a conference mentioned in references is unrelated.
+            proceedings = {title for title in parser.issue_titles if re.search(
+                r'\bproceedings?\s+of\b.*\b(conference|symposium|workshop|congress)\b', title, re.I)}
+            if len(proceedings) == 1 and re.search(r'\bproceedings?\b', out.get('venue', ''), re.I):
+                conference = proceedings.pop()
+        if conference:
+            out.update(venue=conference, conference_title=conference, publication_type='proceedings-article')
+        if 'citation_volume' in values and not values['citation_volume']:
+            out['volume'] = ''
         out['pages'] = '-'.join(dict.fromkeys(values[tag] for tag in (
             'citation_firstpage', 'citation_lastpage') if values.get(tag)))
     for script in parser.scripts:

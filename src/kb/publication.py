@@ -136,7 +136,7 @@ def verify_publication(paper, fetch=None, *, force=False, author_fetch=None, met
                        publisher_fetch=None, metadata_urls=()):
     """Title+author identity is required; a DOI or arXiv journal-ref alone is not proof."""
     author_issues = author_metadata_problems(paper)
-    if citation_eligible(paper) and not force:
+    if citation_eligible(paper) and not force and not _conference_type_conflict(paper):
         return dict(paper)
     fetch = fetch or _fetch
     out, candidates, errors = dict(paper), [], []
@@ -216,6 +216,10 @@ def verify_publication(paper, fetch=None, *, force=False, author_fetch=None, met
         out["publication_note"] = "题名和作者已匹配正式出版记录；摘录仍需核查版本差异" if preprint_url else "正式出版元数据已核查"
         provenance.update({key: match.get('publication_source_url') or match.get('url')
             for key, value in match.items() if value and key not in {'publication_note', 'publication_status'}})
+        prior_source = _provenance(paper).get('conference_title')
+        if (same_version and prior_source and paper.get('conference_title') and _conference_type_conflict(match)):
+            out.update(publication_type='proceedings-article', venue=paper['conference_title'])
+            provenance.update(venue=prior_source, publication_type=prior_source)
         if out.get('author_verified_by') == 'publisher' and out.get('author_source_url'):
             provenance.update({key:out['author_source_url'] for key in ('authors', 'author_metadata')})
         out['metadata_provenance'] = json.dumps(provenance, ensure_ascii=False)
@@ -243,7 +247,8 @@ def verify_publication(paper, fetch=None, *, force=False, author_fetch=None, met
         except Exception as exc:
             errors.append(_failure('OpenAlex DOI补充核查', exc))
     check_authors = bool(author_issues or author_metadata_problems(out) or (force and not metadata_only))
-    if doi and (check_authors or (force and (not match or any(not out.get(k) for k in ('volume', 'issue', 'pages'))))):
+    check_type = _conference_type_conflict(out)
+    if doi and (check_authors or check_type or (force and (not match or any(not out.get(k) for k in ('volume', 'issue', 'pages'))))):
         from src.kb.publisher_metadata import fetch_publisher_metadata
         try:
             correction = (author_fetch(doi) if author_fetch else
@@ -268,6 +273,14 @@ def verify_publication(paper, fetch=None, *, force=False, author_fetch=None, met
                 if correction.get(key):
                     out[key] = correction[key]
             provenance = _provenance(out)
+            exact_page = normalize_doi(correction.get('doi')).lower() == doi.lower()
+            if exact_page and correction.get('conference_title') and correction.get('publication_type') == 'proceedings-article':
+                for key in ('publication_type', 'venue', 'conference_title'):
+                    out[key] = correction[key]
+                    provenance[key] = correction.get('publication_source_url', '')
+            if exact_page and out.get('volume') == '0' and correction.get('volume') == '':
+                out['volume'] = ''
+                provenance['volume'] = correction.get('publication_source_url', '')
             if correction.get('authors'):
                 provenance.update({key:correction.get('author_source_url', '') for key in ('authors', 'author_metadata')})
             for key in ('volume', 'issue', 'pages', 'issn', 'publisher', 'published_date'):
@@ -282,3 +295,11 @@ def verify_publication(paper, fetch=None, *, force=False, author_fetch=None, met
                        + '; '.join(errors or author_issues or author_metadata_problems(out)
                                    or ['未取得 DOI 匹配的出版原页作者列表']))
     return out
+
+
+def _conference_type_conflict(record):
+    """A series name triggers a check. It cannot by itself override the registry type."""
+    venue = str(record.get('venue') or '')
+    return (record.get('publication_type') == 'journal-article'
+            and re.search(r'\bproceedings?\b', venue, re.I) is not None
+            and re.search(r'\b(?:conference|congress|workshop|symposium)\b', venue, re.I) is not None)

@@ -125,6 +125,9 @@ class ReviewAgent(AgentBase):
 可区分的后续检验连成清楚的论证链，并如实标明未决，就不得仅因“没有定论”扣分。
 优先审阅段落之间的推理是否连贯、术语和变量是否一致、每一步是否由前提或证据支撑；
 把“行文合理”与“事实已证实”分开评价，不能为追求可读性放松引文和越权断言检查。
+当稿件串联两个模型，核对前一个输出和后一个输入的事件、总体、单位及前提是否相同。
+若中间量被解释为实际行为或观测效应，指出缺少的决策规则或可区分解释的观测。
+如重复妨碍理解，请定位两处具体段落，说明应保留哪一步推导、另一处应回答什么问题。
 
 纪律:
 - 你只能**提出意见**与建议降级; 你不得宣称某条结论成立 (不得升级);
@@ -317,6 +320,13 @@ class ReviewAgent(AgentBase):
         checks = payload.get("previous_issue_checks", []) if isinstance(payload, dict) else []
         checks = [check for check in checks if isinstance(check, dict)] if isinstance(checks, list) else []
         issues = _reuse_review_ids(_merge_issues(issues, deterministic), context, checks)
+        # The model supplies object IDs. Bind its finding to the scientific
+        # version actually supplied to this review, including after claim repair.
+        claim_versions = {row["id"]: row.get("version", 1) for row in context.objects.get("claim") or []
+                          if row.get("id")}
+        for issue in issues:
+            issue.affected_refs = [ObjectRef(id=ref.id, version=claim_versions[ref.id])
+                                   if ref.id in claim_versions else ref for ref in issue.affected_refs]
         issues = _route_unverified_source_repairs(issues, context)
         issues = [issue for issue in issues if issue.category not in excluded]
         if parse_note:
@@ -1083,6 +1093,8 @@ def repair_owner(issue: ReviewIssueRef) -> str:
         return 'reasoning'  # Only this role may revise registered claims.
     if issue.repair_action in {"verify_source", "replace_source"}:
         return "evidence"
+    if _prose_correction(issue):
+        return "writing"
     if (issue.category in {'science','fidelity'}
             and re.search(r'模型.{0,18}(?:缺|未|没有)|(?:补充|增加|建立).{0,12}(?:模型|方程)',
                           issue.summary + ' ' + issue.detail + ' '.join(issue.acceptance))):
@@ -1097,7 +1109,22 @@ def repair_owner(issue: ReviewIssueRef) -> str:
         "science": "reasoning", "fidelity": "modeling", "figure": "figures"}.get(issue.category, "")
 
 
+def _prose_correction(issue: ReviewIssueRef) -> bool:
+    """A quoted overstatement can be corrected within an unchanged model."""
+    if (issue.category not in {"science", "fidelity"} or issue.suggested_owner != "writing"
+            or issue.repair_action != "revise_text"
+            or not issue.quoted_text or not any(ref.id.startswith("blk-") for ref in issue.affected_refs)):
+        return False
+    # Explicit edits to the mathematical object still require its owner.
+    return not any(re.search(
+        r"(?:修正|修改|重写|补充|增加|建立|更新)\s*(?:当前|原|该|新的?)?\s*"
+        r"(?:模型|方程|命题(?:编码)?|formal_spec|mechanism_links)", criterion, re.I)
+        for criterion in issue.acceptance)
+
+
 def _claim_repair_target(issue):
+    if _prose_correction(issue):
+        return ""
     targets = [ref.id for ref in issue.affected_refs if ref.id.startswith('clm-')]
     text = ' '.join([issue.summary, issue.detail, *issue.acceptance])
     if (targets and issue.category in {'science', 'fidelity'}

@@ -34,6 +34,7 @@ class PublicationMetadata(BaseModel):
     publication_source_url: str = ""
     publisher_url: str = ""
     metadata_provenance: str = ""  # JSON field -> authoritative retrieval URL.
+    conference_title: str = ""  # Named meeting or proceedings confirmed on the article page.
 
 
 BIBLIO_FIELDS = tuple(PublicationMetadata.model_fields)
@@ -90,7 +91,8 @@ def author_metadata_problems(source: dict) -> list[str]:
     for name in names:
         text = (str(name.get('name') or '') or ' '.join(str(name.get(k) or '') for k in ('family','given'))
                 ) if isinstance(name, dict) else str(name)
-        if re.search(r'\b\d{5,6}\b|@', text) or (len(text) > 140 and re.search(r'[;；]', text)):
+        # Word boundaries in Unicode treat 北京100101 as a single word.
+        if re.search(r'\b\d{5,6}\b|@', text, re.ASCII) or (len(text) > 140 and re.search(r'[;；]', text)):
             return ['作者字段含地址或多个机构串，须回出版原页核对完整作者列表']
         if isinstance(name, dict) and name.get('name') and not name.get('family'):
             continue  # A corporate author is legitimate; an address is not.

@@ -331,20 +331,22 @@ class VerificationService:
             updates["coverage"] = Coverage.target
             updates["support_kind"] = extra.get("support_kind", SupportKind.informal_argument)
         record = None
+        result = None
         if ok:
             from src.research.theorist import PlannedCheck
 
+            result = VerificationResult(tool="rule", status=VerificationStatus.passed,
+                                        certificate=certificate, detail=certificate)
             record = self._record_from(
                 claim, obligation,
                 PlannedCheck(tool="rule", operation=obligation.kind,
                              arguments={"kind": obligation.kind}),
-                VerificationResult(tool="rule", status=VerificationStatus.passed,
-                                   certificate=certificate, detail=certificate),
+                result,
                 record_id=f"ver-{claim.id}-{obligation.id}",
                 usable=True,
                 support_kind=extra.get("support_kind", SupportKind.informal_argument))
         return CheckOutcome(
-            tool="rule", evaluated=True, closed=ok, record=record,
+            tool="rule", evaluated=True, closed=ok, record=record, result=result,
             obligation_updates=updates,
             events=[("obligation_closed", {"claim_id": claim.id,
                                            "obligation_id": obligation.id,
@@ -535,7 +537,8 @@ def _rule_verdict(claim: Any, obligation: ProofObligation,
 
     if kind == "evidence_support":
         supporters = [e for e in evidence
-                      if getattr(e, "support_scope", "claim") == "claim" and getattr(e, "support", None) in (
+                      if e.claim_id == claim.id and e.claim_version == claim.version
+                      and getattr(e, "support_scope", "claim") == "claim" and getattr(e, "support", None) in (
                           SupportKindOfEvidence.supports,
                           SupportKindOfEvidence.partially_supports)]
         design = study.design

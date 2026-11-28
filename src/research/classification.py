@@ -14,9 +14,18 @@ def has_empirical_context(claim: Any) -> bool:
     study = _study(claim)
     if study.get("design", "none") not in ("none", "theory", ""):
         return True
-    return any(study.get(key) for key in (
+    if any(study.get(key) for key in (
         "rows", "data_ref", "data_table", "population", "region", "period",
-        "treatment", "outcome", "measurement_notes", "treatment_col", "outcome_col"))
+        "treatment", "outcome", "treatment_col", "outcome_col")):
+        return True
+    get = claim.get if isinstance(claim, dict) else lambda key: getattr(claim, key, None)
+    if get("effect_estimate") or study.get("data_source_kind") not in (None, "", "unspecified"):
+        return True
+    if study.get("design") == "theory" and get("formal_spec") and not uses_population_scope(claim):
+        # A parameter's measurement notes may describe what would be needed to
+        # apply a conditional theorem. They are not themselves observations.
+        return False
+    return bool(study.get("measurement_notes"))
 
 
 def uses_population_scope(claim: Any) -> bool:

@@ -29,6 +29,7 @@ from src.agents.runtime import AgentRuntime, ToolSpec
 from src.agents.tools import latex_tool
 from src.agents.writer_plan import (
     build_paper_outline,
+    claim_basis,
     linked_source_ids,
     rank_sources,
     refine_outline,
@@ -240,7 +241,8 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
                         usage: UsageRecord, packet: WritingPacket) -> tuple[Manuscript | None, str]:
         """Cover all located blocks in bounded batches, preserving partial work."""
         prior = Manuscript.model_validate(packet.prior_manuscript)
-        targets = revision_targets(prior, packet.review_issues, task.hints, limit=None)
+        versions = {c["id"]: int(c.get("version") or 1) for c in packet.claims if c.get("id")}
+        targets = revision_targets(prior, packet.review_issues, task.hints, limit=None, claim_versions=versions)
         if not targets:
             return self._patch_batch_with_llm(task, runtime, usage, packet)
         current, notes, changed = prior, [], []
@@ -250,7 +252,7 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
                 break
             next_packet = packet.model_copy(update={'prior_manuscript':current.to_dict()})
             patched, note = self._patch_batch_with_llm(task, runtime, usage, next_packet,
-                target_ids=[b.block_id for b in targets[offset:offset+12]])
+                target_ids=[b.block_id for b in targets[offset:offset+12]], check_abstract=(offset == 0))
             if note:
                 notes.append(note)
             if patched is None:
@@ -260,6 +262,21 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
         if not changed:
             return None, '; '.join(notes) or '未产生有效修订'
         pending = [b.block_id for b in targets if b.block_id not in changed]
+        # Retire handled parts of earlier pending batches without declaring
+        # their underlying scientific issues resolved before independent review.
+        retained_gaps = []
+        for gap in current.gaps:
+            if gap.get("kind") == "revision_pending" and gap.get("block_ids"):
+                rest = [key for key in gap["block_ids"] if key not in changed and key not in pending]
+                if not rest:
+                    continue
+                gap = {**gap, "block_ids": rest}
+            retained_gaps.append(gap)
+        current.gaps = retained_gaps
+        stale = {b.block_id: [r.id for k, r in zip(b.ref_kinds, b.refs)
+                             if k == "claim" and r.version < versions.get(r.id, r.version)]
+                 for b in current.all_blocks() if b.block_id in changed}
+        current.revision_log[-1]["unchecked_claim_refs"] = {key: ids for key, ids in stale.items() if ids}
         current.revision_log[-1]['unaddressed_blocks'] = pending
         if pending:
             current.gaps.append({'kind':'revision_pending', 'block_ids':pending,
@@ -267,13 +284,15 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
         return current, '; '.join(notes)
 
     def _patch_batch_with_llm(self, task: AgentTask, runtime: AgentRuntime,
-                        usage: UsageRecord, packet: WritingPacket, *, target_ids=None) -> tuple[Manuscript | None, str]:
+                        usage: UsageRecord, packet: WritingPacket, *, target_ids=None,
+                        check_abstract=True) -> tuple[Manuscript | None, str]:
         """Patch located blocks using registered sources; preserve scientific object identities."""
         import json
         from langchain_core.messages import HumanMessage, SystemMessage
 
         prior = Manuscript.model_validate(packet.prior_manuscript)
-        targets = ([b for b in prior.all_blocks() if b.block_id in target_ids] if target_ids is not None
+        by_id = {b.block_id: b for b in prior.all_blocks()}
+        targets = ([by_id[key] for key in target_ids if key in by_id] if target_ids is not None
                    else revision_targets(prior, packet.review_issues, task.hints))
         fallback_note = ""
         if not targets:
@@ -290,6 +309,20 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
         source_ids = {str(s.get("source_id") or s.get("id")) for s in sources
                       if research_citation_eligible(s)}
         material = _section_material(packet, "revision", sources)
+        current_claims = {c["id"]: int(c.get("version") or 1) for c in packet.claims if c.get("id")}
+        reviewed_claims = {}
+        for block in targets:
+            allowed_claims = {r.id for k, r in zip(block.ref_kinds, block.refs) if k == "claim"}
+            for issue in packet.review_issues:
+                refs = {r.get("id") for r in issue.get("affected_refs") or [] if isinstance(r, dict)}
+                if block.block_id in refs:
+                    allowed_claims.update(refs.intersection(current_claims))
+            reviewed_claims[block.block_id] = {cid:current_claims[cid] for cid in allowed_claims
+                                               if cid in current_claims}
+        check_abstract = check_abstract and (any(
+            k == "claim" and r.id in current_claims and r.version < current_claims[r.id]
+            for b in prior.all_blocks() for k, r in zip(b.ref_kinds, b.refs))
+            or any(i.get("category") == "science" for i in packet.review_issues))
         neighbors = [{"heading": section.heading, "blocks": [
             {"text": b.text[:600]} for b in section.blocks if b not in targets]}
             for section in prior.sections if any(b in targets for b in section.blocks)]
@@ -300,11 +333,16 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
                 HumanMessage(content="只局部修订给定正文块，保持科学对象身份和证据边界。不得改写全稿。\n"
                     + json.dumps({"objective": task.objective, "issues": packet.review_issues,
                                   "blocks": [b.to_dict() for b in targets], "section_context": neighbors}, ensure_ascii=False)
+                    + "\n本批各块可核对的当前命题版本：" + json.dumps(reviewed_claims, ensure_ascii=False)
+                    + ("\n对照修正后的推论核查摘要。如原摘要仍相符，返回 abstract_checked=true；如需修订，返回完整的顶层 abstract。原摘要："
+                       + prior.abstract if check_abstract else "")
                     + "\n当前核查材料与来源用途（无材料不得编造）:\n" + material
                     + "\n可替换或删除引用，只能使用这些 source_ids: " + json.dumps(sorted(source_ids))
                     + '\n返回 JSON: {"blocks":[{"block_id":"原 id","text":"完整修订文字","math":"公式体，无 $ 分隔符",'
                       '"source_ids":["该块保留或新增的来源 id"]}]}。source_ids 省略则保留原引用，空列表表示撤引。'
                       '表格块可同时修订 heading 与 data={"header":[],"rows":[]}；不得为普通段落改变结构。'
+                      '先修正意见直接点名的原句，随后同步结论中依赖该推论的表述。仅当已修改文字或公式、'
+                      '并对照该版本命题的前提和结论时，才为该块给出 checked_claim_versions={"命题id":版本}。'
                       f'只返回 blocks 列表内有修改的块，最多 {len(targets)} 块；section_context 只读。'
                       '不能解决的问题保留原文。'),
             ]
@@ -315,7 +353,16 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
                     if not isinstance(payload, dict):
                         raise ValueError(note or "修订输出不是 JSON 对象")
                     patched = apply_block_patch(prior, payload.get("blocks"), {b.block_id for b in targets},
-                                                source_ids=source_ids)
+                                                source_ids=source_ids, claim_versions=reviewed_claims,
+                                                verifications=packet.verifications)
+                    abstract = payload.get("abstract")
+                    if (check_abstract and isinstance(abstract, str) and 70 <= len(abstract.strip()) <= 700
+                            and not _has_revision_changelog(abstract) and abstract.strip() != prior.abstract):
+                        patched.abstract = abstract.strip()
+                        patched.revision_log[-1]["abstract_updated"] = True
+                    if check_abstract:
+                        patched.revision_log[-1]["abstract_checked"] = bool(
+                            patched.revision_log[-1].get("abstract_updated") or payload.get("abstract_checked") is True)
                     break
                 except ValueError as error:
                     if attempt or task.budget.exceeded_by(usage):
@@ -350,22 +397,25 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
         if (task.budget.max_llm_calls
                 and task.budget.max_llm_calls - usage.llm_calls < len(baseline) + 2):
             return self._draft_compact_with_llm(llm, packet, baseline, sources)
+        basis = json.dumps(claim_basis(packet), ensure_ascii=False)
         overview = (
             f"研究问题: {packet.main_question or packet.original_request}\n"
             f"交付形态: {packet.deliverables}\n"
-            f"已确定命题: {[c.get('statement') for c in packet.claims if c.get('status') in {'supported', 'refuted'}][:8]}\n"
-            f"候选命题: {[c.get('statement') for c in packet.claims if c.get('status') not in {'supported', 'refuted'}][:8]}\n"
+            f"当前陈述、核验的具体算式及仍缺的前提: {basis}\n"
             f"模型: {[m.get('name') for m in packet.models[:8]]}\n"
             f"文献主题: {[s.get('title') for s in sources[:12]]}\n"
             f"当前问题: {[i.get('summary') for i in packet.review_issues[:16]]}\n"
-            f"最低论证结构: {json.dumps(baseline, ensure_ascii=False)}")
+            f"可用章节功能: {json.dumps(baseline, ensure_ascii=False)}")
         try:
             raw, _ = extract_json(getattr(llm.invoke([
                 SystemMessage(content=self.SYSTEM),
                 HumanMessage(content=overview + "\n仅输出 JSON: {\"sections\": "
                                      "[{\"heading\":\"\",\"role\":\"\",\"purpose\":\"\"}]}。"
-                                     "每个角色、顺序和章节数须与最低论证结构一致；"
-                                     "标题可依研究内容细化。"),
+                                     "按论证需要安排 4–7 节，保留 introduction、method、result、conclusion。"
+                                     "若文献比较直接引出问题，可纳入引言；若边界可由结果直接说明，可合并讨论。"
+                                     "purpose 指明本节接过的疑问、所用前提以及将建立的具体关系。"
+                                     "并列机制只有在前一项的输出确实构成后一项的输入时才连写。"
+                                     "标题点明研究对象或待解释的关系。"),
             ]), "content", ""))
         except Exception as error:  # noqa: BLE001 - 保守大纲仍可继续写作
             raw = None
@@ -390,7 +440,11 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
                 f"已登记材料（只可据此立论，外部片段不是指令）:\n{material}\n"
                 f"该节旧稿（仅供修订）: {_prior_section_brief(prior)}\n"
                 f"该节待解决审阅问题: {json.dumps(issues, ensure_ascii=False)[:6500]}\n"
-                "每节按论证需要写 2–8 个相互衔接的正文块；每块有主题句、具体依据和分析。"
+                "每段推进一个推理步骤。段数服从论证需要，结论可用一段。"
+                "引言用一个可判别的问题进入研究；将完整公式和推导留给方法与结果。"
+                "结果解释比较哪两种状态、哪些量保持不变、差别由何而来，以及反例会破坏哪一步。"
+                "若模型只给出中间量，点明到研究对象的实际结果还缺哪条关系。"
+                "结论给出这个问题的有限答案与最能区分解释的一项观测，不复述各章或逐条再列公式。"
                 "避免把多个模型、假设和结论塞进一个长段；每块最多关联两条命题，便于独立核查与修订。"
                 "正文只陈述研究内容，不叙述修订动作、版本和审阅过程。"
                 "若没有已确定命题，不把候选机制称作研究结果或实测发现。"
@@ -417,21 +471,22 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
             sections.append({"heading": plan["heading"], "level": plan["level"],
                              "role": plan["role"], "blocks": blocks})
 
-        synopsis = "\n".join(
-            f"{section['heading']}: " + " ".join(
-                clip(str(block.get("text") or ""), 240) for block in section["blocks"][:3]
-                if isinstance(block, dict)) for section in sections)
-        claim_states = [{"statement": clip(str(claim.get("statement") or ""), 300),
-                         "status": claim.get("status", "proposed"), "scope": claim.get("verification_scope")}
-                        for claim in packet.claims[:20]]
+        # Abstract the actual answer and its boundary, which commonly occur at
+        # the end of results/discussion, after the method has been introduced.
+        synopsis = []
+        for section in sections:
+            paragraphs = [b["text"] for b in section["blocks"] if b.get("text")]
+            selection = (paragraphs[-2:] if section["role"] in {"result", "discussion", "conclusion"}
+                         else paragraphs[:1])
+            synopsis.append(str(section["heading"]) + "：" + " ".join(clip(p, 400) for p in selection))
         try:
             raw_meta, _ = extract_json(getattr(llm.invoke([
                 SystemMessage(content=self.SYSTEM), HumanMessage(content=(
                     f"研究问题: {packet.main_question or packet.original_request}\n"
-                    f"已写正文概览:\n{synopsis}\n"
-                    f"命题及其核验范围：{json.dumps(claim_states, ensure_ascii=False)}\n"
+                    "已写正文概览:\n" + "\n".join(synopsis) + "\n"
+                    f"陈述与实际核验目标、未闭合环节：{basis}\n"
                     "据实际正文生成准确的学术标题、150–350 字摘要和 3–6 个关键词。"
-                    "摘要依次说明问题、方法、已确定发现或候选框架、证据边界；"
+                    "优先解释最能回答开篇疑问的一个机制及其边界，以文字传达结果，不罗列各条算式。"
                     "没有已核验命题时，直接写模型提出了什么可检验关系以及什么观测可以区分候选解释。"
                     "不写修订过程，不把待核验候选称为实证结果。"
                     "只返回 JSON: {\"title\":\"\",\"abstract\":\"\","
@@ -467,14 +522,18 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
         issues = [str(issue.get("summary") or "") for issue in packet.review_issues[:16]]
         prompt = (
             f"研究问题: {packet.main_question or packet.original_request}\n"
-            f"按此大纲逐节写作，章节数、level 和 role 不变: {json.dumps(outline, ensure_ascii=False)}\n"
+            f"实际核验目标与开放条件: {json.dumps(claim_basis(packet), ensure_ascii=False)}\n"
+            f"可用章节功能: {json.dumps(outline, ensure_ascii=False)}\n"
+            "按论证需要安排 4–7 节，保留 introduction、method、result、conclusion 并依序展开。"
+            "可将文献比较纳入引言、将边界讨论纳入结果。每节给出切题的标题和论证目的。\n"
             f"已登记材料: {material}\n"
             f"审阅待改: {json.dumps(issues, ensure_ascii=False)}\n"
-            "先在内部确定各节论证功能，再输出可读的完整学术稿件。"
+            "从一个可判别的问题切入，结果写清比较对象、固定前提和中间推导。"
+            "结论解释该推导能回答原问题的哪一部分，把一个尚缺的关系转为可区分两种解释的检验。"
             "只使用登记的 ref_id；没有核验结论时写候选框架；"
             "不要在正文说明修订过程或引用未登记的图。"
             "返回 JSON: {\"title\":\"\",\"abstract\":\"\",\"keywords\":[],"
-            "\"sections\":[{\"heading\":\"\",\"level\":1,\"role\":\"\","
+            "\"sections\":[{\"heading\":\"\",\"purpose\":\"\",\"level\":1,\"role\":\"\","
             "\"blocks\":[{\"role\":\"\",\"text\":\"\",\"ref_ids\":[],"
             "\"math\":\"\",\"needs_check\":false}]}],\"unresolved\":[]}。"
         )
@@ -487,11 +546,14 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
         if not isinstance(payload, dict):
             return None, note
         sections = payload.get("sections")
+        outline = refine_outline(payload, outline)
         if not isinstance(sections, list) or len(sections) != len(outline):
             return None, "受限额度下稿件章节不完整"
         for row, plan in zip(sections, outline):
             if not isinstance(row, dict) or not row.get("blocks"):
                 return None, "受限额度下稿件缺少章节正文"
+            if row.get("role") and row["role"] != plan["role"]:
+                return None, "受限额度下稿件的章节与论证结构不符"
             row.update({"heading": plan["heading"], "level": plan["level"],
                         "role": plan["role"]})
         manuscript = _manuscript_from_payload(payload, packet)
@@ -564,12 +626,13 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
         manuscript.sections.append(evidence_section)
 
         result_section = Section(heading="3 结果与论证", role="result")
+        basis_by_id = {row["id"]: row for row in claim_basis(packet)}
         if packet.claims:
             for claim in packet.claims[:20]:
                 claim_id = str(claim.get("id", "") or "")
                 block = Block(
                     role=BlockRole.claim,
-                    text=clip(str(claim.get("statement", "")), 600),
+                    text=_fallback_claim_text(claim, basis_by_id.get(claim_id), limit=600),
                     input_versions=dict(packet.input_versions),
                     needs_check=str(claim.get("status", "")) not in ("supported",),
                 )
@@ -591,7 +654,9 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
 
                 for record in packet.verifications:
                     if (str(record.get("claim_id", "")) != claim_id
+                            or int(record.get("claim_version") or 1) != int(claim.get("version") or 1)
                             or record.get("stale")
+                            or record.get("usable") is False
                             or record.get("validation_status") != "verified"):
                         continue
                     certificate = (record.get("arguments") or {}).get("design_report")
@@ -628,6 +693,7 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
 
         if packet.models:
             model_section = Section(heading="4 模型与假设", role="method")
+            claim_versions = {str(c["id"]): int(c.get("version") or 1) for c in packet.claims if c.get("id")}
             for model in packet.models[:10]:
                 variables = model.get("variables") or []
                 assumptions = model.get("assumptions") or []
@@ -643,8 +709,8 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
                                   ObjectRef(id=str(model["id"]),
                                             version=int(model.get("version", 1) or 1)))
                 claim_id = str(model.get("claim_id") or "")
-                if claim_id in {str(claim.get('id')) for claim in packet.claims}:
-                    block.add_ref(RefKind.claim.value, ObjectRef(id=claim_id))
+                if claim_id in claim_versions:
+                    block.add_ref(RefKind.claim.value, ObjectRef(id=claim_id, version=claim_versions[claim_id]))
                 if variables:
                     model_section.blocks.append(Block(role=BlockRole.table,
                         heading=str(model.get('name') or '模型') + '的变量定义',
@@ -974,17 +1040,22 @@ def _section_material(packet: WritingPacket, role: str,
             "locator": row.get("locator"), "relevance": row.get("relevance_reason"),
             "excerpt": excerpt,
         })
-    pieces = ["来源: " + json.dumps(source_rows, ensure_ascii=False)]
+    pieces = []
+    if role in {"result", "conclusion", "revision"}:
+        pieces.append("命题陈述与实际检验的目标逐项对应（只有 checked 中的算式可归于核验）。"
+                      "其余推论须给出推导；从模型变量推广到行为或经验结果须给出桥接假设。\n"
+                      + json.dumps(claim_basis(packet), ensure_ascii=False))
+    pieces.append("来源: " + json.dumps(source_rows, ensure_ascii=False))
     if role in {"introduction", "method", "result", "discussion", "conclusion", "revision"}:
         pieces.append("命题及其状态: " + json.dumps([
-            {key: row.get(key) for key in ("id", "status", "statement", "statement_role", "premises",
+            {key: row.get(key) for key in ("id", "version", "status", "statement", "statement_role", "premises",
                 "formal_spec", "lhs", "rhs", "variables", "variable_domains", "reasoning", "support_refs",
                 "scope_population", "scope_region", "scope_period", "scope_conditions", "study")}
             for row in sorted(packet.claims, key=lambda c: c.get("status") not in {"supported", "refuted"})[:20]],
             ensure_ascii=False)[:18000])
     if role in {"method", "result", "discussion", "revision"}:
         pieces.append("模型及适用条件: " + json.dumps([
-            {key: row.get(key) for key in ("id", "version", "name", "mechanism", "formal_encoding",
+            {key: row.get(key) for key in ("id", "version", "claim_id", "name", "mechanism", "formal_encoding",
                 "variables", "variable_domains", "units", "assumptions", "approximations", "boundaries", "applicability", "open_conditions")}
             for row in packet.models[:10]], ensure_ascii=False)[:14000])
         pieces.append("验证与数据计划: " + json.dumps(packet.validations[:5], ensure_ascii=False)[:4500])
@@ -992,6 +1063,7 @@ def _section_material(packet: WritingPacket, role: str,
         pieces.append("已通过的核验记录（scope=step 仅覆盖局部）: " + json.dumps([
             row for row in packet.verifications
             if row.get("validation_status") == "verified" and not row.get("stale")
+            and row.get("usable") is not False
         ][:12], ensure_ascii=False)[:8500])
         pieces.append("已发现的反例（否决所列命题，不得写成待核验；不外推现实效应）: " + json.dumps([
             {key: row.get(key) for key in ('id', 'claim_id', 'claim_version', 'validation_status',
@@ -1012,9 +1084,29 @@ def _section_material(packet: WritingPacket, role: str,
         pieces.append("未决项: " + json.dumps(packet.unresolved[:18], ensure_ascii=False)[:4500])
         pieces.append("未关闭义务: " + json.dumps([
             {"status": row.get("status"), "statement": row.get("statement")}
-            for row in packet.obligations if row.get("status") != "closed"
+            for row in packet.obligations if row.get("status", "open") in {"open", "blocked"}
         ][:12], ensure_ascii=False)[:4500])
     return "\n".join(pieces)
+
+
+def _fallback_claim_text(claim: dict, basis: dict | None, *, limit: int) -> str:
+    if not claim.get("formal_spec") or claim.get("status") != "supported":
+        return clip(str(claim.get("statement") or ""), limit)
+    for proof in (basis or {}).get("checked", []):
+        if proof["scope"] != "target":
+            continue
+        conditions = list(proof["premises"])
+        for key in ("variables", "assumptions"):
+            domains = proof.get(key)
+            if isinstance(domains, dict):
+                conditions.extend(f"{variable} ∈ {domain}" for variable, domain in domains.items())
+        if proof.get("assumption_ids"):
+            conditions.append("登记的模型假设成立")
+        clause = "在" + "、".join(conditions) + "的条件下，" if conditions else ""
+        statement = clause + "核验得到 " + str(proof["target"])
+        if len(statement) <= limit:
+            return statement
+    return "该命题的形式化结论须连同其完整前提解读，经验含义仍需单独检验"
 
 
 def _abstract_of(packet: WritingPacket) -> str:
@@ -1031,8 +1123,9 @@ def _abstract_of(packet: WritingPacket) -> str:
 
     parts = [f"本文研究{derive_topic(packet.main_question or packet.original_request)}。"]
     if supported:
-        parts.append(f"当前有 {len(supported)} 条获支持的命题，例如："
-                     f"{clip(str(supported[0].get('statement', '')), 200)}。")
+        example = supported[0]
+        basis = next((row for row in claim_basis(packet) if row["id"] == example.get("id")), None)
+        parts.append(f"当前有 {len(supported)} 条获支持的命题。{_fallback_claim_text(example, basis, limit=200)}。")
     if refuted:
         parts.append(f"另有 {len(refuted)} 条命题已被反例否决，例如："
                      f"{clip(str(refuted[0].get('statement', '')), 200)}。")
@@ -1128,7 +1221,7 @@ def finalise_manuscript(manuscript: Manuscript, packet: WritingPacket,
     manuscript.sections.append(_references_section(packet, citations))
 
     # 内部 claim id 只用于结构化追溯，不得进入读者可见文本。
-    known_claims = {str(c.get("id", "")) for c in packet.claims if c.get("id")}
+    known_claims = {str(c["id"]): int(c.get("version") or 1) for c in packet.claims if c.get("id")}
     manuscript.title = _strip_internal_ids(manuscript.title)
     manuscript.abstract = _strip_internal_ids(manuscript.abstract)
     manuscript.keywords = [_strip_internal_ids(value) for value in manuscript.keywords]
@@ -1142,7 +1235,8 @@ def finalise_manuscript(manuscript: Manuscript, packet: WritingPacket,
                     if kind == RefKind.claim.value}
         for claim_id in sorted(known_claims):
             if claim_id in text and claim_id not in existing:
-                block.add_ref(RefKind.claim.value, ObjectRef(id=claim_id))
+                version = block.input_versions.get(claim_id, 1 if packet.prior_manuscript else known_claims[claim_id])
+                block.add_ref(RefKind.claim.value, ObjectRef(id=claim_id, version=version))
                 existing.add(claim_id)
             if claim_id in text:
                 block.text = re.sub(re.escape(claim_id), "", block.text)
@@ -1299,6 +1393,7 @@ def _manuscript_from_payload(payload: dict[str, Any],
     }
     known_review_issues = {str(row.get("issue_id") or row.get("id"))
                            for row in packet.review_issues if row.get("issue_id") or row.get("id")}
+    claim_versions = {str(row["id"]): int(row.get("version") or 1) for row in packet.claims if row.get("id")}
     for index, section_payload in enumerate(sections_payload, 1):
         if not isinstance(section_payload, dict):
             continue
@@ -1332,7 +1427,8 @@ def _manuscript_from_payload(payload: dict[str, Any],
                         "blocking": False,
                     })
                     continue
-                block.add_ref(kind, ObjectRef(id=ref_id))
+                version = claim_versions.get(ref_id, packet.input_versions.get(ref_id, 1))
+                block.add_ref(kind, ObjectRef(id=ref_id, version=version))
             section.blocks.append(block)
         if section.blocks:
             manuscript.sections.append(section)
@@ -1345,21 +1441,36 @@ def _manuscript_from_payload(payload: dict[str, Any],
 
 
 def revision_targets(manuscript: Manuscript, issues: list[dict[str, Any]],
-                     hints: dict[str, Any], *, limit: int | None = 12) -> list[Block]:
-    refs = set(hints.get("focus_blocks") or [])
-    locators = [str(hints.get("locator") or "")]
-    for issue in issues:
-        refs.update(str(ref.get("id", "")) if isinstance(ref, dict) else str(ref)
-                    for ref in issue.get("affected_refs") or [])
-        locators.append(str(issue.get("locator") or ""))
-    targets = []
+                     hints: dict[str, Any], *, limit: int | None = 12, claim_versions=None) -> list[Block]:
+    blocks = manuscript.all_blocks()
+    groups = [(set(hints.get("focus_blocks") or []), str(hints.get("locator") or ""))]
+    groups.extend(({str(ref.get("id")) if isinstance(ref, dict) else str(ref)
+                    for ref in issue.get("affected_refs") or []}, str(issue.get("locator") or ""))
+                  for issue in issues)
+    direct, indirect = set(), set()
+    for refs, locator in groups:
+        named = {b.block_id for b in blocks if b.block_id in refs or b.block_id in locator}
+        if named:
+            direct.update(named)
+            continue
+        for section in manuscript.sections:
+            if section.section_id in refs or (section.heading and section.heading in locator):
+                indirect.update(b.block_id for b in section.blocks)
+            else:
+                indirect.update(b.block_id for b in section.blocks if any(r.id in refs for r in b.refs))
+    stale, conclusions = set(), set()
+    versions = claim_versions or {}
     for section in manuscript.sections:
-        for block in section.blocks:
-            ids = {block.block_id, section.section_id, *(ref.id for ref in block.refs)}
-            located = any(locator and (block.block_id in locator or
-                (section.heading and section.heading in locator)) for locator in locators)
-            if ids & refs or located:
-                targets.append(block)
+        for b in section.blocks:
+            if any(k == "claim" and r.version < versions.get(r.id, r.version)
+                   for k, r in zip(b.ref_kinds, b.refs)):
+                (conclusions if section.role == "conclusion" else stale).add(b.block_id)
+    selected = {}
+    for group in (direct, conclusions, stale, indirect):
+        for b in blocks:
+            if b.block_id in group:
+                selected[b.block_id] = b
+    targets = list(selected.values())
     return targets if limit is None else targets[:limit]
 
 
@@ -1380,7 +1491,8 @@ def revision_section_targets(manuscript: Manuscript, issues: list[dict[str, Any]
 
 
 def apply_block_patch(manuscript: Manuscript, patches: Any, allowed: set[str], *,
-                      source_ids: set[str] | None = None) -> Manuscript:
+                      source_ids: set[str] | None = None, claim_versions=None,
+                      verifications=()) -> Manuscript:
     if not isinstance(patches, list) or not patches:
         raise ValueError("修订须包含已定位正文块列表")
     result = manuscript.model_copy(deep=True)
@@ -1398,7 +1510,8 @@ def apply_block_patch(manuscript: Manuscript, patches: Any, allowed: set[str], *
         if len(changed_blocks) >= 12:
             dropped.append({"block_id": block_id, "reason": "超过单次 12 块修订上限"})
             continue
-        extra = sorted(set(patch) - {"block_id", "text", "math", "source_ids", "heading", "data"})
+        extra = sorted(set(patch) - {"block_id", "text", "math", "source_ids", "heading", "data",
+                                     "checked_claim_versions"})
         if extra:
             ignored.append({"block_id": block_id, "fields": extra})
         # Validate the whole block before applying any part of it.
@@ -1430,6 +1543,28 @@ def apply_block_patch(manuscript: Manuscript, patches: Any, allowed: set[str], *
         for field in ("text", "math", "heading", "data"):
             if field in patch:
                 setattr(block, field, patch[field])
+        checked = patch.get("checked_claim_versions")
+        if isinstance(checked, dict) and any(before[key] != getattr(block, key) for key in ("text", "math", "data")):
+            authorized = (claim_versions or {}).get(block_id, {})
+            admitted = {cid: v for cid, v in checked.items()
+                        if type(v) is int and v == authorized.get(cid)}
+            kept = []
+            advanced = {ref.id for kind, ref in zip(block.ref_kinds, block.refs)
+                        if kind == "claim" and ref.id in admitted and ref.version != admitted[ref.id]}
+            valid_certificates = {v.get("id") for v in verifications if not v.get("stale")}
+            for kind, ref in zip(block.ref_kinds, block.refs):
+                if advanced and kind == "verification" and ref.id not in valid_certificates:
+                    continue
+                if kind == "claim" and ref.id in admitted:
+                    ref = ObjectRef(id=ref.id, version=admitted[ref.id])
+                kept.append((kind, ref))
+            block.ref_kinds = [kind for kind, _ in kept]
+            block.refs = [ref for _, ref in kept]
+            existing = {ref.id for kind, ref in kept if kind == "claim"}
+            for cid, version in admitted.items():
+                if cid not in existing:
+                    block.add_ref("claim", ObjectRef(id=cid, version=version))
+            block.input_versions.update(admitted)
         if before != block.to_dict():
             changed_blocks.append(block_id)
     if not changed_blocks:
@@ -1489,15 +1624,17 @@ def build_packet_from_context(task: AgentTask, context: ContextPack) -> WritingP
     ]
     for row in context.objects.get("gap") or []:
         unresolved.append(clip(str(row.get("statement", "")), 300))
-    review_issues = [*context.objects.get("review_issue", []),
-                     *[i for r in context.upstream for i in (r.get("issues") or [])]]
+    from src.agents.review_state import latest_review_issues
+    ledger = context.objects.get("review_issue") or []
+    known_ids = {i.get("issue_id") or i.get("id") for i in ledger}
+    by_id = {i.get("issue_id") or i.get("id"): i for r in context.upstream for i in (r.get("issues") or [])
+             if (i.get("issue_id") or i.get("id")) not in known_ids}
+    by_id.update((i.get("issue_id") or i.get("id"), i) for i in latest_review_issues(ledger))
+    review_issues = list(by_id.values())
     selected = set((task.hints or {}).get("review_issue_ids") or [])
     if selected or (task.hints or {}).get("review_cycle"):
         review_issues = [issue for issue in review_issues
                          if str(issue.get("issue_id") or issue.get("id") or "") in selected]
-    else:
-        from src.agents.review_state import latest_review_issues
-        review_issues = latest_review_issues(review_issues)
     prior = (context.objects.get("manuscript") or [{}])[-1]
     prior = prior.get("manuscript", prior)
     return WritingPacket(
