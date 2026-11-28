@@ -56,8 +56,9 @@ function Invoke-Git {
 
 function Get-TouchedPaths {
     param([string]$Sha)
-    $r = Invoke-Git @("show", "--no-renames", "--name-only", "--format=", $Sha)
-    return @($r.Lines | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() })
+    # core.quotepath=false：否则含中文的路径会被转义成 "evals/reports/\346..." 形式，分组就会判错
+    $r = Invoke-Git @("-c", "core.quotepath=false", "show", "--no-renames", "--name-only", "--format=", $Sha)
+    return @($r.Lines | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim().Trim('"') })
 }
 
 function Test-ReportCommit {
@@ -107,7 +108,13 @@ try {
         Write-Host ("  [推送] {0} {1}" -f $sha.Substring(0, 7), (Get-Subject -Sha $sha))
     }
     foreach ($sha in $report) {
-        Write-Host ("  [本地] {0} {1}" -f $sha.Substring(0, 7), (Get-Subject -Sha $sha)) -ForegroundColor DarkGray
+        $extra = @(Get-TouchedPaths -Sha $sha | Where-Object { $_ -notlike "$ReportPrefix*" })
+        if ($extra.Count -gt 0) {
+            Write-Host ("  [本地] {0} {1}  ⚠ 该提交同时改了非报告路径，这些改动不会推送：{2}" -f $sha.Substring(0, 7), (Get-Subject -Sha $sha), ($extra -join ", ")) -ForegroundColor Yellow
+        }
+        else {
+            Write-Host ("  [本地] {0} {1}" -f $sha.Substring(0, 7), (Get-Subject -Sha $sha)) -ForegroundColor DarkGray
+        }
     }
 
     if ($code.Count -eq 0) {
