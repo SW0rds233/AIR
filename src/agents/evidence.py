@@ -174,6 +174,8 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
     # ---- 主流程 ----
     def _run(self, task: AgentTask, context: ContextPack, runtime: AgentRuntime,
              usage: UsageRecord, tools: list[ToolSpec]) -> AgentResult:
+        if task.hints.get("assess_registered"):
+            return self._assess_registered(task, context, runtime, usage)
         report = self._repair_report_metadata(task, context, usage)
         if report is not None:
             return report
@@ -191,6 +193,54 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                 hints={**task.hints, 'repair_action':'revise_citation'},
                 acceptance=['保留来源适用范围和未决项；更换或撤引后重新独立审阅']))
         return result
+
+    def _assess_registered(self, task, context, runtime, usage):
+        """Judge existing excerpts against one version without another retrieval pass."""
+        from src.kb.publication import relevance_score
+        from src.research.schemas import stable_id
+
+        targets = _support_targets(task, context)
+        if not targets or targets[0].version != task.hints.get("claim_version"):
+            return self.blocked(task, "待复核的命题版本已变更或不可用", usage=usage)
+        claim = targets[0]
+        query = " ".join([*claim.evidence_requirements, *claim.mechanism_links, claim.statement])
+        pool = {}
+        for row in context.objects.get("evidence") or []:
+            sid = row.get("source_id") or row.get("id")
+            location = row.get("locator") or row.get("location")
+            if sid and location and row.get("excerpt") and (sid not in pool or row.get("id") == sid):
+                pool[sid] = {**row, "source_id": sid, "locator": location, "abstract": row["excerpt"]}
+        already_assessed = {row.get("source_id") for row in context.objects.get("evidence") or []
+                            if row.get("claim_id") == claim.id and row.get("claim_version") == claim.version
+                            and row.get("reviewer") == "llm"}
+        candidates = sorted((row for sid, row in pool.items() if sid not in already_assessed),
+                            key=lambda row: -relevance_score(row, query))
+        if pool and not candidates:
+            return self.completed(task, f"{claim.id} v{claim.version} 的可定位来源均已有该版本判定", usage=usage)
+        if len(candidates) > 4:
+            candidates = self.select_related(candidates, query, task, context, runtime, usage, limit=64)
+        selected = [row for row in candidates if not row.get("_semantic_rejected")][:4]
+        rows = self.assess_sources(task, context, runtime, usage, selected)
+        changes = []
+        assessed = []
+        for row in rows:
+            if (row.get("claim_id") != claim.id or row.get("claim_version") != claim.version
+                    or row.get("reviewer") != "llm"):
+                continue
+            source_id = row["source_id"]
+            assessment_id = stable_id("assessment", source_id, claim.id, claim.version)
+            payload = {k: v for k, v in row.items() if not k.startswith("_") and k != "abstract"}
+            # The source identity remains resolvable even when one document is
+            # independently assessed for multiple claims or scientific versions.
+            payload.update(id=assessment_id, version=1)
+            changes.append(build_proposal("evidence", object_id=assessment_id,
+                payload=payload, rationale=row["support_reason"], input_versions={claim.id: claim.version}))
+            assessed.append(row)
+        changes.extend(self._evidence_links(task, assessed, context))
+        summary = f"复核 {claim.id} v{claim.version} 的既有资料，候选 {len(pool)} 篇，完成原文判定 {len(assessed)} 篇"
+        if not assessed:
+            return self.partial(task, summary, usage=usage, unresolved=["未形成当前版本的可定位语义判定"])
+        return self.completed(task, summary, changes=changes, usage=usage)
 
     def _research(self, task, context, runtime, usage, tools):
         query = _query_of(task, context)
@@ -501,7 +551,9 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                 raw = {key: value for key, value in row.items()
                        if key in SourceEvidence.model_fields}
                 raw.update(location=row.get("locator") or row.get("location") or "",
-                           claim_id=claim.id, support="insufficient", support_evidence="")
+                           claim_id=claim.id, claim_version=claim.version, support="insufficient",
+                           support_scope="claim", support_evidence="", support_reason="", reviewer="",
+                           supported_link="", supported_target="", condition_notes=[])
                 item = judge(claim, SourceEvidence.model_validate(raw))
                 calls += 1
                 # 解析失败回落的词面匹配没有引文，不能作为已审查证据。
@@ -600,7 +652,7 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
             unresolved.append("本资料范围内没有命中 (不等于该结论不成立)")
         return rows, coverage, unresolved
 
-    def select_related(self, papers, query, task, context, runtime, usage):
+    def select_related(self, papers, query, task, context, runtime, usage, *, limit=30):
         """Semantic selection changes relevance only, never publication or proof status."""
         import json
         rows = [{k: v for k, v in paper.items() if k != "_relevance_verified"}
@@ -620,7 +672,7 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                 HumanMessage(content=f"研究问题: {_query_of(task, context)[:2000]}\n查询: {query}\n"
                     + json.dumps([{"index": i, "title": row.get("title"),
                                    "abstract": str(row.get("abstract") or "")[:1200]}
-                                  for i, row in enumerate(rows[:30])], ensure_ascii=False))])
+                                  for i, row in enumerate(rows[:limit])], ensure_ascii=False))])
             payload, _ = extract_json(getattr(response, "content", ""))
             if isinstance(payload, dict) and isinstance(payload.get("selected"), list):
                 picked = []
@@ -629,7 +681,7 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
                     if not isinstance(item, dict):
                         continue
                     index = item.get("index")
-                    if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < min(30, len(rows)):
+                    if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < min(limit, len(rows)):
                         if index in selected_indices:
                             continue
                         selected_indices.add(index)
@@ -764,7 +816,7 @@ field_key 是稳定的英文学科/子领域短标识 (小写字母、数字、�
         )
 
         claims = [row for row in (context.objects.get("claim") or [])
-                  if row.get("id")]
+                  if row.get("id") and (not task.hints.get("claim_id") or row["id"] == task.hints["claim_id"])]
         if not claims or not items:
             return []
         valid = {kind.value for kind in SupportKindOfEvidence}
@@ -871,6 +923,7 @@ def _evidence_row(item: Any) -> dict[str, Any]:
         "source_id": getattr(item, "source_id", "") or getattr(item, "id", ""),
         "title": clip(getattr(item, "title", "") or "", 200),
         "locator": locator,
+        "location": locator,
         "page": int(getattr(item, "page", 0) or 0),
         "char_start": int(getattr(item, "char_start", -1)),
         "char_end": int(getattr(item, "char_end", -1)),

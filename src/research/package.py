@@ -82,6 +82,11 @@ def export_package(
         "proof_attempts": len(snapshot.attempts),
         "definitions": len(snapshot.definitions),
         "assumptions": len(snapshot.assumptions),
+        "model_declarations": {
+            "file": "models.json",
+            "assumptions": sum(len(model.assumptions) for model in snapshot.models),
+            "variables": sum(len(model.variables) for model in snapshot.models),
+        },
         "gaps": len(snapshot.gaps),
         "writing_gaps": len(manuscript.gaps) if manuscript is not None else 0,
         "routes": len(snapshot.routes),

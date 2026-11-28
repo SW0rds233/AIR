@@ -36,6 +36,7 @@ from src.agents.writer_plan import (
     revision_section,
 )
 from src.publication.references import citation_suffix, research_citation_eligible
+from src.publication.claims import anchored_science_findings
 from src.research.schemas import stable_id
 from src.publication.schemas import (
     Block,
@@ -74,6 +75,7 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
 政策、产业报告可支持发布日期、机构行为或计划等背景事实；不能代替因果效应证据。缺少官方原文时注明待核实，不虚构政策和引用。
 模型的 formal_encoding 是已有方程结构。不得自行删去路径、换识别目标或变量含义；确需简化须列出新增假设并提出建模修订需求。
 实验建议写明对象、观测变量、对照/基线、采样方案、可证伪预测与判定标准；没有执行记录就只写建议。
+题目涉及效应量级而缺少实测参数时，若已知取值域和模型允许，推导有条件的上下界或敏感性，并标明单位与端点前提。无法定界时指出缺哪个量及其观测方式。
 将工具不支持、资料不足等过程诊断集中到局限或附录，主文解释它们对结论的具体限制，避免逐条堆砌日志。
 
 你的任务: 把已经确定的研究结果写成**连贯的学术正文**, 并让每一段都能回到它的依据。
@@ -228,9 +230,15 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
                    f"{len(manuscript.all_blocks())} 段, {manuscript.word_count()} 字")
         if problems:
             summary += f"; {len(problems)} 处待核查"
-        outcome = self.completed if not problems else self.partial
+        last_revision = manuscript.revision_log[-1] if manuscript.revision_log else {}
+        unaddressed = as_list_of_str(last_revision.get("unaddressed_blocks"))
+        pending_notes = []
+        if unaddressed:
+            summary += f"；{len(unaddressed)} 个修订段落待处理"
+            pending_notes.append("待修订段落：" + "、".join(unaddressed))
+        outcome = self.partial if problems or unaddressed else self.completed
         result = outcome(task, summary, changes=changes, artifacts=[artifact],
-                         needs=needs, unresolved=[*_gap_texts(manuscript), *problems[:5]],
+                         needs=needs, unresolved=[*pending_notes, *problems[:5], *_gap_texts(manuscript)],
                          usage=usage,
                          payload={"schema": "Manuscript/v1",
                                   "manuscript": manuscript.to_dict(),
@@ -246,22 +254,28 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
         if not targets:
             return self._patch_batch_with_llm(task, runtime, usage, packet)
         current, notes, changed = prior, [], []
-        for offset in range(0, len(targets), 12):
+        critical = {key for key, _ in anchored_science_findings(targets, packet.review_issues)}
+        groups = [[b for b in targets if b.block_id in critical], [b for b in targets if b.block_id not in critical]]
+        batches = [group[i:i + 12] for group in groups for i in range(0, len(group), 12)]
+        for index, batch in enumerate(batches):
             if task.budget.exceeded_by(usage):
                 notes.append('修订预算耗尽，保留已完成批次')
                 break
             next_packet = packet.model_copy(update={'prior_manuscript':current.to_dict()})
             patched, note = self._patch_batch_with_llm(task, runtime, usage, next_packet,
-                target_ids=[b.block_id for b in targets[offset:offset+12]], check_abstract=(offset == 0))
+                target_ids=[b.block_id for b in batch], check_abstract=(index == 0))
             if note:
                 notes.append(note)
             if patched is None:
                 break
-            changed.extend(patched.revision_log[-1].get('changed_blocks', []))
+            for entry in patched.revision_log[len(current.revision_log):]:
+                changed.extend(entry.get('changed_blocks', []))
             current = patched
         if not changed:
             return None, '; '.join(notes) or '未产生有效修订'
-        pending = [b.block_id for b in targets if b.block_id not in changed]
+        outstanding = {key for key, _ in anchored_science_findings(current.all_blocks(), packet.review_issues)
+                       if key in critical}
+        pending = [b.block_id for b in targets if b.block_id not in changed or b.block_id in outstanding]
         # Retire handled parts of earlier pending batches without declaring
         # their underlying scientific issues resolved before independent review.
         retained_gaps = []
@@ -280,7 +294,7 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
         current.revision_log[-1]['unaddressed_blocks'] = pending
         if pending:
             current.gaps.append({'kind':'revision_pending', 'block_ids':pending,
-                                 'detail':'这些定位块尚未修改；其他修改也仍须独立复审', 'blocking':False})
+                                 'detail':'定位块尚未修改或仍保留被质疑的原句，须逐项复审', 'blocking':False})
         return current, '; '.join(notes)
 
     def _patch_batch_with_llm(self, task: AgentTask, runtime: AgentRuntime,
@@ -326,6 +340,11 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
         neighbors = [{"heading": section.heading, "blocks": [
             {"text": b.text[:600]} for b in section.blocks if b not in targets]}
             for section in prior.sections if any(b in targets for b in section.blocks)]
+        # A requested replacement can survive a valid patch when only surrounding
+        # prose or references changed. Reuse the bounded retry for the actual quote.
+        replace_quotes = [issue for issue in packet.review_issues if any(
+            re.search(r"删除|删去|替换|改写|修正", str(c)) for c in issue.get("acceptance") or [])]
+        saved = None
         try:
             llm = runtime.llm(task, usage, stage="writing")
             messages = [
@@ -354,7 +373,7 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
                         raise ValueError(note or "修订输出不是 JSON 对象")
                     patched = apply_block_patch(prior, payload.get("blocks"), {b.block_id for b in targets},
                                                 source_ids=source_ids, claim_versions=reviewed_claims,
-                                                verifications=packet.verifications)
+                                                verifications=packet.verifications, review_issues=replace_quotes)
                     abstract = payload.get("abstract")
                     if (check_abstract and isinstance(abstract, str) and 70 <= len(abstract.strip()) <= 700
                             and not _has_revision_changelog(abstract) and abstract.strip() != prior.abstract):
@@ -363,6 +382,14 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
                     if check_abstract:
                         patched.revision_log[-1]["abstract_checked"] = bool(
                             patched.revision_log[-1].get("abstract_updated") or payload.get("abstract_checked") is True)
+                    batch_ids = {b.block_id for b in targets}
+                    retained = [(key, i["quoted_text"]) for key, i in
+                                anchored_science_findings(patched.all_blocks(), replace_quotes) if key in batch_ids]
+                    if retained and not attempt and not task.budget.exceeded_by(usage):
+                        saved = prior = patched
+                        messages.append(HumanMessage(content="其余有效修改已保留。以下原句仍在原块内，"
+                            "按验收条件纠正推论，返回这些块的补丁：" + json.dumps(retained, ensure_ascii=False)))
+                        continue
                     break
                 except ValueError as error:
                     if attempt or task.budget.exceeded_by(usage):
@@ -379,7 +406,7 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
                                      "blocking": False})
             return patched, fallback_note
         except Exception as error:  # failed patch must not fall back to rewriting the paper
-            return None, f"局部修订失败: {error}"
+            return saved, f"局部修订失败: {error}"
 
     # ---- LLM 起草 ----
     def _draft_with_llm(self, task: AgentTask, runtime: AgentRuntime,
@@ -782,7 +809,8 @@ sympy 的恒等式展开、定义代入和单元计数只作方法一致性说�
         verified_claims = {str(v.get("claim_id")) for v in packet.verifications
                            if v.get("status") == "passed"
                            and v.get("validation_status") == "verified" and not v.get("stale")}
-        problems: list[str] = []
+        problems = [f"块 {block_id} 仍载有审阅要求修正的科学推论（{issue.get('issue_id', '')}），须复审"
+                    for block_id, issue in anchored_science_findings(manuscript.all_blocks(), packet.review_issues)]
         from src.research.acceptance import missing_section_references
         missing_sections = missing_section_references(render_markdown(manuscript))
         if missing_sections:
@@ -1492,7 +1520,7 @@ def revision_section_targets(manuscript: Manuscript, issues: list[dict[str, Any]
 
 def apply_block_patch(manuscript: Manuscript, patches: Any, allowed: set[str], *,
                       source_ids: set[str] | None = None, claim_versions=None,
-                      verifications=()) -> Manuscript:
+                      verifications=(), review_issues=()) -> Manuscript:
     if not isinstance(patches, list) or not patches:
         raise ValueError("修订须包含已定位正文块列表")
     result = manuscript.model_copy(deep=True)
@@ -1544,7 +1572,8 @@ def apply_block_patch(manuscript: Manuscript, patches: Any, allowed: set[str], *
             if field in patch:
                 setattr(block, field, patch[field])
         checked = patch.get("checked_claim_versions")
-        if isinstance(checked, dict) and any(before[key] != getattr(block, key) for key in ("text", "math", "data")):
+        if (isinstance(checked, dict) and any(before[key] != getattr(block, key) for key in ("text", "math", "data"))
+                and not anchored_science_findings([block], review_issues)):
             authorized = (claim_versions or {}).get(block_id, {})
             admitted = {cid: v for cid, v in checked.items()
                         if type(v) is int and v == authorized.get(cid)}

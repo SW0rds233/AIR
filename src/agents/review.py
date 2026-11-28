@@ -69,7 +69,7 @@ def judge_review(issues: list[ReviewIssueRef], *, threshold: int = 80,
                 "semantic_reviewed": False}
     weights = {key: value for key, value in _CATEGORY_WEIGHTS.items()
                if key not in (excluded_categories or set()) & {"figure"}}
-    issues = [issue for issue in issues if issue.category in weights]
+    issues = _merge_issues([issue for issue in issues if issue.category in weights], [])
     fatal = [i for i in issues if i.severity == IssueSeverity.blocking or
              (i.severity == IssueSeverity.major and i.category not in
               {"readability", "figure", "completeness"})]
@@ -220,6 +220,7 @@ class ReviewAgent(AgentBase):
         llm_scores: dict[str, Any] = {}
         category_notes: dict[str, str] = {}
         grounding_conflicts: dict[int, str] = {}
+        disputed_scores: set[str] = set()
         validation_details: dict[str, Any] = {}
         timeout_exhausted = False
         payload = None
@@ -254,9 +255,7 @@ class ReviewAgent(AgentBase):
                 anchor_conflicts = _review_grounding_conflicts(payload, context)
                 source_conflicts = _review_source_conflicts(payload, context)
                 contradictions = date_conflicts + list(anchor_conflicts.values()) + list(source_conflicts.values())
-                all_unanchored = bool(anchor_conflicts) and len(anchor_conflicts) == len(payload.get('issues') or [])
-                if (date_conflicts or all_unanchored or source_conflicts
-                        or any('公式原句' in note for note in anchor_conflicts.values())) and not task.budget.exceeded_by(usage):
+                if contradictions and not task.budget.exceeded_by(usage):
                     # One factual correction, not a second vote or a score booster.
                     import json
                     try:
@@ -273,8 +272,15 @@ class ReviewAgent(AgentBase):
                 grounding_conflicts = _review_grounding_conflicts(payload, context)
                 source_conflicts = _review_source_conflicts(payload, context)
                 grounding_conflicts.update(source_conflicts)
-                issues = _issues_from_payload([item for index, item in enumerate(payload.get('issues') or [])
-                                              if index not in grounding_conflicts])
+                for index, item in enumerate(payload.get("issues") or []):
+                    category = item.get("category") if isinstance(item, dict) else None
+                    issue = _issue_from(item) if index not in grounding_conflicts else None
+                    if issue and issue.summary.strip() and category in REVIEW_CATEGORIES:
+                        issues.append(issue)
+                    else:
+                        grounding_conflicts.setdefault(index, f"审阅意见 {index + 1} 缺少有效的问题描述或类别")
+                        if category in REVIEW_CATEGORIES:
+                            disputed_scores.add(category)
                 unresolved.extend(grounding_conflicts.values())
                 llm_scores = (payload.get("category_scores")
                               if isinstance(payload.get("category_scores"), dict) else {})
@@ -302,6 +308,7 @@ class ReviewAgent(AgentBase):
                         if isinstance(llm_scores.get(category), (int, float))
                         and llm_scores[category] < int(task.hints.get("review_threshold", 80))
                         and not category_notes.get(category)],
+                    "withheld_reported_scores": {key: llm_scores.get(key) for key in sorted(disputed_scores)},
                 }
                 semantic_reviewed = (isinstance(payload.get("issues"), list)
                                      and complete_scores and explained_low_scores
@@ -335,12 +342,15 @@ class ReviewAgent(AgentBase):
         threshold = int((task.hints or {}).get("review_threshold", 80))
         judgement = judge_review(issues, threshold=threshold,
                                  semantic_reviewed=semantic_reviewed,
-                                 category_scores=llm_scores, excluded_categories=excluded)
+                                 category_scores={k: v for k, v in llm_scores.items() if k not in disputed_scores},
+                                 excluded_categories=excluded)
         judgement["not_applicable_categories"] = sorted(excluded)
         judgement["reported_category_scores"] = llm_scores
         judgement["grounding_conflicts"] = list(grounding_conflicts.values())
         judgement["validation_details"] = validation_details
         judgement['previous_issue_checks'] = checks
+        for category in disputed_scores:
+            category_notes[category] = "有意见未通过原文核对，本项仅按本轮可定位的问题计分，仍须复审。"
         validation_details["score_adjustments"] = judgement.get("score_adjustments", {})
         for category, adjustment in validation_details["score_adjustments"].items():
             basis = "、".join(f"{key} 扣 {points} 分" for key, points in adjustment["issue_deductions"].items())
@@ -711,6 +721,9 @@ def _review_grounding_conflicts(payload: dict, context: ContextPack) -> dict[int
         targets = [block_id] if block_id else [i for i in item.get('affected_ids') or []
                                               if i in blocks or str(i).startswith('blk-')]
         if not targets and not quote:
+            if (item.get("repair_action") in {"revise_text", "revise_citation"}
+                    or item.get("suggested_owner") == "writing" or item.get("category") == "readability"):
+                conflicts[index] = f"审阅意见 {index + 1} 未定位所指的正文块和原句"
             continue  # Source metadata / research objects need not quote manuscript prose.
         if not targets or any(target not in blocks for target in targets):
             conflicts[index] = f'审阅意见 {index + 1} 的正文块不存在于当前版本'
@@ -744,9 +757,11 @@ def _issue_from(item: Any) -> ReviewIssueRef | None:
     if not isinstance(item, dict):
         return None
     try:
+        affected = [str(value) for value in dict.fromkeys(
+            [*(item.get("affected_ids") or []), item.get("block_id")]) if value]
         return ReviewIssueRef(
             issue_id=str(item.get('issue_id') or _issue_id(str(item.get("category") or ""),
-                                                         str(item.get("summary") or ""))),
+                                                         str(item.get("summary") or ""), affected)),
             severity=str(item.get("severity") or "minor"),
             category=str(item.get("category") or ""),
             summary=str(item.get("summary") or ""),
@@ -754,8 +769,7 @@ def _issue_from(item: Any) -> ReviewIssueRef | None:
             repair_action=str(item.get("repair_action") or ""),
             locator=clip(str(item.get("locator") or ""), 400),
             quoted_text=str(item.get('quoted_text') or ''),
-            affected_refs=[ObjectRef(id=str(value)) for value in dict.fromkeys(
-                [*(item.get("affected_ids") or []), item.get('block_id')]) if value],
+            affected_refs=[ObjectRef(id=value) for value in affected],
             suggested_owner=str(item.get("suggested_owner") or ""),
             acceptance=as_list_of_str(item.get("acceptance")),
         )
@@ -772,7 +786,7 @@ def _reuse_review_ids(issues: list[ReviewIssueRef], context: ContextPack, checks
     for issue in issues:
         targets = {ref.id for ref in issue.affected_refs}
         reported_id = issue.issue_id
-        issue.issue_id = _issue_id(issue.category, issue.summary)
+        issue.issue_id = _issue_id(issue.category, issue.summary, targets)
         # Reviewers may assign a temporary ID to a still-open issue and name
         # that ID in their recheck of the original. Require both links.
         linked = {check.get("issue_id") for check in checks
@@ -792,7 +806,8 @@ def _reuse_review_ids(issues: list[ReviewIssueRef], context: ContextPack, checks
                 break
             if old.get('category') != issue.category:
                 continue
-            same = ' '.join(str(old.get('summary') or '').split()) == ' '.join(issue.summary.split())
+            same = (' '.join(str(old.get('summary') or '').split()) == ' '.join(issue.summary.split())
+                    and (not old_targets or bool(targets & old_targets)))
             similar = bool(targets & old_targets) and SequenceMatcher(
                 None, str(old.get('summary') or ''), issue.summary).ratio() >= .8
             explicitly_same = reported_id == old_id and bool(targets & old_targets)
@@ -827,6 +842,19 @@ def _issue_updates(issues, context, task, checks, semantic_reviewed, identity):
         if len(matches) == 1:
             check = matches[0]
             refs = check.get("block_ids")
+            if check.get("status") == "superseded" and refs == []:
+                # A duplicate may point only to its surviving issue ID. Reuse
+                # its anchor if both findings quote this exact current passage.
+                named = set(re.findall(r"[\w-]+", str(check.get("reason") or ""), re.ASCII))
+                quote = "".join(str(old.get("quoted_text") or "").split())
+                old_refs = {r.get("id") for r in old.get("affected_refs") or [] if isinstance(r, dict)}
+                replacements = [i for i in issues if i.issue_id in named and quote and "".join(i.quoted_text.split()) == quote
+                                and (i.category == old.get("category") or
+                                     ({i.category, old.get("category")} == {"science", "fidelity"}
+                                      and any(r.id in old_refs and r.id.startswith("clm-") for r in i.affected_refs)))]
+                if len(replacements) == 1:
+                    refs = [r.id for r in replacements[0].affected_refs if r.id in old_refs and r.id in blocks
+                            and quote in "".join(blocks[r.id].split())]
             if (isinstance(refs, list) and refs and all(isinstance(ref, str) and ref in blocks for ref in refs)
                     and isinstance(check.get("reason"), str) and check["reason"].strip()
                     and check.get("status") in ("resolved", "superseded", "unresolved")):
@@ -853,7 +881,7 @@ def _issue(*, category: str, severity: str, summary: str,
     from src.research.schemas import ObjectRef
 
     return ReviewIssueRef(
-        issue_id=_issue_id(category, summary),
+        issue_id=_issue_id(category, summary, affected),
         severity=severity,
         category=category,
         summary=summary,
@@ -864,33 +892,44 @@ def _issue(*, category: str, severity: str, summary: str,
     )
 
 
-def _issue_id(category: str, summary: str) -> str:
+def _issue_id(category: str, summary: str, anchors=()) -> str:
     """稳定问题 id: 同一类同一问题在多次审阅之间保持同一编号。
 
     计划要求"问题账本可关闭且有修复证据" —— 如果每次审阅都换新 id, 账本永远关不掉。
     """
     from src.research.schemas import stable_id
 
-    return stable_id("issue", category, " ".join(str(summary).split())[:200])
+    return stable_id("issue", category, " ".join(str(summary).split())[:200], *sorted(set(anchors)))
 
 
 def _merge_issues(primary: list[ReviewIssueRef],
                   extra: list[ReviewIssueRef]) -> list[ReviewIssueRef]:
-    by_id: dict[str, ReviewIssueRef] = {i.issue_id: i for i in primary}
-    for issue in extra:
-        existing = by_id.get(issue.issue_id)
+    """One finding may have several labels. A block alone cannot identify a defect."""
+    merged = []
+    by_key = {}
+    for issue in [*primary, *extra]:
+        anchors = tuple(sorted({r.id for r in issue.affected_refs}))
+        scope = (issue.category, anchors)
+        quote = "".join(issue.quoted_text.split())
+        summary = " ".join(issue.summary.split())
+        criteria = tuple(sorted({" ".join(s.split()) for s in issue.acceptance if s.strip()}))
+        keys = [(scope, "id", issue.issue_id)]
+        if anchors and summary:
+            keys.append((scope, "summary", summary, quote))
+        if anchors and quote and criteria:
+            keys.append((scope, "repair", quote, criteria))
+        existing = next((by_key[key] for key in keys if key in by_key), None)
         if existing is None:
-            by_id[issue.issue_id] = issue
-            continue
-        # 同一问题: 取更严重的严重度, 并保留双方给出的验收标准
-        if _SEVERITY_ORDER.get(issue.severity.value, 9) < \
-                _SEVERITY_ORDER.get(existing.severity.value, 9):
+            existing = issue.model_copy(deep=True)
+            merged.append(existing)
+        elif _SEVERITY_ORDER[issue.severity.value] < _SEVERITY_ORDER[existing.severity.value]:
             existing.severity = issue.severity
+        for key in keys:
+            by_key[key] = existing
         for item in issue.acceptance:
             if item not in existing.acceptance:
                 existing.acceptance.append(item)
-    return sorted(by_id.values(),
-                  key=lambda i: _SEVERITY_ORDER.get(i.severity.value, 9))
+    return sorted(merged, key=lambda i: _SEVERITY_ORDER[i.severity.value])
 
 
 def _tally(issues: list[ReviewIssueRef], field: str = "category") -> dict[str, int]:

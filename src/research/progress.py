@@ -96,6 +96,7 @@ def write_run_progress(store: Any, *, project_id: str, problem_id: str,
                          json.dumps(rows, ensure_ascii=False, indent=2))
         if kind == "manuscript" and rows:
             from src.agents.writing import render_markdown
+            from src.publication.manuscript_state import manuscript_identity
             from src.publication.schemas import Manuscript
 
             payload = rows[-1].get("manuscript") or rows[-1]
@@ -109,7 +110,8 @@ def write_run_progress(store: Any, *, project_id: str, problem_id: str,
                     for revision in store.list_versions(kind, latest["id"]):
                         data = revision["data"]
                         if (data.get("_scope") or {}).get("run_id") == run_id:
-                            history.append({**data, "_storage_revision": revision["version"]})
+                            history.append({**data, "_storage_revision": revision["version"],
+                                            "content_hash": manuscript_identity(data)["content_hash"]})
                 # Older runs can have separate storage IDs for the initial draft
                 # and its revisions. Keep their original identities for auditing.
                 history.sort(key=lambda row: (row.get("_submitted_at", ""),

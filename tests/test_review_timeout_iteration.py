@@ -180,6 +180,8 @@ def test_delivery_retains_previous_score_and_issues_but_marks_revision_unreviewe
     new = {'manuscript_id': 'm', 'sections': [{'blocks': [{'text':'修订稿'}]}]}
     results = {'old': AgentResult(task_id='old', agent='review', payload={
         'semantic_reviewed': True, 'score': 59, 'decision': 'major_revision', 'issues': [{'issue_id':'i'}],
+        'category_scores': {'science': 60}, 'model_attempts': 2, 'grounding_conflicts': ['旧稿引文待核实'],
+        'validation_details': {'score_adjustments': {'science': 60}},
         'reviewed_manuscript': manuscript_identity(old)}),
         'bad': AgentResult(task_id='bad', agent='review', payload={
         'semantic_reviewed': False, 'score': 0, 'recovery_required':'审阅超时后重试失败',
@@ -194,6 +196,8 @@ def test_delivery_retains_previous_score_and_issues_but_marks_revision_unreviewe
     TeamRun._apply_delivery_assessment(fake)
     review = fake.outcome.delivery['review']
     assert review['score'] == 59 and review['issues'] == [{'issue_id':'i'}]
+    for field in ('category_scores', 'model_attempts', 'grounding_conflicts', 'validation_details'):
+        assert review.get(field) == results['old'].payload[field]
     assert review['latest_attempt_incomplete'] and not review['current']
     assert review['recovery_required'] == '审阅超时后重试失败'
     assert not fake.outcome.delivery['accepted']

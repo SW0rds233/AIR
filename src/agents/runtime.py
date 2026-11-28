@@ -731,9 +731,15 @@ class AgentRuntime:
                 "rejected": [p.proposal_id for p in quarantined],
                 "kept": [p.proposal_id for p in result.proposed_changes],
             })
-        result.usage = result.usage
+        from src.utils.event_redaction import redact_event_value
+
+        diagnostics = redact_event_value({
+            "summary": result.summary, "failure_reason": result.failure_reason,
+            "unresolved": result.unresolved[:5], "unresolved_count": len(result.unresolved),
+        }, max_chars=500)
         self.emit("task_result", {"task_id": task.task_id, "agent": task.agent,
                                   "outcome": result.outcome.value,
+                                  **diagnostics,
                                   "problems": problems + list(result.payload.get("candidate_problems") or []),
                                   "usage": result.usage.to_dict()})
         return result

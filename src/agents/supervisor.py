@@ -824,6 +824,20 @@ class SupervisorAgent:
             return (need.owner == 'modeling' and need.hints.get('review_issue_ids')
                     and need.hints.get('repair_action') == 'research')
 
+        # The first evidence pass can precede all claim registrations. Give the
+        # bounded reassessment a turn before writing; an independent review
+        # already ready to run still takes precedence.
+        if closing and not evidence_exhausted and not any(
+            row["agent"] == "review" and row["task_id"] in closing for row in plan.tasks
+        ):
+            checks = [need for need in open_needs if need.owner == "evidence" and need.hints.get("assess_registered")]
+            checks = [task for task in needs_to_tasks(checks, brief=brief, plan_version=plan.version, limit=len(checks))
+                      if task.idempotency_key not in known_keys and task.hints.get("need_assignment") not in known_keys]
+            if checks:
+                return SupervisorDecision(decision=DecisionKind.dispatch,
+                    tasks=checks[:min(self.max_tasks_per_round, evidence_slots)],
+                    reason="成稿前按已登记的命题版本复核现有材料")
+
         if closing and not any((need.owner == 'evidence' and metadata_repair(need.hints)
                                and metadata_slots > 0) or need.hints.get('repair_claim')
                                or model_repair(need) for need in open_needs):

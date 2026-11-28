@@ -474,24 +474,23 @@ class TeamSession:
                 "运行已停止；已封存现有对象与稿件，未继续调用模型或编译 PDF")
         previous_review = self.team.outcome.delivery.get("review")
         if previous_review is not None:
+            # Older checkpoints kept the full judgement only under latest_attempt.
+            attempt = previous_review.get("latest_attempt") or {}
+            identity = previous_review.get("reviewed_manuscript") or {}
+            if (attempt.get("semantic_reviewed") and identity.get("content_hash")
+                    and identity == attempt.get("reviewed_manuscript")):
+                previous_review = {**attempt, **previous_review}
             delivery_result = apply_review_gate(delivery_result, previous_review)
-        _record_delivery_verdict(package, delivery_result)
-        if stopped:
-            manifest_path = package / "manifest.json"
-            manifest = json.loads(manifest_path.read_text("utf-8"))
-            manifest.update(run_status=self.team.outcome.status, partial=True,
-                            stop_reason=self.team.outcome.stop_reason, compile_status="not_attempted")
-            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         write_unresolved_report(package, snapshot, [
             *package_notes, *(delivery_result.get("blocking") or []),
             *(delivery_result.get("unresolved") or [])
         ])
-        self._publish_final_delivery(delivery_result, snapshot_id=package.name,
+        self._publish_final_delivery(delivery_result, package=package, snapshot_id=package.name,
                                      compilation_status=compile_status)
         return package
 
     def _publish_final_delivery(self, delivery: dict[str, Any], *, snapshot_id: str = "",
-                                compilation_status: str = "") -> None:
+                                compilation_status: str = "", package: Path | None = None) -> None:
         """Replace the preliminary export gate with the actual compilation verdict."""
         outcome = self.team.outcome
         previous = outcome.delivery
@@ -502,14 +501,22 @@ class TeamSession:
         outcome.unresolved_report["delivery"] = dict(delivery)
         outcome.unresolved_report["unresolved"] = list(dict.fromkeys([
             *notes, *delivery.get("blocking", []), *delivery.get("unresolved", [])]))
-        reason = outcome.stop_reason.split(" | 交付门槛未通过", 1)[0]
+        from src.research.delivery import delivery_stop_reason
         if not delivery.get("accepted"):
             if outcome.status not in {"stopped", "interrupted"}:
                 outcome.status = TaskStatus.partial.value
-            detail = "; ".join([*delivery.get("blocking", []), *delivery.get("unresolved", [])][:4])
-            reason += f" | 交付门槛未通过 (等级 {delivery.get('level', '')}): {detail}"
-        outcome.stop_reason = self.team.loop.stop_reason = reason.strip(" |")
+        outcome.stop_reason = self.team.loop.stop_reason = delivery_stop_reason(outcome.stop_reason, delivery)
         outcome.unresolved_report["stop_reason"] = outcome.stop_reason
+        if package is not None:
+            _record_delivery_verdict(package, delivery,
+                run_status=outcome.status, stop_reason=outcome.stop_reason,
+                review_revisions=self.team.loop.review_revisions,
+                termination={"status": outcome.status, "finished": self.team.loop.finished,
+                             "rounds": outcome.rounds,
+                             "max_review_revisions": self.team.max_review_revisions},
+                partial=outcome.status in {"partial", "stopped", "interrupted"},
+                compilation_status=compilation_status,
+                **({"compile_status": "not_attempted"} if outcome.status in {"stopped", "interrupted"} else {}))
         self.team.save_state(status=outcome.status)
         self.team.runtime.emit("delivery_assessed", {
             **delivery, "phase": "after_export", "snapshot_id": snapshot_id,
@@ -680,12 +687,15 @@ def _reference_rows(store, manuscript=None) -> list[dict[str, Any]]:
     return cited_reference_rows(manuscript, _evidence_rows(store))
 
 
-def _record_delivery_verdict(package: Path, delivery: dict) -> None:
+def _record_delivery_verdict(package: Path, delivery: dict, **run_fields: Any) -> None:
     """Persist the final verdict after compilation without dropping review state."""
     import json
 
     path = Path(package) / "manifest.json"
     manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest.update(run_fields)
+    if delivery.get("level"):
+        manifest["delivery_level"] = delivery["level"]
     manifest["delivery_accepted"] = bool(delivery.get("accepted"))
     manifest["delivery_blocking"] = list(delivery.get("blocking") or [])
     if "review" in delivery:

@@ -801,7 +801,7 @@ class TeamRun:
 
     def _apply_delivery_assessment(self) -> None:
         """用交付门槛复核"主控说可以交付"这件事 (失败即降级, 并给出理由)。"""
-        from src.research.delivery import apply_review_gate, assess_delivery
+        from src.research.delivery import apply_review_gate, assess_delivery, delivery_stop_reason
         from src.research.snapshot import manuscript_markdown
 
         store = self.task_store.store
@@ -841,6 +841,7 @@ class TeamRun:
                                  and self.loop.results[tid].payload.get("semantic_reviewed")), reviewed)
             judgement = dict(reviewed.payload or {}) if reviewed else {}
             review = {
+                **judgement,
                 "score": judgement.get("score"), "threshold": self.review_threshold,
                 "decision": judgement.get("decision", "unreviewed"),
                 "accepted": bool(judgement.get("accepted")),
@@ -858,9 +859,7 @@ class TeamRun:
         self.outcome.unresolved_report["delivery"] = dict(self.outcome.delivery)
         if not self.outcome.delivery["accepted"]:
             self.outcome.status = TaskStatus.partial.value
-            reason = (f"交付门槛未通过 (等级 {assessment.level}): "
-                      + "; ".join((self.outcome.delivery["blocking"] + assessment.unresolved)[:4]))
-            self.outcome.stop_reason = (self.outcome.stop_reason + " | " + reason).strip(" |")
+            self.outcome.stop_reason = delivery_stop_reason(self.outcome.stop_reason, self.outcome.delivery)
             self.outcome.unresolved_report.setdefault("unresolved", [])
             self.outcome.unresolved_report["unresolved"].extend(
                 [*self.outcome.delivery["blocking"], *assessment.unresolved])
@@ -1040,6 +1039,11 @@ class TeamRun:
             return self._cached_default_builder
         source_sets = self._source_set_rows
         def projected(kind):
+            from src.research.projection import TeamProjection
+            if kind == "evidence" and isinstance(self.projection, TeamProjection):
+                # Rank within the run before clipping: later claim assessments
+                # and a cited source can both arrive after the first 40 hits.
+                return object_rows(self.projection.store, kind, limit=None, run_id=self.run_id)
             return (self.projection.rows(kind) if hasattr(self.projection, "rows")
                     else object_rows(self.projection.store, kind,
                                      limit=None if kind == "review_issue" else 40, run_id=self.run_id))
@@ -1065,8 +1069,13 @@ class TeamRun:
                              for ref in issue.get('affected_refs') or [] if isinstance(ref,dict))
                 cited.update(gap.get('source_id') for manuscript in manuscripts[-1:]
                              for gap in manuscript.get('gaps') or [] if gap.get('kind')=='ineligible_reference')
-                rows = sorted(rows, key=lambda row: (row.get("source_id") or row.get("id")) not in cited)
-                limit = max(limit, sum((r.get("source_id") or r.get("id")) in cited for r in rows))
+                versions = {c["id"]: c.get("version", 1) for c in projected("claim") if c.get("id")}
+                def priority(row):
+                    cited_here = (row.get("source_id") or row.get("id")) in cited
+                    assessed = bool(row.get("claim_id") and row.get("claim_version", 1) == versions.get(row["claim_id"]))
+                    return (not cited_here, not assessed)
+                rows = sorted(rows, key=priority)
+                limit = max(64, sum((r.get("source_id") or r.get("id")) in cited for r in rows))
             return slim_object_rows(rows, limit=limit,
                 text_limit=6000 if kind in {"manuscript", "model", "claim", "evidence"} else 600)
         self._cached_default_builder = make_context_builder(

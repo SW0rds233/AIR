@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from src.agents.protocol import AgentTask, ContextPack, UsageRecord
 from src.agents.writing import WritingAgent
+from src.publication.manuscript_state import manuscript_identity
 from src.research.commit import ResearchCommitService
 from src.research.progress import write_run_progress
 from src.research.projection import object_rows
@@ -35,6 +36,8 @@ def test_fresh_draft_replay_and_revision_share_one_storage_object(tmp_path, monk
         history = json.loads((root / "manuscript-history.json").read_text("utf-8"))
         assert [(row["id"], row["version"]) for row in history] == [(object_id, 1), (object_id, 2)]
         assert all(row["sections"] for row in history)
+        assert [row.get("content_hash") for row in history] == [
+            manuscript_identity(revision)["content_hash"] for revision in history]
         assert len(json.loads((root / "manuscript.json").read_text("utf-8"))) == 1
     finally:
         store.close()
@@ -58,5 +61,6 @@ def test_legacy_split_identity_keeps_manuscript_version_and_scope(tmp_path, monk
         history = json.loads((root / "manuscript-history.json").read_text("utf-8"))
         assert [(row["id"], row["version"]) for row in history] == [
             ("manobj-legacy", 1), ("ms-legacy", 2), ("ms-legacy", 3)]
+        assert history[-1]["content_hash"] == manuscript_identity(result.payload["manuscript"])["content_hash"]
     finally:
         store.close()

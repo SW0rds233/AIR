@@ -74,6 +74,12 @@ class GateResult:
         return "\n".join(lines)
 
 
+def gate_excerpt(text: str, limit: int = 80) -> str:
+    """Keep status messages compact; the complete statement stays in the referenced object."""
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
 def theory_validity_gate(
     claims: list[Claim],
     obligations: list[ProofObligation],
@@ -116,7 +122,7 @@ def theory_validity_gate(
 
     for obligation in obligations:
         if obligation.required and obligation.status == ObligationStatus.open:
-            unresolved.append(f"未关闭义务 {obligation.id}: {obligation.statement}")
+            unresolved.append(f"未关闭义务 {obligation.id}: {gate_excerpt(obligation.statement)}")
         if (obligation.status == ObligationStatus.refuted
                 and not obligation.counterexample
                 and obligation.validation_status != ValidationStatus.counterexample_found):
@@ -141,10 +147,10 @@ def theory_validity_gate(
             # certificate never upgrades scientific status to supported.
             continue
         if claim.status in (ClaimStatus.proposed, ClaimStatus.in_progress):
-            unresolved.append(f"结论未定 {claim.id}: {claim.statement}")
+            unresolved.append(f"结论未定 {claim.id}: {gate_excerpt(claim.statement)}")
             continue
         if claim.status == ClaimStatus.blocked:
-            unresolved.append(f"结论受阻 {claim.id}: {claim.statement}")
+            unresolved.append(f"结论受阻 {claim.id}: {gate_excerpt(claim.statement)}")
             continue
         if claim.status not in (ClaimStatus.supported, ClaimStatus.refuted):
             continue

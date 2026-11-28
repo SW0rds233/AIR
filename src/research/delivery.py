@@ -10,13 +10,27 @@ from src.research.acceptance import (
     GateResult,
     classify_deliverable,
     delivery_gate,
+    gate_excerpt,
     publication_gate,
     theory_validity_gate,
 )
 from src.research.snapshot import snapshot_from_store
 
 __all__ = ["DeliveryAssessment", "MANUSCRIPT_MIN_CHARS", "assess_delivery",
-           "apply_review_gate"]
+           "apply_review_gate", "delivery_stop_reason"]
+
+
+def delivery_stop_reason(stop_reason: str, delivery: dict) -> str:
+    """Summarize distinct causes for the status card; full lists remain in the manifest."""
+    prefix = "" if stop_reason.startswith("交付门槛未通过") else stop_reason.split(" | 交付门槛未通过", 1)[0]
+    if delivery.get("accepted"):
+        return prefix
+    details = list(dict.fromkeys([*delivery.get("blocking", []), *delivery.get("unresolved", [])]))
+    summary = "；".join(gate_excerpt(message, 84) for message in details[:2])
+    if len(details) > 2:
+        summary += f"（另 {len(details) - 2} 项见交付清单）"
+    gate = f"交付门槛未通过 (等级 {delivery.get('level', '')})"
+    return " | ".join(part for part in (gate_excerpt(prefix, 140), gate + ("：" + summary if summary else "")) if part)
 
 
 def apply_review_gate(delivery: dict[str, Any], review: dict[str, Any]) -> dict[str, Any]:
@@ -93,8 +107,8 @@ def assess_delivery(store: Any, *, project_id: str, problem_id: str, run_id: str
     from src.research.snapshot import latest_manuscript_row
     from src.publication.schemas import Manuscript
     from src.publication.references import cited_reference_rows
+    row = latest_manuscript_row(store, problem_id=problem_id)
     if blocks is None:
-        row = latest_manuscript_row(store, problem_id=problem_id)
         payload = row.get("manuscript") if isinstance(row.get("manuscript"), dict) else row
         if payload:
             draft = Manuscript.model_validate({k: v for k, v in payload.items() if not k.startswith("_")})
@@ -104,10 +118,21 @@ def assess_delivery(store: Any, *, project_id: str, problem_id: str, run_id: str
         snapshot.claims, snapshot.obligations, snapshot.verifications,
         snapshot.dependency_edges, snapshot=snapshot)
     delivery = delivery_gate(manuscript_md, snapshot, theory_gate=theory, blocks=blocks)
+    from src.publication.manuscript_state import manuscript_identity
+    from src.publication.claims import anchored_science_findings
     publication = publication_gate(
         manuscript_md, snapshot, references=list(references),
         compile_status=compile_status, blocks=blocks, checklist=checklist,
         latex_source=latex_source)
+    if row and blocks:
+        identity = manuscript_identity(row)
+        current_issues = [issue for issue in store.list_latest("review_issue")
+                          if issue.get("reviewed_manuscript") == identity and issue.get("status") == "open"]
+        for block_id, issue in anchored_science_findings(blocks, current_issues):
+            reason = f"正文块 {block_id} 的科学推论仍有待修正的原句（{issue.get('issue_id') or issue.get('id', '')}）"
+            if reason not in publication.reasons:
+                publication.reasons.append(reason)
+                publication.passed = False
     level = classify_deliverable(theory, delivery, publication)
     assessment = DeliveryAssessment(
         level=level,

@@ -81,7 +81,11 @@ def describe_node(node_name: str, node_state: dict) -> str:
         if event == "task_started":
             return f"[团队] {agent} 开始: {state.get('objective', '')}"[:180]
         if event == "task_result":
-            return f"[团队] {agent} 结果: {state.get('outcome', '')}"[:180]
+            outcome = state.get("outcome", "")
+            summary = state.get("summary", "")
+            if outcome in {"partial", "blocked", "failed", "cancelled"}:
+                summary = state.get("failure_reason") or next(iter(state.get("unresolved") or []), "") or summary
+            return (f"[团队] {agent} 结果: {outcome}" + (f" · {summary}" if summary else ""))[:180]
         if event == "llm_started":
             return f"[{agent or '模型'} · 模型] 正在生成本步骤的回应…"
         if event == "task_heartbeat":

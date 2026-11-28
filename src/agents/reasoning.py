@@ -136,7 +136,8 @@ class ReasoningAgent(AgentBase):
   所有约束必须显式编码，variables 支持 Real/Int，等号写 ==，使用 and/or/not 表示逻辑。
   formal_spec 是完整的条件命题；使用时清空 lhs/rhs/expr/wrt，不保留另一组目标编码。
   study.design=theory 的条件代数命题使用 descriptive；mechanism_links 与 evidence_requirements
-  都是字符串数组，不返回对象。model_ref 可引用所依赖模型的 id/version；背景模型不必凑出命题。
+  都是字符串数组，不返回对象。model_ref 使用已登记模型的 {"id":"模型ID","version":实际正整数版本}；
+  核对上下文所列版本，背景模型不必凑出命题。
   此格式的证明仅在所列前提下成立，不能证明前提符合现实；不能把目标本身放进前提。
   编码修复必须修改当前命题 id，不能用新 id 回避失败；不得再次展开一整套子引理。
 
@@ -325,6 +326,10 @@ class ReasoningAgent(AgentBase):
             if rejected_candidate and statement != rejected_candidate.get("statement"):
                 limitations.append("编码修复改变了原命题陈述，保留原问题待核查")
                 continue
+            if rejected_candidate:
+                for field in ("model_ref", "variable_domains", "premises"):
+                    if rejected_candidate.get(field) and not claim.get(field):
+                        claim[field] = rejected_candidate[field]
             conflicts = conflicting_code_parameters(research_text, statement)
             if conflicts:
                 fidelity_issues.extend(conflicts)
@@ -351,8 +356,8 @@ class ReasoningAgent(AgentBase):
                     claim["claim_type"] = "descriptive"
                     claim["classification_basis"] = "数学题面或显式理论编码，且无实证设计/样本；语义纠偏不构成核验"
                 claim["study"] = {**dict(claim.get("study") or {}), "design": "theory"}
-            requested_id = str(claim.get("id") or "")
-            if (repair_encoding or repair_claim) and requested_id != target_id:
+            requested_id = str(claim.get("id") or (target_id if rejected_candidate else ""))
+            if (repair_encoding or repair_claim or (rejected_candidate and target_id)) and requested_id != target_id:
                 limitations.append("编码修复只接受当前命题的修订；未登记旁支新命题: " + statement[:120])
                 continue
             existing = known.get(requested_id) or next((row for row in known.values()
@@ -384,6 +389,9 @@ class ReasoningAgent(AgentBase):
                                   if isinstance(value, dict) else value for value in claim[key]]
             from src.research.schemas import Claim
             try:
+                if claim.get("model_ref") is not None:
+                    claim["model_ref"] = _registered_model_ref(
+                        claim["model_ref"], context.objects.get("model") or [], (existing or {}).get("model_ref"))
                 # Validate before creating downstream needs. A rejected proposal
                 # must never produce a verification task for a nonexistent claim.
                 Claim.model_validate({k: v for k, v in claim.items() if k not in {
@@ -397,17 +405,33 @@ class ReasoningAgent(AgentBase):
                         kind=NeedKind.derivation, owner="reasoning",
                         statement="校正命题编码：" + statement,
                         why=problem,
+                        blocked_refs=[ObjectRef(id=object_id, version=version)] if existing else [],
                         acceptance=["依据原陈述选择等价的单一目标，保留前提和量词后重新登记"],
-                        hints={"rejected_candidate": {key: claim[key] for key in (
-                            "statement", "claim_type", "statement_role", "study", "premises", "variables",
+                        hints={**{key: task.hints[key] for key in ("repair_claim", "review_cycle", "review_issue_ids",
+                                  "focus_blocks", "review_diagnostic") if key in task.hints},
+                            **({"claim_id": object_id} if existing else {}),
+                            "rejected_candidate": {key: claim[key] for key in (
+                            "id", "statement", "model_ref", "claim_type", "statement_role", "study", "premises", "variables",
                             "variable_domains", "formal_spec", "lhs", "relation", "rhs", "expr", "wrt",
-                            "direction") if key in claim}, "trigger_id": "claim-schema:" + object_id}))
+                            "direction") if key in claim}, "trigger_id": f"claim-schema:{object_id}:v{version}"}))
                 continue
             changes.append(build_proposal("claim", object_id=object_id,
                 payload={**claim, "strategy": strategy, "subquestion": task.subquestion,
                          "informal": bool(claim.get("informal", True))},
                 rationale=clip("; ".join(as_list_of_str(claim.get("reasoning"))[:3]), 400),
                 input_versions={object_id: version} if existing else {}))
+            if (claim.get("evidence_requirements") or claim.get("mechanism_links") or has_empirical_context(claim)) and any(
+                row.get("excerpt") and (row.get("locator") or row.get("location"))
+                for row in context.objects.get("evidence") or []
+            ):
+                current_version = int(claim.get("version") or 1)
+                needs.append(ResearchNeed(kind=NeedKind.empirical_support, owner="evidence",
+                    statement=f"针对 {object_id} v{current_version} 复核已登记来源摘录",
+                    why="先行检索时尚无此版本的命题，背景材料需按具体论断和参数条件重新判定",
+                    blocked_refs=[ObjectRef(id=object_id, version=current_version)],
+                    acceptance=["逐项绑定可定位的原文，区分整条命题、机制环节和参数依据"],
+                    hints={"claim_id": object_id, "claim_version": current_version, "assess_registered": True,
+                           "trigger_id": f"assess-registered:{object_id}:v{current_version}"}))
             if (depth < 2 or object_id == target_id) and (claim.get("formal_spec") or claim.get("study", {}).get("design") == "theory" or (
                     claim.get('claim_type') == 'definitional' and claim.get('lhs') and claim.get('rhs'))):
                 needs.append(ResearchNeed(kind=NeedKind.derivation,
@@ -462,7 +486,8 @@ class ReasoningAgent(AgentBase):
             changed = any(change.kind == 'claim' for change in changes)
             if not changed:
                 return self.blocked(task, '定向命题修订未产生有效改动，不能用旧核验记录宣称已修复',
-                    usage=usage, payload=payload_out)
+                    needs=[n for n in needs if n.hints.get("rejected_candidate")],
+                    unresolved=registration_errors, usage=usage, payload=payload_out)
             needs.append(ResearchNeed(kind=NeedKind.manuscript_revision, owner='writing',
                 statement='将定向修订命题及新核验状态同步到受影响正文，再独立复审',
                 why='旧稿的变量解释和证书可能失效；未核验的新版本须明确标为候选',
@@ -571,7 +596,7 @@ class ReasoningAgent(AgentBase):
         related_support = any(
             str(row.get("relation") or row.get("support") or "")
             in {"supports", "partially_supports"}
-            and str(row.get("claim_id") or "") in {"", claim.id}
+            and row.get("claim_id") == claim.id and row.get("claim_version", 1) == claim.version
             and row.get("support_scope", "claim") == "claim"
             for row in context.objects.get("evidence") or [] if isinstance(row, dict)
         )
@@ -1092,6 +1117,23 @@ def _attempt_from_plan(plan_outcome) -> Any:
         return ProofAttempt(**raw)
     except Exception:  # noqa: BLE001 - 载荷不全时给空尝试, 由内核补"无形式化片段"步骤
         return ProofAttempt()
+
+
+def _registered_model_ref(value, models, inherited):
+    """Normalize the displayed id@vN only if that exact dependency is known."""
+    from src.research.schemas import ObjectRef
+
+    if isinstance(value, str):
+        match = re.fullmatch(r"([^@\s]+)@v(\d+)", value)
+        if not match:
+            raise ValueError("model_ref 需要已登记的模型 id 和正整数版本")
+        value = {"id": match[1], "version": int(match[2])}
+    if not isinstance(value, dict) or type(value.get("version")) is not int or value["version"] < 1:
+        raise ValueError("model_ref 必须给出已登记模型的正整数版本")
+    ref = ObjectRef.model_validate(value)
+    if value != inherited and not any(row.get("id") == ref.id and row.get("version", 1) == ref.version for row in models):
+        raise ValueError(f"model_ref {ref} 不在本次可核对的模型版本中")
+    return ref.model_dump()
 
 
 def _repeats_formal_conclusion(claim: dict) -> bool:

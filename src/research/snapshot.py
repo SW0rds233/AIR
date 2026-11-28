@@ -76,6 +76,8 @@ def snapshot_from_store(store: Any, *, project_id: str, problem_id: str, run_id:
         ("novelty", snapshot.novelty, _novelty_of),
         ("assumption", snapshot.assumptions, _assumption_of),
         ("definition", snapshot.definitions, _definition_of),
+        ("gap", snapshot.gaps, _gap_of),
+        ("route", snapshot.routes, _route_of),
         ("validation_plan", snapshot.experiment_specs, _validation_plan_of),
     )
     skipped: list[dict[str, Any]] = []
@@ -292,6 +294,28 @@ def _definition_of(row: dict[str, Any]):
     from src.research.schemas import Definition
 
     return Definition.model_validate(_row_payload(row))
+
+
+def _gap_of(row: dict[str, Any]):
+    from src.research.schemas import ResearchGap
+
+    data = _row_payload(row)
+    # Earlier reasoning tasks registered counterexample candidates against the
+    # research question, without identifying a particular claim or version.
+    if "gap_type" not in data and data.get("type") == "unresolved_claim":
+        data["gap_type"] = data["type"]
+        problem_id = data.get("problem_id") or (row.get("_scope") or {}).get("problem_id")
+        if problem_id:
+            data.setdefault("target_ref", {"id": problem_id})
+        if data.get("witness"):
+            data["statement"] = f"{data.get('statement', '')}（待核验反例：{data['witness']}）"
+    return ResearchGap.model_validate(data)
+
+
+def _route_of(row: dict[str, Any]):
+    from src.research.schemas import ResearchRoute
+
+    return ResearchRoute.model_validate(_row_payload(row))
 
 
 def _validation_plan_of(row: dict[str, Any]) -> dict[str, Any]:

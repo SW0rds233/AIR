@@ -1009,7 +1009,8 @@ class Claim(BaseModel):
                 if name not in spec.variables or low not in {
                         "real", "reals", "r", "int", "integer", "z", "positive", "pos",
                         "nonnegative", "nonneg", "r>=0", "nonzero", "non_zero"}:
-                    raise ValueError("formal_spec 的域须明确编码为 Real/Int 及前提约束")
+                    raise ValueError(f"formal_spec 的域须明确编码为 Real/Int 及前提约束，"
+                                     f"请核对变量 {name!r} 的域 {domain[:100]!r}")
                 if low in {"int", "integer", "z"} and spec.variables[name] != "Int":
                     raise ValueError("整数域声明与 formal_spec 不一致")
                 if low in {"real", "reals", "r"} and spec.variables[name] != "Real":
