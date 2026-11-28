@@ -1,0 +1,2 @@
+# 钩子由 POSIX shell 执行，检出时必须保持 LF（core.autocrlf=true 会把文本文件转成 CRLF）
+.githooks/* text eol=lf
